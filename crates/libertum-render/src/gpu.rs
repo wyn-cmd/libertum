@@ -122,6 +122,35 @@ impl HeadlessGpu {
         probe(&self.adapter)
     }
 
+    /// Whether this adapter is a software rasteriser: WARP on Windows, llvmpipe on Linux,
+    /// SwiftShader and the like. vello crashes inside some of them rather than drawing the
+    /// wrong pixels, so the GPU tests skip them instead of taking the process down.
+    pub fn is_software_adapter(&self) -> bool {
+        let name = self.adapter_info.name.to_ascii_lowercase();
+        matches!(self.adapter_info.device_type, wgpu::DeviceType::Cpu)
+            || [
+                "warp",
+                "llvmpipe",
+                "swiftshader",
+                "basic render driver",
+                "software",
+            ]
+            .iter()
+            .any(|needle| name.contains(needle))
+    }
+
+    /// An adapter for tests: `None` when there is none, or when it is a software rasteriser.
+    pub fn for_tests() -> Option<Self> {
+        Self::new().ok().filter(|gpu| !gpu.is_software_adapter())
+    }
+
+    /// [`for_tests`](Self::for_tests) with the limits `iced_wgpu` requests.
+    pub fn for_tests_iced_like() -> Option<Self> {
+        Self::iced_like()
+            .ok()
+            .filter(|gpu| !gpu.is_software_adapter())
+    }
+
     fn open(required_limits: wgpu::Limits) -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
@@ -946,7 +975,7 @@ mod tests {
 
     #[test]
     fn panics_inside_scopes_become_errors() {
-        let Ok(gpu) = HeadlessGpu::new() else {
+        let Some(gpu) = HeadlessGpu::for_tests() else {
             return;
         };
         let r = with_error_scopes(&gpu.device, || -> u32 { panic!("boom") });
@@ -956,7 +985,7 @@ mod tests {
 
     #[test]
     fn gate_rejects_before_touching_the_device() {
-        let Ok(gpu) = HeadlessGpu::new() else {
+        let Some(gpu) = HeadlessGpu::for_tests() else {
             return;
         };
         let mut caps = gpu.caps();
@@ -975,7 +1004,7 @@ mod tests {
 
     #[test]
     fn background_init_sends_exactly_one_result() {
-        let Ok(gpu) = HeadlessGpu::new() else {
+        let Some(gpu) = HeadlessGpu::for_tests() else {
             return;
         };
         let rx = VelloPageRenderer::init_in_background(
@@ -999,7 +1028,7 @@ mod tests {
 
     #[test]
     fn backend_is_recovered_from_a_bare_device() {
-        let Ok(gpu) = HeadlessGpu::new() else {
+        let Some(gpu) = HeadlessGpu::for_tests() else {
             return;
         };
         assert_eq!(

@@ -22,8 +22,8 @@ fn gpu_matches_cpu_within_tolerance() {
     if state.font_report().family_count == 0 {
         return;
     }
-    let Ok(gpu) = HeadlessGpu::new() else {
-        eprintln!("no GPU adapter; skipping");
+    let Some(gpu) = HeadlessGpu::for_tests() else {
+        eprintln!("no hardware GPU adapter; skipping");
         return;
     };
     let Ok(mut vello) = VelloPageRenderer::new(gpu.device.clone(), gpu.queue.clone()) else {
@@ -82,7 +82,7 @@ fn backend_trait_works_for_both() {
 
 #[test]
 fn vello_runs_on_iced_style_device() {
-    let Ok(gpu) = HeadlessGpu::iced_like() else {
+    let Some(gpu) = HeadlessGpu::for_tests_iced_like() else {
         return;
     };
     let mut state = LayoutState::new(
