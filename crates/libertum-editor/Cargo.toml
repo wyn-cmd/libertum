@@ -1,0 +1,20 @@
+[package]
+name = "libertum-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libertum-model = { workspace = true }
+unicode-segmentation = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+# Deterministic document generator (`spike::generate_model_document`) for the benches only.
+libertum-layout = { workspace = true }
+
+[[bench]]
+name = "editing"
+harness = false

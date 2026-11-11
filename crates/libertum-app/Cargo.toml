@@ -1,0 +1,35 @@
+[package]
+name = "libertum-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "libertum"
+path = "src/main.rs"
+
+[features]
+default = []
+# The frame-rate counter. Off in every official build; see src/fps.rs.
+fps = []
+
+[dependencies]
+iced = { workspace = true, features = ["advanced", "image-without-codecs", "svg"] }
+libertum-layout = { workspace = true }
+libertum-model = { workspace = true }
+libertum-editor = { workspace = true }
+libertum-render = { workspace = true }
+libertum-docx = { workspace = true }
+libertum-odt = { workspace = true }
+libertum-markdown = { workspace = true }
+libertum-rtf = { workspace = true }
+libertum-native = { workspace = true }
+libertum-formats-common = { workspace = true }
+rfd = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }

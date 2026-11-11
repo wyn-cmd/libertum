@@ -1,0 +1,12 @@
+# Build output
+/target
+
+# Leftovers from editors and backups
+**/*.rs.bk
+*.swp
+.DS_Store
+Thumbs.db
+
+# Generated bench corpus (see PLAN.md §2; regenerate with tools/)
+/bench/corpus/*.docx
+/bench/corpus/*.odt

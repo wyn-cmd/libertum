@@ -1,0 +1,12 @@
+[package]
+name = "libertum-formats-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libertum-model = { workspace = true }
+image = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }

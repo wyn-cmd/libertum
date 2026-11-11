@@ -1,0 +1,25 @@
+[package]
+name = "libertum-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libertum-layout = { workspace = true }
+libertum-model = { workspace = true }
+image = { workspace = true }
+swash = { workspace = true }
+vello = { workspace = true, optional = true }
+pollster = { version = "0.4", optional = true }
+tiny-skia = { workspace = true }
+
+[dev-dependencies]
+libertum-formats-common = { workspace = true }
+memory-stats = "1.2"
+
+[features]
+default = []
+# GPU page renderer (vello, offscreen wgpu texture). Off by default (PLAN §4.5).
+gpu = ["dep:vello", "dep:pollster"]
+

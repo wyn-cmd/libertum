@@ -1,0 +1,19 @@
+# Normalise line endings in the repository; checkouts use the platform's endings.
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.svg   text eol=lf
+*.rtf   -text
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.docx  binary
+*.odt   binary
+*.lbtd  binary
+
+# Fixtures are compared byte for byte (a CRLF Markdown file must stay CRLF).
+tests/fixtures/** -text

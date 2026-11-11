@@ -1,0 +1,16 @@
+[package]
+name = "libertum-docx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libertum-model = { workspace = true }
+libertum-formats-common = { workspace = true }
+zip = { workspace = true, default-features = false, features = ["deflate"] }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true, default-features = false, features = ["deflate"] }
