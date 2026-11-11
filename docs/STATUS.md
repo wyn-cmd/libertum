@@ -2,7 +2,7 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-11 (opt-in frame-rate counter; image context menu follows the picture under the pointer; repository presentation cleaned up. Earlier the same day: Phase 8 done: find & replace, autosave and recovery, recent files, the Settings window, drag and drop, context menus, the accessibility audit; and the native `.lbtd` format implemented on top of serde on the model)
+_Last updated: 2026-11-11 (repository published with CI running, and the locale-dependent tests it caught; opt-in frame-rate counter; image context menu follows the picture under the pointer; repository presentation cleaned up. Earlier the same day: Phase 8 done: find & replace, autosave and recovery, recent files, the Settings window, drag and drop, context menus, the accessibility audit; and the native `.lbtd` format implemented on top of serde on the model)
 
 ## Where we are
 
@@ -141,4 +141,4 @@ Every unit so far ended with: `cargo fmt --all`, clippy with `-D warnings` with 
 - [ ] Known approximations (logged in decisions.md): "At least" and "Between" line spacing use an estimated 1.2 em single line; hyphenated paragraphs reserve 0.35 em at each line end for the hyphen, so their justified edge sits that much short of the margin; hyphenation is English only (the model has no language attribute yet); font names in the font popup are drawn in the UI font, not their own.
 - [ ] Colours outside the eight swatches show as "Mixed"; there is no colour picker.
 - [ ] vello is not wired into the canvas; GPU crash flag (PLAN §4.5); Settings UI; Text Box, Comment and Page Thumbnails are disabled placeholders.
-- [ ] CI has never run (no GitHub remote yet).
+- [x] **CI runs on GitHub Actions** (private repository `wyn-cmd/libertum`): fmt, clippy with `-D warnings`, the workspace tests, the GPU smoke test and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. The first run caught four page-setup app tests that assumed a metric locale (US runners build Letter documents and step margins in inches); the app test helpers now pin centimetres, checked by running the suite with `LIBERTUM_UNITS=in`.
