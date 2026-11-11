@@ -1,5 +1,7 @@
 # Libertum
 
+[![CI](https://github.com/wyn-cmd/libertum/actions/workflows/ci.yml/badge.svg)](https://github.com/wyn-cmd/libertum/actions/workflows/ci.yml)
+
 A cross-platform desktop word processor for long documents — novels, mostly — built in Rust.
 It edits ODT and DOCX natively, reads and writes RTF and Markdown, and has its own lossless
 format for documents that need everything the interchange formats cannot hold.

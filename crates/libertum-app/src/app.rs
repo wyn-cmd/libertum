@@ -4211,13 +4211,23 @@ mod tests {
     use super::*;
     use iced::keyboard;
 
+    /// Test settings: centimetres, so paper, margins and stepper grids do not depend on the
+    /// machine's locale (a US-locale CI runner would otherwise build Letter documents and
+    /// nudge margins in inches).
+    fn test_settings() -> Settings {
+        Settings {
+            units: UnitsPreference::Centimetres,
+            ..Settings::default()
+        }
+    }
+
     fn app() -> App {
-        App::new(Settings::default(), None)
+        App::new(test_settings(), None)
     }
 
     /// An app on the home screen (no document open).
     fn home() -> App {
-        App::with_doc(Settings::default(), None, None)
+        App::with_doc(test_settings(), None, None)
     }
 
     impl App {
