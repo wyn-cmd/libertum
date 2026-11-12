@@ -31,13 +31,21 @@ cargo run --release -p libertum-render --example spike_a              # CPU layo
 cargo run --release -p libertum-render --features gpu --example spike_d   # GPU vs CPU comparison
 cargo bench -p libertum-editor --bench editing        # keystroke and undo benches (criterion)
 cargo bench -p libertum-layout --bench pagination     # full and incremental pagination benches
+cargo run --release -p libertum-editor --example find_bench           # Find on a 1,000-page document
+powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1   # dist\Libertum-Setup-<version>.exe
 ```
+
+The macOS compile check covers the whole workspace; to lint the platform-specific code for macOS with warnings as errors (as CI does), leave out the benches, whose C dependencies need a macOS compiler: `cargo clippy -p libertum-app -p libertum-installer -p libertum-render --bins --lib --tests --examples --all-features --target aarch64-apple-darwin -- -D warnings`.
 
 `cargo bench ... -- --quick` only works with `--bench <name>` (the library test harness rejects the flag).
 
 **Definition of done for any task:** fmt is clean, clippy passes with `-D warnings` (with and without `--all-features`), all tests pass, the macOS compile check passes if you touched platform or GPU code, and the performance budgets still hold if you touched the canvas, layout or rendering. Report anything you could not verify. Do not claim it works.
 
-CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux.
+CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. Each platform's build is uploaded as a run artifact (`libertum-<target>`), and the Windows job also packs `Libertum-Setup.exe`. `RUSTFLAGS=-D warnings` is set for every job, so code used only on one platform must not leave dead code on the others.
+
+## Releases
+
+A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`. Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
 
 ## Workspace layout
 
@@ -47,7 +55,11 @@ CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on W
 | `libertum-layout` | parley shaping and line breaking (`engine.rs`: indents, line spacing, super/subscript, ligatures, hyphenation), incremental pagination with keep and widow rules, decorations (page numbers, TOC leaders, list markers, hyphens) (`paginate.rs`). `spike.rs` holds `ParagraphSnapshot` (model to layout) and the demo-document generator. | Working |
 | `libertum-render` | Page rendering. CPU: tiny-skia + swash (`renderer.rs`, `glyphs.rs`, `page_cache.rs`). GPU: vello behind the `gpu` feature (`gpu.rs`, `gpu/caps.rs`). `backend.rs` holds the `PageBackend` trait. | Working (vello not wired into the canvas) |
 | `libertum-editor` | Cursor, selection, movement, typing, clipboard, character and paragraph formatting, styles, lists, TOC sync, sections. UI-agnostic. | Working |
-| `libertum-docx`, `libertum-odt`, `libertum-markdown` | Format import/export with lossless round-trip | DOCX works end to end (import/export of paragraphs, lists, sections and tables; preserved package parts; app Open/Save; round-trip fixtures); ODT and Markdown still to come |
+| `libertum-docx`, `libertum-odt`, `libertum-rtf` | DOCX, ODT and RTF import/export: paragraphs, runs and styles, lists, sections and page setup, headers and footers, tables (spans, merges, styles), footnotes and endnotes, bookmarks and cross-references, inline images; unknown parts or groups are preserved | Working (round-trip fixtures; Word opens the exports with no repair prompt) |
+| `libertum-markdown` | GFM Markdown with byte-identical re-save of unedited blocks, the file's own conventions for edited ones, local images, and `loss_report` (what a Markdown save would drop) | Working |
+| `libertum-native` | The `.lbtd` format: the model serialised with serde in a deterministic ZIP (see `docs/format-libertum-native.md`); also the crash-recovery snapshot | Working |
+| `libertum-formats-common` | Shared XML helpers, units, colours, and image bytes (`media`: PNG/JPEG kept, GIF/BMP converted) | Working |
+| `libertum-installer` | The single-file Windows installer: carries `libertum.exe`, `install.ps1` and the README appended to its own `.exe`; `pack` builds it (`packaging/windows/build-installer.ps1`) | Working (unsigned) |
 | `libertum-app` | Iced 0.14 app: `app.rs` (messages, update, formatting commands), `toolbar.rs`, `inspector/`, `home.rs`, `templates.rs`, `widgets/` (stepper, segmented, controls), `canvas.rs` (custom page widget, caret, IME), `docview.rs` (model + editor + layout + strip render cache), `shortcuts.rs` (the single shortcut map), `theme.rs` (all colour tokens), `strings.rs` (all UI text), `state.rs`, `settings.rs`, `perf.rs` | Working; some sidebar controls not bound yet (see STATUS) |
 
 **Boundaries (enforced):** the format crates and `libertum-model` never depend on UI crates. `libertum-layout` and `libertum-render` never depend on `libertum-app`.
@@ -105,6 +117,8 @@ CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on W
 | `LIBERTUM_INSPECTOR=format-style\|format-layout\|format-more\|document\|section` | Open a given inspector pane at start |
 | `LIBERTUM_BOOKLET=1` | Start in the booklet (two-page spread) view |
 | `LIBERTUM_THUMBNAILS=1` | Start with the page thumbnails column shown |
+
+A document path given as the first command-line argument (what Windows passes when a file is double-clicked or opened with "Open with") opens straight into the editor; `LIBERTUM_OPEN` does the same for scripts.
 | `LIBERTUM_MENU=view\|zoom` | Open a toolbar menu at start (for screenshots) |
 | `LIBERTUM_ZOOM=<percent>\|fit` | Initial zoom |
 | `LIBERTUM_UNITS=cm\|in` | Measurement units |

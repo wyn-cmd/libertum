@@ -429,6 +429,8 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 
 ### Phase 9 — CI, packaging, release
 
+> Partly done 2026-11-12: the CI matrix (Windows, macOS Apple Silicon and Intel, Linux) runs fmt, clippy, the tests and a release build, uploads each platform's build, and packs a Windows installer. The installer is a small dependency-free program of our own (`crates/libertum-installer`) that carries the program and runs `packaging/windows/install.ps1` (per-user install, Start menu and desktop shortcuts, "Open with" registration for `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md`, an uninstaller); `cargo-dist` and an MSI were not needed for that. Release 0.1.0 is on GitHub. Still open: the `.dmg`/`.app` bundle, AppImage and `.deb`, Linux and macOS file associations, the performance regression job, and the headless LibreOffice conversion job.
+
 - Use a GitHub Actions matrix (windows-latest, macos-latest for both arm64 and x86_64 or a universal binary, ubuntu-latest).
 - Packaging: evaluate `cargo-dist` and `cargo-packager`. Targets are an MSI or NSIS installer on Windows, a `.dmg` with a `.app` bundle on macOS, and an AppImage plus `.deb` on Linux.
 - Set up file associations for `.docx`, `.odt`, `.rtf` and `.md` (opt-in on Linux).
@@ -436,6 +438,8 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 - Add a performance regression job that runs the criterion benches against the previous release.
 
 ### Phase 10 — Document stitching (post-v1, priority 1)
+
+> Done 2026-11-12 (`crates/libertum-app/src/stitch.rs`; home screen Stitch… or View > Stitch Documents…): order, section per source, styles matched by name and remapped, list groups renumbered, one table of contents rebuilt from every chapter, clashing bookmarks renamed with their references, built in one pass (three 150-page files in under 50 ms). Not done: style matching by formatting, the "number continuously" choice, the output-format choice in the dialog (the stitched book is a new unsaved document, saved in any format), and the summary of changes.
 
 - **Stitch documents:** pick several files in one dialog, reorder them in the app (Up/Down/Remove), choose the output format, and combine them into one book. Sources may be DOCX, ODT, RTF or Markdown; each is imported into a temporary `Document` and appended.
 - **Merge rules:** the first document supplies document defaults and style-sheet order; later documents' styles are matched by name, then by formatting, else imported as new styles. List groups are renumbered so numbering does not continue across sources unless the user asks for it. Each source after the first starts a new section (with the first document's header/footer links), and its first heading can mark a new chapter.

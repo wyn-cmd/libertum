@@ -29,13 +29,13 @@ Working today:
   window.
 
 `docs/STATUS.md` has the current detail and the open items. `PLAN.md` has the architecture,
-the performance budgets and the remaining phases (CI and packaging, then the writing tools:
-document stitching, AO3 chapter export, proofreading).
+the performance budgets and the phases: document stitching is done, and the writing tools still
+to come are AO3 chapter export and proofreading.
 
 ## Install on Windows
 
-Download `Libertum-Setup.exe` (from a CI run's artifacts, `libertum-x86_64-pc-windows-msvc`,
-or build it as below) and double-click it. It installs for the current user, with no
+Download `Libertum-Setup.exe` from the repository's **Releases** page (or a CI run's
+`libertum-x86_64-pc-windows-msvc` artifact, or build it as below) and double-click it. It installs for the current user, with no
 administrator rights: the program goes in `%LOCALAPPDATA%\Libertum`, with Start menu and
 desktop shortcuts, and Libertum is offered in "Open with" (and Settings > Apps > Default apps)
 for `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` files. Running it again updates an installed
@@ -43,7 +43,11 @@ copy; close Libertum first. An uninstaller, `Libertum-Uninstall.ps1`, is written
 program.
 
 The installer and the program are not code-signed, so Windows SmartScreen may warn the first
-time: choose "More info", then "Run anyway".
+time: choose "More info", then "Run anyway". Double-clicking a document that Libertum is set to
+open starts it straight in that document.
+
+On macOS and Linux the release has the `libertum` program itself, unsigned and without an
+installer: run it from a terminal (on macOS, the first time, right-click it and choose Open).
 
 To build the installer: `powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1`
 (it writes `dist\Libertum-Setup-<version>.exe`). The same install can be done by hand by running

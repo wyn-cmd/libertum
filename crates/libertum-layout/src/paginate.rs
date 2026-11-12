@@ -2090,6 +2090,83 @@ impl LayoutState {
         })
     }
 
+    /// The whole line box holding byte `byte_offset` of paragraph `para`, in page
+    /// coordinates: as tall as the line with its leading, unlike [`caret_rect`](Self::caret_rect),
+    /// which is only as tall as the text. Moving up or down steps by this box, so the step
+    /// always reaches the neighbouring line whatever the font's proportions.
+    pub fn line_rect(&self, para: usize, byte_offset: usize) -> Option<CaretRect> {
+        let pl = self.paragraph_layout(para)?;
+        let text_len = self.paragraphs.get(para)?.text.len();
+        let cursor =
+            Cursor::from_byte_index(&pl.layout, byte_offset.min(text_len), Affinity::Downstream);
+        let g = cursor.geometry(&pl.layout, 0.0);
+        let y_mid = (g.y0 + g.y1) as f32 * 0.5;
+        let line = pl.lines.iter().rposition(|l| l.top <= y_mid).unwrap_or(0);
+        let (page, s, top) = self.page_and_slice(para, line)?;
+        let geo = self.page_geometry(page);
+        let line_box = pl.lines.get(line)?;
+        Some(CaretRect {
+            page,
+            x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
+            y: geo.margins.top + s.y + (line_box.top - top),
+            width: 0.0,
+            height: line_box.height,
+        })
+    }
+
+    /// The middle (page points) of the line on page `page` just below (`direction` > 0) or
+    /// just above the line spanning `line_top..line_bottom`, preferring lines whose column
+    /// holds `x` (so moving down in a table cell stays in its column). `None` when there is
+    /// no such line on the page: the caller moves on to the next or previous page.
+    pub fn neighbour_line_y(
+        &self,
+        page: usize,
+        x: f32,
+        line_top: f32,
+        line_bottom: f32,
+        direction: i32,
+    ) -> Option<f32> {
+        let pg = self.pages.get(page)?;
+        let geo = pg.geometry;
+        // (holds x, distance from the current line, middle)
+        let mut best: Option<(bool, f32, f32)> = None;
+        for s in &pg.slices {
+            let Some(pl) = self.paragraph_layout(s.para) else {
+                continue;
+            };
+            let Some(first) = pl.lines.get(s.line_start) else {
+                continue;
+            };
+            let left = geo.margins.left + s.x + pl.x_offset;
+            let holds_x = x >= left - 1.0 && x <= left + pl.width + 1.0;
+            for li in s.line_start..s.line_end {
+                let Some(lb) = pl.lines.get(li) else {
+                    continue;
+                };
+                let top = geo.margins.top + s.y + (lb.top - first.top);
+                let bottom = top + lb.height;
+                let distance = if direction > 0 {
+                    top - line_bottom
+                } else {
+                    line_top - bottom
+                };
+                if distance < -EPS * 10.0 {
+                    continue;
+                }
+                let candidate = (holds_x, distance, top + lb.height * 0.5);
+                best = match best {
+                    None => Some(candidate),
+                    Some(current) => {
+                        let better = (candidate.0 && !current.0)
+                            || (candidate.0 == current.0 && candidate.1 < current.1);
+                        Some(if better { candidate } else { current })
+                    }
+                };
+            }
+        }
+        best.map(|(_, _, middle)| middle)
+    }
+
     /// Selection highlight rectangles for a byte range in one paragraph, in page coordinates.
     /// A selection spanning blocks is drawn by calling this once per paragraph (PLAN §4.4:
     /// selection is an overlay, never baked into the page bitmap).

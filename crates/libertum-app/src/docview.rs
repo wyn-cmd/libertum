@@ -1086,6 +1086,14 @@ impl DocView {
         layout.caret_rect(index, caret.offset, 1.0)
     }
 
+    /// The line box the caret is on, in page coordinates (see `LayoutState::line_rect`).
+    fn caret_line_rect(&self) -> Option<CaretRect> {
+        let caret = self.editor.caret();
+        let index = self.editor.document().index_of(caret.block)?;
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.line_rect(index, caret.offset)
+    }
+
     /// Selection highlight rectangles in page coordinates, one entry per visual line.
     pub fn selection_rects(&self) -> Vec<SelectionRect> {
         let Some((start, end)) = self.editor.ordered_selection() else {
@@ -1182,7 +1190,9 @@ impl DocView {
     /// Moves the caret one visual line up (`direction < 0`) or down, using the layout to
     /// decide where the previous/next line starts. Crosses page boundaries.
     pub fn move_vertical(&mut self, direction: i32, extend: bool) -> bool {
-        let Some(caret) = self.caret_rect() else {
+        // The whole line box, not the caret: the caret is only as tall as the text, and a
+        // step that short can stop in the space between paragraphs and stay on the line.
+        let Some(caret) = self.caret_line_rect() else {
             return false;
         };
         // The laid-out text area: header and footer insets may shrink it from the page setup.
@@ -1194,8 +1204,23 @@ impl DocView {
         let line = caret.height.max(1.0);
         let last_page = self.page_total().saturating_sub(1);
         let mut page = caret.page;
-        // Aim for the middle of the neighbouring line.
-        let mut y = caret.y + line * 0.5 + direction as f32 * line;
+        // Keep the column across short lines: aim for the remembered x, not the caret's.
+        let x = self.editor.preferred_x().unwrap_or(caret.x);
+        // Aim for the middle of the neighbouring line on this page, wherever it is (the
+        // space between paragraphs can be wider than a line); off the page, the next one.
+        let neighbour = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            layout.neighbour_line_y(page, x, caret.y, caret.y + line, direction)
+        };
+        if let Some(y) = neighbour {
+            let Some((block, offset)) = self.hit_test(page, x, y) else {
+                return false;
+            };
+            self.editor
+                .set_caret_vertical(DocPosition { block, offset }, extend, x);
+            return true;
+        }
+        let mut y = if direction > 0 { bottom } else { top - 1.0 };
         if y < top {
             if page > 0 {
                 page -= 1;
@@ -1211,8 +1236,6 @@ impl DocView {
                 y = bottom - line;
             }
         }
-        // Keep the column across short lines: aim for the remembered x, not the caret's.
-        let x = self.editor.preferred_x().unwrap_or(caret.x);
         let Some((block, offset)) = self.hit_test(page, x, y) else {
             return false;
         };
@@ -1563,6 +1586,48 @@ mod tests {
         assert!(!bands.complete);
         assert_eq!(bands.over.len(), plan.keys.len() - 1);
         assert_eq!(bands.under.len(), plan.keys.len());
+    }
+
+    #[test]
+    fn down_and_up_cross_wide_space_between_paragraphs() {
+        use libertum_model::{ParaFormat, ParaProps, Paragraph};
+        // Space after each paragraph wider than a line: a step the height of the text alone
+        // would stop in the gap and leave the caret where it was.
+        let spaced = |id: u64, text: &str| {
+            Paragraph::new(BlockId(id), text).with_props(ParaProps {
+                format: ParaFormat {
+                    space_after_pt: Some(30.0),
+                    ..ParaFormat::default()
+                },
+                ..ParaProps::default()
+            })
+        };
+        let doc = Document::from_paragraphs(vec![
+            spaced(1, "First paragraph"),
+            spaced(2, "Second paragraph"),
+            spaced(3, "Third paragraph"),
+        ]);
+        let (mut view, _rx) = DocView::open(doc);
+        view.move_caret(|ed| {
+            ed.set_caret(
+                DocPosition {
+                    block: BlockId(1),
+                    offset: 3,
+                },
+                false,
+            )
+        });
+        assert!(view.move_vertical(1, false));
+        assert_eq!(view.editor().caret().block, BlockId(2));
+        assert!(view.move_vertical(1, false));
+        assert_eq!(view.editor().caret().block, BlockId(3));
+        assert!(view.move_vertical(-1, false));
+        assert_eq!(view.editor().caret().block, BlockId(2));
+        // The caret itself stays as tall as the text, inside its line box.
+        let caret = view.caret_rect().expect("caret");
+        let line = view.caret_line_rect().expect("line");
+        assert!(caret.height <= line.height + 0.01);
+        assert!(caret.y >= line.y - 0.01 && caret.y + caret.height <= line.y + line.height + 0.01);
     }
 
     #[test]
