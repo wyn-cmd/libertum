@@ -376,6 +376,11 @@ pub enum Message {
     ThumbScrolled(f32, f32),
     /// Show page `index` (0-based) at the top of the view (a thumbnail was clicked).
     GoToPage(usize),
+    /// A click on the Find bar outside its controls.
+    FindBarPressed,
+    /// The Find query has not changed for a moment: search for it (the generation it was
+    /// scheduled for).
+    FindTyped(u64),
     /// Apply the built-in table style with this index to the caret's table (`None` removes
     /// the style).
     TableStyle(Option<usize>),
@@ -577,6 +582,9 @@ pub struct App {
     scroll: (f32, f32),
     /// Canvas size in logical pixels, once the widget has reported it.
     viewport: Option<Size>,
+    /// Bumped by every change to the Find query; a pending search-as-you-type runs only if
+    /// the query has not changed since it was scheduled.
+    find_generation: u64,
     /// Rendered page thumbnails by page index: the page's content hash and the image.
     thumb_cache: std::collections::HashMap<usize, (u64, iced::widget::image::Handle)>,
     /// Offset and visible height of the thumbnails column, logical pixels.
@@ -698,6 +706,7 @@ impl App {
             bookmarks: Vec::new(),
             bookmark_draft: None,
             thumb_cache: std::collections::HashMap::new(),
+            find_generation: 0,
             thumb_scroll: (0.0, 0.0),
             recovery_dir: recovery::data_dir().unwrap_or_else(std::env::temp_dir),
             pending_recovery: None,
@@ -2185,11 +2194,14 @@ impl App {
         (seconds > 0 && self.doc.is_some()).then_some(seconds)
     }
 
-    /// Offers a snapshot from the last session, if one survived.
+    /// Offers the snapshot of a window that crashed (or was killed), if one survived.
+    ///
+    /// It is offered on the home screen and over a document just opened from Explorer
+    /// (still unedited), but never in place of another prompt, such as an error opening that
+    /// file: it is offered again once that prompt is closed. Snapshots of windows that are
+    /// still running are never offered (see `recovery`).
     fn check_recovery(&mut self) {
-        // Not over an open document, and not in place of a prompt already shown (an error
-        // opening the file Libertum was started with): the snapshot stays for next time.
-        if self.doc.is_some() || self.modal.is_some() {
+        if self.modal.is_some() || (self.doc.is_some() && self.dirty) {
             return;
         }
         if let Some((document, meta)) = recovery::load(&self.recovery_dir) {
@@ -2203,6 +2215,8 @@ impl App {
         let Some((document, meta)) = self.pending_recovery.take() else {
             return Task::none();
         };
+        // The recovered text lives on in this window (and in its own snapshot from now on).
+        recovery::remove(&self.recovery_dir, &meta);
         let (mut doc, events) = DocView::open(document);
         doc.move_caret(|ed| ed.move_doc_start(false));
         self.state.fonts = installed_fonts(&doc);
@@ -2222,7 +2236,6 @@ impl App {
         self.scroll = (0.0, 0.0);
         self.canvas_focused = true;
         self.ime_preedit = None;
-        recovery::clear(&self.recovery_dir);
         self.refresh_document();
         self.refresh_view();
         self.refresh_format();
@@ -2230,8 +2243,9 @@ impl App {
     }
 
     fn discard_recovery(&mut self) {
-        self.pending_recovery = None;
-        recovery::clear(&self.recovery_dir);
+        if let Some((_, meta)) = self.pending_recovery.take() {
+            recovery::remove(&self.recovery_dir, &meta);
+        }
         self.modal = None;
     }
 
@@ -2295,7 +2309,7 @@ impl App {
         self.find_from(from, forward)
     }
 
-    /// Search as the query is typed: from the start of the selection, so a match that still
+    /// Search as the query is typed (after a pause): from the start of the selection, so a match that still
     /// fits the longer query stays where it is instead of jumping to the next one.
     fn find_as_typed(&mut self) -> Task<Message> {
         self.state.find.last = None;
@@ -2565,6 +2579,9 @@ impl App {
                 // back to the stitch list, which still holds the files that did open.
                 if !self.stitch_sources.is_empty() {
                     self.modal = Some(Modal::Stitch);
+                } else {
+                    // A crash snapshot waiting behind the error is offered now.
+                    self.check_recovery();
                 }
                 Task::none()
             }
@@ -2810,10 +2827,30 @@ impl App {
                 self.persist_sidebar();
             }
             Message::OpenFind => return self.open_find(),
+            Message::FindBarPressed => {
+                // Back to the query field, and the document does not take the keyboard.
+                self.canvas_focused = false;
+                return iced::widget::operation::focus(FIND_FIELD_ID);
+            }
+            Message::FindTyped(generation) => {
+                if generation == self.find_generation {
+                    return self.find_as_typed();
+                }
+            }
             Message::CloseFind => self.close_find(),
             Message::FindQuery(query) => {
                 self.state.find.query = query;
-                return self.find_as_typed();
+                self.state.find.last = None;
+                self.state.find.count = None;
+                self.state.find.notice = None;
+                // Search once typing pauses, not on every key: each search reads the whole
+                // document, and a short query (one letter, while deleting a word) matches
+                // almost everything. An empty query searches nothing at all.
+                self.find_generation = self.find_generation.wrapping_add(1);
+                if self.state.find.query.is_empty() {
+                    return Task::none();
+                }
+                return find_after_pause(self.find_generation);
             }
             Message::ReplaceQuery(replace) => self.state.find.replace = replace,
             Message::ToggleFindCase => {
@@ -4597,7 +4634,10 @@ impl App {
                     .color(t.text_secondary),
             );
         }
-        container(
+        // A click anywhere on the bar belongs to the bar: between its controls it would
+        // otherwise fall through to the page below, give the document the keyboard, and the
+        // next keystrokes would replace the selected match.
+        let bar = mouse_area(
             container(bar)
                 .padding([6, 8])
                 .style(move |_| container::Style {
@@ -4606,16 +4646,19 @@ impl App {
                     ..container::Style::default()
                 }),
         )
-        .padding(Padding {
-            // Just under the toolbar, so neither the toolbar nor its buttons are covered.
-            top: crate::toolbar::HEIGHT + 10.0,
-            ..Padding::ZERO
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Center)
-        .align_top(Length::Fill)
-        .into()
+        .on_press(Message::FindBarPressed)
+        .on_right_press(Message::FindBarPressed);
+        container(bar)
+            .padding(Padding {
+                // Just under the toolbar, so neither the toolbar nor its buttons are covered.
+                top: crate::toolbar::HEIGHT + 10.0,
+                ..Padding::ZERO
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Center)
+            .align_top(Length::Fill)
+            .into()
     }
 
     /// The unsaved-changes or error prompt, with a dimmed backdrop.
@@ -4883,6 +4926,30 @@ fn thumb_range(offset: f32, height: f32, total: usize) -> (usize, usize) {
     (first, (first + rows).min(total))
 }
 
+/// How long typing in the Find field must pause before the query is searched.
+const FIND_TYPING_PAUSE: std::time::Duration = std::time::Duration::from_millis(220);
+
+/// A task that reports `generation` back once the typing pause has passed. A plain thread
+/// sleeps for it, so no async runtime is needed.
+fn find_after_pause(generation: u64) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            let spawned = std::thread::Builder::new()
+                .name("libertum-find-pause".into())
+                .spawn(move || {
+                    std::thread::sleep(FIND_TYPING_PAUSE);
+                    let _ = tx.send(());
+                });
+            if spawned.is_ok() {
+                let _ = rx.await;
+            }
+            generation
+        },
+        Message::FindTyped,
+    )
+}
+
 /// Widget id of the Find bar's query field (focused when the bar opens).
 const FIND_FIELD_ID: &str = "libertum-find-query";
 
@@ -4907,11 +4974,21 @@ fn ensure_extension(mut path: PathBuf, fallback: Format) -> PathBuf {
     path
 }
 
-fn key_event(event: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
+fn key_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
-        Event::Keyboard(key) => Some(
-            shortcuts::from_event(&key).map_or(Message::Keyboard(key.clone()), Message::Shortcut),
-        ),
+        Event::Keyboard(key) => {
+            let shortcut = shortcuts::from_event(&key);
+            // A text field (the Find bar, an inspector field) used this key: typing, Enter,
+            // Backspace, the arrows, or Ctrl/Cmd+A, C, X and V. It is not for the document,
+            // or a paste into the Find field would also replace the selected match. Escape
+            // still closes the bar.
+            if status == event::Status::Captured {
+                return shortcut
+                    .filter(|shortcut| *shortcut == Shortcut::CloseMenu)
+                    .map(Message::Shortcut);
+            }
+            Some(shortcut.map_or(Message::Keyboard(key.clone()), Message::Shortcut))
+        }
         Event::InputMethod(event) => Some(Message::Ime(event)),
         Event::Window(window::Event::Rescaled(sf)) => Some(Message::ScaleFactor(sf)),
         Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
@@ -5023,6 +5100,16 @@ mod tests {
     /// Test settings: centimetres, so paper, margins and stepper grids do not depend on the
     /// machine's locale (a US-locale CI runner would otherwise build Letter documents and
     /// nudge margins in inches).
+    /// A process id that is not running: a window that crashed.
+    const CRASHED_WINDOW: u32 = u32::MAX - 6;
+
+    /// What the Find field does after a typing pause: the scheduled search runs.
+    fn find_typed(app: &mut App, query: &str) {
+        let _ = app.update(Message::FindQuery(query.into()));
+        let generation = app.find_generation;
+        let _ = app.update(Message::FindTyped(generation));
+    }
+
     fn test_settings() -> Settings {
         Settings {
             units: UnitsPreference::Centimetres,
@@ -7138,7 +7225,7 @@ mod tests {
         let _ = app.update(Message::OpenFind);
         assert!(app.state.find.open, "the bar opens");
         // Typing the query already selects the first match and counts them all.
-        let _ = app.update(Message::FindQuery("cat".into()));
+        find_typed(&mut app, "cat");
         assert_eq!(app.doc().editor().selection().anchor.offset, 0);
         assert_eq!(app.doc().editor().selection().head.offset, 3);
         assert_eq!(app.state.find.count, Some((Some(1), 2)));
@@ -7160,7 +7247,7 @@ mod tests {
         let _ = app.update(Message::ReplaceOne);
         let text = paragraph_texts(&app).join(" / ");
         assert_eq!(text, "cat sat on the dog mat");
-        let _ = app.update(Message::FindQuery("cat".into()));
+        find_typed(&mut app, "cat");
         let _ = app.update(Message::ReplaceAll);
         assert_eq!(paragraph_texts(&app).join(" / "), "dog sat on the dog mat");
         assert_eq!(app.state.find.notice, Some(s::find_replaced(1)));
@@ -7183,7 +7270,7 @@ mod tests {
         app.canvas_focused = true;
         let _ = app.update(Message::PasteText(Some("nothing here".into())));
         let _ = app.update(Message::OpenFind);
-        let _ = app.update(Message::FindQuery("zebra".into()));
+        find_typed(&mut app, "zebra");
         let _ = app.update(Message::FindNext);
         assert_eq!(app.state.find.notice, Some(s::FIND_NO_MATCHES.to_owned()));
         let _ = app.update(Message::ToggleFindCase);
@@ -7213,7 +7300,7 @@ mod tests {
                 "Recovered words",
             )]);
         let old = std::path::Path::new("C:/books/novel.odt");
-        recovery::write(&dir, &document, Some(old)).expect("a snapshot");
+        recovery::write_as(&dir, CRASHED_WINDOW, &document, Some(old)).expect("a snapshot");
 
         let mut app = home();
         app.recovery_dir = dir.clone();
@@ -7252,7 +7339,7 @@ mod tests {
                 libertum_model::BlockId(1),
                 "Not wanted",
             )]);
-        recovery::write(&dir, &document, None).expect("a snapshot");
+        recovery::write_as(&dir, CRASHED_WINDOW, &document, None).expect("a snapshot");
 
         let mut app = home();
         app.recovery_dir = dir.clone();
@@ -7831,7 +7918,7 @@ mod tests {
         app.scroll = (0.0, 0.0);
         let _ = app.update(Message::OpenFind);
         // Far down the document: the view has to scroll to it.
-        let _ = app.update(Message::FindQuery("needle300".into()));
+        find_typed(&mut app, "needle300");
         let found = app.state.find.last.clone().expect("a match");
         assert_eq!(found.range.len(), "needle300".len());
         assert_eq!(app.state.find.count, Some((Some(1), 1)));
@@ -7862,7 +7949,7 @@ mod tests {
             );
         }
         // A match above the view comes back down below the Find bar too.
-        let _ = app.update(Message::FindQuery("needle2 ".into()));
+        find_typed(&mut app, "needle2 ");
         let rects = app.find_match_rects();
         assert!(!rects.is_empty());
         let top = m.page_top(rects[0].page) + rects[0].y * m.scale - app.scroll.1;
@@ -7883,14 +7970,14 @@ mod tests {
         app.canvas_focused = true;
         let _ = app.update(Message::PasteText(Some("Cat cat concat\ncat".into())));
         let _ = app.update(Message::OpenFind);
-        let _ = app.update(Message::FindQuery("cat".into()));
+        find_typed(&mut app, "cat");
         assert_eq!(app.state.find.count.map(|c| c.1), Some(4));
         let _ = app.update(Message::ToggleFindWord);
         assert_eq!(app.state.find.count.map(|c| c.1), Some(3));
         let _ = app.update(Message::ToggleFindCase);
         assert_eq!(app.state.find.count.map(|c| c.1), Some(2));
         // Nothing found: the count goes and the notice says so.
-        let _ = app.update(Message::FindQuery("dog".into()));
+        find_typed(&mut app, "dog");
         assert_eq!(app.state.find.count, None);
         assert_eq!(app.state.find.notice, Some(s::FIND_NO_MATCHES.to_owned()));
         // An empty query is not a search.
@@ -8193,6 +8280,142 @@ Opened from Explorer.
         // No argument: the home screen.
         let (app, _task) = App::boot(settings, None, None);
         assert!(app.doc.is_none() || demo_requested());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_waits_for_a_pause_and_never_searches_an_empty_query() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("cat sat on the cat mat".into())));
+        let _ = app.update(Message::OpenFind);
+        // Typing schedules a search but does not run one.
+        let _ = app.update(Message::FindQuery("ca".into()));
+        let first = app.find_generation;
+        let _ = app.update(Message::FindQuery("cat".into()));
+        assert!(
+            app.state.find.last.is_none(),
+            "nothing searched while typing"
+        );
+        // The search scheduled for the shorter query is out of date and does nothing.
+        let _ = app.update(Message::FindTyped(first));
+        assert!(app.state.find.last.is_none());
+        let current = app.find_generation;
+        let _ = app.update(Message::FindTyped(current));
+        assert_eq!(app.state.find.count, Some((Some(1), 2)));
+        // Deleting the query to nothing searches nothing and clears the result.
+        let _ = app.update(Message::FindQuery(String::new()));
+        let empty = app.find_generation;
+        let _ = app.update(Message::FindTyped(empty));
+        assert!(app.state.find.last.is_none());
+        assert_eq!(app.state.find.count, None);
+        assert_eq!(app.state.find.notice, None);
+        // Enter still searches at once.
+        let _ = app.update(Message::FindQuery("mat".into()));
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.state.find.count, Some((Some(1), 1)));
+    }
+
+    #[test]
+    fn keys_a_text_field_used_never_reach_the_document() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("cat sat on the cat mat".into())));
+        let _ = app.update(Message::OpenFind);
+        find_typed(&mut app, "cat");
+        let _ = app.update(Message::FindNext);
+        let before = paragraph_texts(&app);
+        let press = |text: &str, key: keyboard::Key| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: Some(text.into()),
+                repeat: false,
+            })
+        };
+        let id = window::Id::unique();
+        // Captured by the Find field: dropped.
+        let typed = press("x", keyboard::Key::Character("x".into()));
+        assert!(key_event(typed.clone(), event::Status::Captured, id).is_none());
+        // Not captured (the document has the keyboard): delivered as before.
+        assert!(matches!(
+            key_event(typed, event::Status::Ignored, id),
+            Some(Message::Keyboard(_))
+        ));
+        // Escape still closes the bar even though the field used it.
+        let escape = press("", keyboard::Key::Named(keyboard::key::Named::Escape));
+        assert!(matches!(
+            key_event(escape, event::Status::Captured, id),
+            Some(Message::Shortcut(Shortcut::CloseMenu))
+        ));
+        // A click on the bar outside its controls keeps the keyboard in the bar.
+        app.canvas_focused = true;
+        let _ = app.update(Message::FindBarPressed);
+        assert!(!app.canvas_focused);
+        assert_eq!(paragraph_texts(&app), before, "the document is untouched");
+    }
+
+    #[test]
+    fn a_crashed_window_is_offered_over_a_document_opened_from_explorer() {
+        let dir =
+            std::env::temp_dir().join(format!("libertum-recover-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("opened.md");
+        std::fs::write(&file, "Opened text.\n").expect("write");
+        let lost = libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+            libertum_model::BlockId(1),
+            "Unsaved before the crash",
+        )]);
+        let snapshots = dir.join("snapshots");
+        recovery::write_as(&snapshots, CRASHED_WINDOW, &lost, None).expect("a snapshot");
+
+        // Opened from Explorer: the document shows, and the offer is over it.
+        let mut app = App::with_doc(test_settings(), None, None);
+        app.recovery_dir = snapshots.clone();
+        let _ = app.open_path(file.clone());
+        app.check_recovery();
+        assert!(app.doc.is_some());
+        assert!(matches!(app.modal, Some(Modal::Recovery)));
+        let _ = app.update(Message::ModalChoice(ModalChoice::Restore));
+        assert!(
+            paragraph_texts(&app)
+                .iter()
+                .any(|t| t == "Unsaved before the crash")
+        );
+        assert!(
+            recovery::load(&snapshots).is_none(),
+            "the snapshot is consumed"
+        );
+
+        // A file that will not open: the error first, then the offer.
+        recovery::write_as(&snapshots, CRASHED_WINDOW, &lost, None).expect("a snapshot");
+        let mut app = App::with_doc(test_settings(), None, None);
+        app.recovery_dir = snapshots.clone();
+        let _ = app.open_path(dir.join("missing.odt"));
+        app.check_recovery();
+        assert!(
+            matches!(app.modal, Some(Modal::Error(_))),
+            "the error is not hidden"
+        );
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert!(matches!(app.modal, Some(Modal::Recovery)), "then the offer");
+        let _ = app.update(Message::ModalChoice(ModalChoice::Discard));
+        assert!(recovery::load(&snapshots).is_none());
+
+        // The snapshot of a window that is still running (this one) is never offered.
+        recovery::write(&snapshots, &lost, None).expect("our own snapshot");
+        let mut app = App::with_doc(test_settings(), None, None);
+        app.recovery_dir = snapshots.clone();
+        app.check_recovery();
+        assert!(app.modal.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

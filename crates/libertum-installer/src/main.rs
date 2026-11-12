@@ -107,7 +107,21 @@ fn pack(args: &[String]) -> Result<PathBuf, String> {
 
 #[cfg(not(windows))]
 fn install() -> ExitCode {
-    eprintln!("The Libertum installer runs on Windows.");
+    // Say what this installer carries, so a copy on the wrong machine is still explained.
+    let carried = std::env::current_exe()
+        .and_then(std::fs::read)
+        .map_err(|error| error.to_string())
+        .and_then(|exe| payload::read(&exe).map_err(|error| error.to_string()));
+    match carried {
+        Ok(files) => {
+            let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+            eprintln!(
+                "This is the Windows installer for Libertum ({}); run it on Windows.",
+                names.join(", ")
+            );
+        }
+        Err(error) => eprintln!("The Libertum installer runs on Windows ({error})."),
+    }
     ExitCode::FAILURE
 }
 
