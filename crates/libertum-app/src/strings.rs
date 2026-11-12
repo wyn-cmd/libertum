@@ -36,7 +36,7 @@ pub const FILE_FILTER_DOCX: &str = "Word Document (*.docx)";
 pub const FILE_FILTER_ODT: &str = "OpenDocument Text (*.odt)";
 pub const FILE_FILTER_MARKDOWN: &str = "Markdown (*.md)";
 pub const FILE_FILTER_RTF: &str = "Rich Text Format (*.rtf)";
-pub const FILE_FILTER_SUPPORTED: &str = "Documents (*.odt, *.docx, *.md, *.rtf)";
+pub const FILE_FILTER_SUPPORTED: &str = "Documents (*.lbtd, *.odt, *.docx, *.md, *.rtf)";
 pub const SAVE: &str = "Save";
 pub const DONT_SAVE: &str = "Don't Save";
 pub const CANCEL: &str = "Cancel";
@@ -49,13 +49,11 @@ pub const SAVE_FAILED: &str = "The document could not be saved.";
 // Toolbar
 pub const TB_VIEW: &str = "View";
 pub const TB_ZOOM: &str = "Zoom";
-pub const TB_PAGE_BREAK: &str = "Page Break";
+pub const TB_FULL_SCREEN: &str = "Full Screen";
 pub const TB_INSERT: &str = "Insert";
 pub const TB_TABLE: &str = "Table";
 pub const TB_IMAGE: &str = "Image";
 pub const TB_FOOTNOTE: &str = "Footnote";
-pub const TB_TEXT_BOX: &str = "Text Box";
-pub const TB_COMMENT: &str = "Comment";
 pub const TB_FORMAT: &str = "Format";
 pub const TB_DOCUMENT: &str = "Document";
 pub const TB_HEADERS: &str = "Headers";
@@ -80,6 +78,14 @@ pub const VIEW_INVISIBLES: &str = "Show Invisibles";
 pub const VIEW_THUMBNAILS: &str = "Page Thumbnails";
 pub const VIEW_BOOKLET: &str = "Booklet View";
 pub const VIEW_PAGELESS: &str = "Pageless";
+pub const VIEW_HOME: &str = "Go to Home Screen";
+pub const VIEW_STITCH: &str = "Stitch Documents…";
+pub const HOME_STITCH: &str = "Stitch…";
+pub const STITCH_TITLE: &str = "Stitch documents";
+pub const STITCH_HINT: &str = "They are joined in this order. The first supplies the styles; each one after it starts a new section.";
+pub const STITCH_ADD: &str = "Add Files…";
+pub const STITCH_GO: &str = "Stitch";
+pub const STITCH_EMPTY: &str = "Add at least one document to stitch.";
 pub const VIEW_BOOKMARKS: &str = "Bookmarks";
 
 // Zoom
@@ -402,6 +408,14 @@ pub const FIND_REPLACE_ONE: &str = "Replace";
 pub const FIND_REPLACE_ALL: &str = "All";
 pub const FIND_NO_MATCHES: &str = "No matches";
 
+/// "3 of 17" for the current match, or "17 found" when none of them is selected.
+pub fn find_count(position: Option<usize>, total: usize) -> String {
+    match position {
+        Some(position) => format!("{position} of {total}"),
+        None => format!("{total} found"),
+    }
+}
+
 /// "Replaced 1 place" or "Replaced 4 places".
 pub fn find_replaced(count: usize) -> String {
     match count {
@@ -437,6 +451,18 @@ pub const MARKDOWN_DOCUMENT_NOTE: &str = "This is a Markdown file. Page size, ma
 pub const MARKDOWN_LOSS_TITLE: &str = "Saving as Markdown will lose some formatting";
 pub const MARKDOWN_LOSS_MORE: &str = "and more";
 pub const SAVE_ANYWAY: &str = "Save Anyway";
+
+// Full screen and page thumbnails (View menu).
+pub const VIEW_ENTER_FULL_SCREEN: &str = "Enter Full Screen";
+pub const VIEW_EXIT_FULL_SCREEN: &str = "Exit Full Screen";
+
+// Watermark (Document pane).
+pub const SECTION_WATERMARK: &str = "Watermark";
+pub const WATERMARK_PLACEHOLDER: &str = "Text, for example DRAFT";
+pub const WATERMARK_DIAGONAL: &str = "Diagonal";
+pub const WATERMARK_APPLY: &str = "Apply";
+pub const WATERMARK_REMOVE: &str = "Remove";
+pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page. Saved in Libertum documents (.lbtd); Word, OpenDocument, RTF and Markdown files do not keep it.";
 
 #[cfg(test)]
 mod tests {

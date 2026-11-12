@@ -37,8 +37,9 @@ use libertum_render::{PageRenderer, page_pixel_size};
 
 use crate::perf;
 
-/// Pages the paginator thread adds per write-lock hold (about 25 ms of work on the dev box).
-const PAGINATE_CHUNK: usize = 8;
+/// Pages the paginator thread adds per write-lock hold (about 12 ms of work on the dev box):
+/// the longest another thread waits for the layout, under one frame.
+const PAGINATE_CHUNK: usize = 4;
 /// Pages paginated synchronously on open and after a page-setup change, so the first
 /// screenful can be drawn before the background pass catches up.
 const FIRST_SCREEN_PAGES: usize = 4;
@@ -483,7 +484,7 @@ pub struct DocView {
     /// The model document and editor state. Owned by the UI thread.
     editor: Editor,
     /// Shared with the paginator and render worker.
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     /// Where worker threads report; kept so a page-setup change can restart the paginator.
     events: UnboundedSender<DocEvent>,
     /// Bumped to retire a running paginator before a new one starts.
@@ -491,6 +492,8 @@ pub struct DocView {
     /// Bumped whenever a paragraph style changes. Folded into snapshot versions, so layouts
     /// cached under a paragraph's old formatting are never reused (PLAN §4.2 `style_epoch`).
     style_epoch: u64,
+    /// Renders page thumbnails on the UI thread (a few at a time, only those in view).
+    thumbs: libertum_render::PageRenderer,
 }
 
 /// Bits of a snapshot version above the paragraph's own edit count that hold the style
@@ -611,7 +614,7 @@ impl DocView {
                 .collect();
             m.complete = state.is_complete();
         }
-        let layout = Arc::new(RwLock::new(state));
+        let layout = Arc::new(SharedLayout::new(state));
         let cache = Arc::new(Mutex::new(HandleCache::new(HANDLE_CACHE_BYTES)));
         let plans = Arc::new(Mutex::new(Plans::default()));
         let queue = Arc::new(RenderQueue::default());
@@ -654,6 +657,7 @@ impl DocView {
                 events: tx,
                 paginate_epoch,
                 style_epoch: 0,
+                thumbs: libertum_render::PageRenderer::new(0),
             },
             rx,
         )
@@ -675,6 +679,25 @@ impl DocView {
         let total = self.page_total();
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
         (0..total).map(|page| layout.page_geometry(page)).collect()
+    }
+
+    /// Hash of what page `page` shows, once it is paginated (thumbnail cache key).
+    pub fn page_content_hash(&self, page: usize) -> Option<u64> {
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.page_content_hash(page)
+    }
+
+    /// Page `page` rendered `width_px` device pixels wide, as straight RGBA (the page is
+    /// opaque, so premultiplied and straight are the same). `None` until it is paginated.
+    pub fn render_thumbnail(&mut self, page: usize, width_px: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        if page >= layout.page_count() {
+            return None;
+        }
+        let geometry = layout.page_geometry(page);
+        let scale = width_px.max(8) as f32 / geometry.width_pt.max(1.0);
+        let pixmap = self.thumbs.render_page(&layout, page, scale)?;
+        Some((pixmap.width(), pixmap.height(), pixmap.data().to_vec()))
     }
 
     /// The displayed page number of a block, once pagination has reached it.
@@ -733,6 +756,15 @@ impl DocView {
         self.geometry = geometry;
         self.estimated_pages = estimated_pages_for(self.chars, &geometry);
         self.restart_paginator();
+    }
+
+    /// Paginates the whole document now (tests: the app does it on a worker).
+    #[cfg(test)]
+    pub fn paginate_everything(&mut self) {
+        self.layout
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .paginate_all();
     }
 
     /// List markers drawn on page `page` (tests).
@@ -1190,8 +1222,55 @@ impl DocView {
     }
 }
 
+/// The layout behind its lock, with a count of the threads waiting for it.
+///
+/// The background paginator takes the write lock for one chunk of pages after another. The
+/// system lock is not fair: a thread that releases it and asks again straight away usually
+/// gets it back, so the UI thread and the page renderer could wait for the whole document
+/// to paginate (over a second on a few hundred pages) before reading a caret position or
+/// drawing a page. Everyone but the paginator announces that it is waiting, and the
+/// paginator does not start its next chunk while anyone is: the longest wait is one chunk.
+pub(crate) struct SharedLayout {
+    lock: RwLock<LayoutState>,
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+impl SharedLayout {
+    fn new(state: LayoutState) -> Self {
+        Self {
+            lock: RwLock::new(state),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn read(&self) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, LayoutState>> {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let guard = self.lock.read();
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        guard
+    }
+
+    fn write(&self) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, LayoutState>> {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let guard = self.lock.write();
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        guard
+    }
+
+    /// The write lock for the background paginator: taken only once nobody else is
+    /// waiting for the layout.
+    fn write_in_background(
+        &self,
+    ) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, LayoutState>> {
+        while self.waiting.load(Ordering::Acquire) > 0 {
+            std::thread::yield_now();
+        }
+        self.lock.write()
+    }
+}
+
 fn spawn_paginator(
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     map: PageMap,
     tx: UnboundedSender<DocEvent>,
     epoch: Arc<AtomicU64>,
@@ -1207,7 +1286,9 @@ fn spawn_paginator(
                     return;
                 }
                 let (pages, complete) = {
-                    let mut st = layout.write().unwrap_or_else(|e| e.into_inner());
+                    let mut st = layout
+                        .write_in_background()
+                        .unwrap_or_else(|e| e.into_inner());
                     let have = st.page_count();
                     if !st.is_complete() {
                         st.paginate_until(have + PAGINATE_CHUNK);
@@ -1235,8 +1316,8 @@ fn spawn_paginator(
                     );
                     return;
                 }
-                // Let the render worker take the read lock between chunks.
-                std::thread::yield_now();
+                // The next chunk waits in `write_in_background` for anyone who wants the
+                // layout first.
             }
         });
     if let Err(error) = spawned {
@@ -1245,7 +1326,7 @@ fn spawn_paginator(
 }
 
 fn spawn_render_worker(
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     map: PageMap,
     cache: Arc<Mutex<HandleCache>>,
     plans: Arc<Mutex<Plans>>,

@@ -165,6 +165,28 @@ pub enum Decoration {
     },
 }
 
+/// A page's watermark, ready to draw: a one-line layout of the text, centred on
+/// (`centre_x`, `centre_y`) page points and turned by `angle_deg` (negative rises to the
+/// right). It is drawn behind everything else on the page.
+#[derive(Clone)]
+pub struct WatermarkDraw {
+    pub layout: Arc<ParagraphLayout>,
+    pub text: String,
+    pub centre_x: f32,
+    pub centre_y: f32,
+    pub angle_deg: f32,
+    /// Straight RGBA; the alpha is how faint the watermark is.
+    pub colour: [u8; 4],
+}
+
+/// Colour of a watermark: mid grey at about a third strength, readable under black text.
+pub const WATERMARK_COLOUR: [u8; 4] = [128, 128, 128, 80];
+/// Font size the watermark text is measured at before it is scaled to the page, points.
+const WATERMARK_MEASURE_PT: f32 = 100.0;
+/// Smallest and largest watermark font size, points.
+const WATERMARK_MIN_PT: f32 = 18.0;
+const WATERMARK_MAX_PT: f32 = 220.0;
+
 /// One thing drawn on a page, for strip invalidation: see [`LayoutState::page_items`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageItem {
@@ -1298,6 +1320,7 @@ impl LayoutState {
             note.number.hash(&mut h);
             note.text.hash(&mut h);
         }
+        self.section(pg.section).watermark.hash(&mut h);
         pg.endnotes.hash(&mut h);
         if !self.pageless
             && let Some(pos) = self.section(pg.section).page_numbers
@@ -1328,6 +1351,56 @@ impl LayoutState {
             return None;
         }
         self.pages.get(self.page_of_para(para)).map(|p| p.number)
+    }
+
+    /// The watermark of page `page`, if its section has one: the text sized to span most of
+    /// the page (along the diagonal when the watermark is diagonal) and centred on it.
+    pub fn page_watermark(&self, page: usize) -> Option<WatermarkDraw> {
+        let pg = self.pages.get(page)?;
+        let watermark = self.section(pg.section).watermark.as_ref()?;
+        if watermark.text.is_empty() {
+            return None;
+        }
+        let geo = pg.geometry;
+        let (width, height) = (geo.width_pt, geo.height_pt);
+        let (span, angle_deg) = if watermark.diagonal {
+            (
+                (width * width + height * height).sqrt() * 0.62,
+                -(height.atan2(width).to_degrees()),
+            )
+        } else {
+            (width * 0.8, 0.0)
+        };
+        let sized = |id: u64, size: f32| {
+            let mut snap = self.furniture_snapshot(id, &watermark.text, Align::Start);
+            let colour = [0, 0, 0, 255];
+            snap.base = Some(SpanStyle {
+                weight: libertum_model::BOLD,
+                color: colour,
+                ..SpanStyle::new(size)
+            });
+            snap.version = {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                watermark.text.hash(&mut h);
+                size.to_bits().hash(&mut h);
+                h.finish()
+            };
+            lock(&self.engine).full(&snap, f32::MAX / 4.0)
+        };
+        let measured = sized(9_800_000, WATERMARK_MEASURE_PT);
+        let measured_width = measured.layout.width().max(1.0);
+        let size = (WATERMARK_MEASURE_PT * span / measured_width)
+            .clamp(WATERMARK_MIN_PT, WATERMARK_MAX_PT);
+        // Whole points: the same text gets the same layout on every page of one size.
+        let layout = sized(9_800_001, size.round());
+        Some(WatermarkDraw {
+            layout,
+            text: watermark.text.clone(),
+            centre_x: width * 0.5,
+            centre_y: height * 0.5,
+            angle_deg,
+            colour: WATERMARK_COLOUR,
+        })
     }
 
     /// Page furniture for page `page`: its page number (if its section shows them) and the
@@ -1760,6 +1833,17 @@ impl LayoutState {
         };
         let geo = pg.geometry;
         let mut out = Vec::new();
+        // A watermark lies under the whole page: every strip repaints when it changes.
+        if let Some(watermark) = self.section(pg.section).watermark.as_ref() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            watermark.hash(&mut h);
+            (geo.width_pt.to_bits(), geo.height_pt.to_bits()).hash(&mut h);
+            out.push(PageItem {
+                top: 0.0,
+                bottom: geo.height_pt,
+                key: h.finish(),
+            });
+        }
         for s in &pg.slices {
             let (Some(p), Some(pl)) = (self.paragraphs.get(s.para), self.paragraph_layout(s.para))
             else {
@@ -1987,12 +2071,22 @@ impl LayoutState {
         let line = pl.lines.iter().rposition(|l| l.top <= y_mid).unwrap_or(0);
         let (page, s, top) = self.page_and_slice(para, line)?;
         let geo = self.page_geometry(page);
+        // The caret is as tall as the text, not as the line: the line box includes the
+        // leading that separates lines, which made the caret look oversized beside the glyphs.
+        let (caret_top, caret_height) = match pl.layout.get(line) {
+            Some(line) => {
+                let metrics = line.metrics();
+                let top = metrics.content_block_min_coord;
+                (top, (metrics.content_block_max_coord - top).max(1.0))
+            }
+            None => (g.y0 as f32, (g.y1 - g.y0) as f32),
+        };
         Some(CaretRect {
             page,
             x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
-            y: geo.margins.top + s.y + (g.y0 as f32 - top),
+            y: geo.margins.top + s.y + (caret_top - top),
             width: (g.x1 - g.x0) as f32,
-            height: (g.y1 - g.y0) as f32,
+            height: caret_height,
         })
     }
 

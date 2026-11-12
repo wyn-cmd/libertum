@@ -432,7 +432,7 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 - Use a GitHub Actions matrix (windows-latest, macos-latest for both arm64 and x86_64 or a universal binary, ubuntu-latest).
 - Packaging: evaluate `cargo-dist` and `cargo-packager`. Targets are an MSI or NSIS installer on Windows, a `.dmg` with a `.app` bundle on macOS, and an AppImage plus `.deb` on Linux.
 - Set up file associations for `.docx`, `.odt`, `.rtf` and `.md` (opt-in on Linux).
-- Code signing and notarisation (Apple Developer ID, Windows Authenticode) need the user's certificates. Leave the steps stubbed, document them, and ask the user before wiring in any secrets.
+- Code signing and notarisation are **out of scope**: no certificate authority will issue one for this project, so installers ship unsigned and the documentation says so (Windows SmartScreen needs "More info" → "Run anyway" the first time).
 - Add a performance regression job that runs the criterion benches against the previous release.
 
 ### Phase 10 — Document stitching (post-v1, priority 1)

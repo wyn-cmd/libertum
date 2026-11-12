@@ -18,8 +18,9 @@ Working today:
 - **Formatting**: character and paragraph formatting, paragraph styles, lists, borders, tabs,
   columns, hyphenation and ligatures, all bound to the selection with mixed states.
 - **Pages**: page size, orientation, margins, per-section geometry, headers and footers (first
-  and even variants, `{page}` and `{pages}`), page numbers, booklet view, zoom, and a
-  **pageless** reading view that shows the document as one endless A4-wide column.
+  and even variants, `{page}` and `{pages}`), page numbers, text watermarks, booklet view,
+  page thumbnails, full screen, zoom, and a **pageless** reading view that shows the document
+  as one endless A4-wide column.
 - **Long documents**: an automatically updated table of contents, footnotes and endnotes,
   bookmarks and cross-references, inline images, and tables that split across pages with
   repeating header rows and editable merged cells.
@@ -30,6 +31,23 @@ Working today:
 `docs/STATUS.md` has the current detail and the open items. `PLAN.md` has the architecture,
 the performance budgets and the remaining phases (CI and packaging, then the writing tools:
 document stitching, AO3 chapter export, proofreading).
+
+## Install on Windows
+
+Download `Libertum-Setup.exe` (from a CI run's artifacts, `libertum-x86_64-pc-windows-msvc`,
+or build it as below) and double-click it. It installs for the current user, with no
+administrator rights: the program goes in `%LOCALAPPDATA%\Libertum`, with Start menu and
+desktop shortcuts, and Libertum is offered in "Open with" (and Settings > Apps > Default apps)
+for `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` files. Running it again updates an installed
+copy; close Libertum first. An uninstaller, `Libertum-Uninstall.ps1`, is written beside the
+program.
+
+The installer and the program are not code-signed, so Windows SmartScreen may warn the first
+time: choose "More info", then "Run anyway".
+
+To build the installer: `powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1`
+(it writes `dist\Libertum-Setup-<version>.exe`). The same install can be done by hand by running
+`packaging\windows\install.ps1` from a folder that holds `libertum.exe`.
 
 ## Build and run
 

@@ -208,6 +208,18 @@ impl Paragraph {
         std::mem::replace(&mut self.images, images)
     }
 
+    /// Shifts this paragraph's id and the references that point at ids by `shift`, and its
+    /// list group by `list_shift`. Used when documents are stitched into one book.
+    pub fn restamp(&mut self, shift: u64, list_shift: u64) {
+        self.id = BlockId(self.id.0 + shift);
+        if let Some(target) = self.props.toc_target {
+            self.props.toc_target = Some(BlockId(target.0 + shift));
+        }
+        if let Some(list) = &mut self.props.list {
+            list.group = list.group.saturating_add(list_shift);
+        }
+    }
+
     /// Replaces the images without counting as an edit: used when a reader fills in image
     /// bytes, because opening a file must not change a paragraph's version.
     pub(crate) fn restore_images(&mut self, mut images: Vec<InlineImage>) -> Vec<InlineImage> {

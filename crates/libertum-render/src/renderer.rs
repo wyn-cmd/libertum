@@ -31,6 +31,8 @@ pub struct PageRenderer {
     glyphs: GlyphCache,
     pages: PageCache,
     images: ImageCache,
+    /// The watermark text rasterised last, by a hash of what it shows and at what size.
+    watermark: Option<(u64, Arc<Pixmap>, f32)>,
 }
 
 impl Default for PageRenderer {
@@ -46,6 +48,7 @@ impl PageRenderer {
             glyphs: GlyphCache::new(32 * 1024 * 1024),
             pages: PageCache::new(page_cache_bytes),
             images: ImageCache::new(),
+            watermark: None,
         }
     }
 
@@ -119,6 +122,11 @@ impl PageRenderer {
         // The band in page points, and the shift from page points to band pixels.
         let shift = y0 as f32 / scale;
         let band_end = (y0 + rows) as f32 / scale;
+
+        // The watermark lies under everything else.
+        if let Some(watermark) = state.page_watermark(page_index) {
+            self.draw_watermark(&mut pm, &watermark, shift, scale);
+        }
 
         // Table cell fills and borders sit under the text.
         for table in &page.tables {
@@ -265,6 +273,86 @@ impl PageRenderer {
         Some(pm)
     }
 
+    /// Draws a watermark into a band whose top is `shift` page points down the page.
+    ///
+    /// The text is rasterised once, upright, into a translucent bitmap (kept until the text,
+    /// its size or the scale changes) and then drawn turned about the page's centre, so
+    /// every strip of every page reuses the same bitmap.
+    fn draw_watermark(
+        &mut self,
+        pm: &mut Pixmap,
+        watermark: &libertum_layout::WatermarkDraw,
+        shift: f32,
+        scale: f32,
+    ) {
+        use std::hash::{Hash, Hasher};
+        use tiny_skia::{FilterQuality, PixmapPaint};
+        // Rasterise at no more than 2 px per point: beyond that the turn-and-scale below
+        // enlarges it, which keeps the bitmap a few megabytes at any zoom.
+        let raster_scale = scale.clamp(0.05, WATERMARK_MAX_RASTER_SCALE);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        watermark.text.hash(&mut hasher);
+        watermark.layout.height.to_bits().hash(&mut hasher);
+        watermark.colour.hash(&mut hasher);
+        raster_scale.to_bits().hash(&mut hasher);
+        let key = hasher.finish();
+        let cached = self
+            .watermark
+            .as_ref()
+            .filter(|(k, _, _)| *k == key)
+            .map(|(_, bitmap, s)| (bitmap.clone(), *s));
+        let (bitmap, bitmap_scale) = match cached {
+            Some(found) => found,
+            None => {
+                let layout = &watermark.layout;
+                // Room around the text for ink that reaches past the line box.
+                let pad = layout.height * INK_OVERHANG;
+                let w = ((layout.layout.width() + 2.0 * pad) * raster_scale)
+                    .ceil()
+                    .max(1.0) as u32;
+                let h = ((layout.height + 2.0 * pad) * raster_scale).ceil().max(1.0) as u32;
+                let Some(mut text) = Pixmap::new(w, h) else {
+                    return;
+                };
+                // Black text on white, then turned into coverage: the text renderer blends
+                // onto an opaque page, so the alpha is recovered from how dark each pixel is.
+                text.fill(Color::WHITE);
+                let lines = 0..layout.lines.len();
+                self.draw_lines(&mut text, layout, lines, pad, pad, raster_scale);
+                let [r, g, b, a] = watermark.colour.map(u32::from);
+                for px in text.data_mut().chunks_exact_mut(4) {
+                    let coverage = 255 - u32::from(px[0]);
+                    let alpha = (coverage * a + 127) / 255;
+                    px[0] = ((r * alpha + 127) / 255) as u8;
+                    px[1] = ((g * alpha + 127) / 255) as u8;
+                    px[2] = ((b * alpha + 127) / 255) as u8;
+                    px[3] = alpha as u8;
+                }
+                let bitmap = Arc::new(text);
+                self.watermark = Some((key, bitmap.clone(), raster_scale));
+                (bitmap, raster_scale)
+            }
+        };
+        // Bitmap pixels to band pixels: centre on the origin, enlarge to the page scale,
+        // turn, then move to the page's centre in this band.
+        let enlarge = scale / bitmap_scale;
+        let transform = Transform::from_translate(
+            -(bitmap.width() as f32) * 0.5,
+            -(bitmap.height() as f32) * 0.5,
+        )
+        .post_scale(enlarge, enlarge)
+        .post_rotate(watermark.angle_deg)
+        .post_translate(
+            watermark.centre_x * scale,
+            (watermark.centre_y - shift) * scale,
+        );
+        let paint = PixmapPaint {
+            quality: FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        };
+        pm.draw_pixmap(0, 0, bitmap.as_ref().as_ref(), &paint, transform, None);
+    }
+
     /// Draws lines `lines` of `pl` with the layout's origin at (`dx`, `dy`) page points.
     fn draw_lines(
         &mut self,
@@ -386,6 +474,9 @@ fn fill_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: [u8; 4], sc
         pm.fill_rect(rect, &paint, Transform::identity(), None);
     }
 }
+
+/// Most device pixels per point a watermark is rasterised at; larger scales enlarge it.
+const WATERMARK_MAX_RASTER_SCALE: f32 = 2.0;
 
 /// Fill of the box drawn in place of an image that does not decode.
 pub const IMAGE_PLACEHOLDER: [u8; 4] = [214, 214, 214, 255];

@@ -681,6 +681,11 @@ pub struct DocumentState {
     pub different_even_odd: Mixed<bool>,
     pub hyphenation: Mixed<bool>,
     pub ligatures: Mixed<bool>,
+    /// The watermark text as typed in the Document pane (applied on Return or Apply).
+    pub watermark_text: String,
+    pub watermark_diagonal: bool,
+    /// The document has a watermark.
+    pub watermark_on: bool,
     // Section pane.
     /// `None` continues from the previous section.
     pub numbering_start: Option<u16>,
@@ -721,6 +726,9 @@ impl Default for DocumentState {
             different_even_odd: Mixed::Value(false),
             hyphenation: Mixed::Value(false),
             ligatures: Mixed::Value(true),
+            watermark_text: String::new(),
+            watermark_diagonal: true,
+            watermark_on: false,
             numbering_start: None,
             numbering_on: Mixed::Value(false),
             numbering_vertical: Mixed::Value(NumberingVertical::Bottom),
@@ -971,6 +979,9 @@ pub struct FindState {
     pub whole_word: bool,
     /// The match found last; Replace replaces it.
     pub last: Option<libertum_editor::SearchMatch>,
+    /// How many times the query occurs in the document and which occurrence `last` is
+    /// (1-based), shown in the bar as "3 of 17".
+    pub count: Option<(Option<usize>, usize)>,
     /// Short feedback in the bar: "No matches", "Replaced 3 places".
     pub notice: Option<String>,
 }
@@ -1005,6 +1016,10 @@ pub struct AppState {
     pub open_swatch: Option<SwatchTarget>,
     /// The caret is in a table cell (the Table menu's row/column commands apply).
     pub in_table: bool,
+    /// The window fills the screen.
+    pub fullscreen: bool,
+    /// The page thumbnails column is shown left of the pages.
+    pub thumbnails: bool,
     /// What the Table menu's merge and split commands can do at the caret.
     pub can_merge_right: bool,
     pub can_merge_below: bool,
@@ -1056,6 +1071,8 @@ impl Default for AppState {
             open_menu: None,
             open_swatch: None,
             in_table: false,
+            fullscreen: false,
+            thumbnails: false,
             can_merge_right: false,
             can_merge_below: false,
             can_split_cell: false,

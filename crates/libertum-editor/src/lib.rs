@@ -216,6 +216,9 @@ pub struct Editor {
     /// Formatting chosen with a caret (no selection), for the next text typed *at that
     /// position*; moving the caret drops it, as in Word and Pages.
     pending: Option<(DocPosition, CharFormat)>,
+    /// Every match of the query searched last, for the document revision it was built
+    /// from (see `search.rs`). Behind a mutex so searching stays a `&self` operation.
+    search_cache: std::sync::Mutex<Option<search::MatchCache>>,
 }
 
 impl Editor {
@@ -230,6 +233,7 @@ impl Editor {
             history: History::default(),
             preferred_x: None,
             pending: None,
+            search_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -241,6 +245,8 @@ impl Editor {
     /// caret to the first block.
     pub fn replace_document(&mut self, doc: Document) {
         self.doc = doc;
+        // Another document may carry the same revision number: the match list is not its.
+        *self.search_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.history = History::default();
         self.preferred_x = None;
         let at = first_position(&self.doc).unwrap_or(DocPosition {
@@ -1412,6 +1418,37 @@ impl Editor {
             .cloned()
             .map(|mut section| {
                 section.page = setup;
+                section
+            })
+            .collect();
+        let mut b = EditBuilder::default();
+        for (index, section) in sections.into_iter().enumerate() {
+            b.apply(&mut self.doc, Operation::SetSection { index, section })?;
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
+    /// The document's watermark (the first section's; the app sets them all together).
+    pub fn watermark(&self) -> Option<&libertum_model::Watermark> {
+        self.doc.sections.first().and_then(|s| s.watermark.as_ref())
+    }
+
+    /// Sets (or, with `None`, removes) the watermark on every section, as one undoable step.
+    pub fn set_watermark(
+        &mut self,
+        watermark: Option<libertum_model::Watermark>,
+    ) -> Result<ChangeSet, EditorError> {
+        if self.doc.sections.iter().all(|s| s.watermark == watermark) {
+            return Ok(ChangeSet::default());
+        }
+        let sections: Vec<Section> = self
+            .doc
+            .sections
+            .iter()
+            .cloned()
+            .map(|mut section| {
+                section.watermark = watermark.clone();
                 section
             })
             .collect();

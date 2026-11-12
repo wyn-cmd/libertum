@@ -297,3 +297,15 @@ proptest! {
         prop_assert_eq!(read.view().zoom_percent, zoom);
     }
 }
+
+#[test]
+fn a_watermark_round_trips() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(0), "Text")]);
+    document.sections[0].watermark = libertum_model::Watermark::new("DRAFT", false);
+    let bytes = Native::new(document.clone()).to_bytes().expect("write");
+    let back = Native::parse(&bytes).expect("read");
+    assert_eq!(
+        back.document().sections[0].watermark,
+        document.sections[0].watermark
+    );
+}

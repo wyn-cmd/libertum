@@ -2022,3 +2022,170 @@ fn replace_all_is_one_undo_step_and_skips_generated_entries() {
         "the generated entry is untouched"
     );
 }
+
+#[test]
+fn search_handles_accents_overlaps_and_text_that_changes_length_when_lowercased() {
+    let insensitive = SearchOptions::default();
+    let starts = |text: &str, needle: &str| -> Vec<std::ops::Range<usize>> {
+        crate::matches_in(text, needle, insensitive)
+    };
+    // Accented text: offsets are the original bytes.
+    let text = "Un RÉSUMÉ, un résumé";
+    let hits = starts(text, "résumé");
+    assert_eq!(hits.len(), 2);
+    for range in &hits {
+        assert_eq!(text[range.clone()].to_lowercase(), "résumé");
+    }
+    // Overlapping occurrences are all found.
+    assert_eq!(starts("aaaa", "aa"), vec![0..2, 1..3, 2..4]);
+    // U+0130 lowercases to two characters: the text after it still maps back exactly.
+    let text = "İstanbul and Cat and İ cat";
+    let hits = starts(text, "cat");
+    assert_eq!(hits.len(), 2);
+    for range in &hits {
+        assert!(
+            text[range.clone()].eq_ignore_ascii_case("cat"),
+            "{:?}",
+            &text[range.clone()]
+        );
+    }
+    // A needle longer than the text, and an empty one, find nothing.
+    assert!(starts("ab", "abc").is_empty());
+    assert!(starts("ab", "").is_empty());
+    assert!(starts("", "a").is_empty());
+}
+
+#[test]
+fn the_match_list_follows_edits_undo_and_a_changed_query() {
+    let mut ed = editor(&["cat one", "two cat", "three"]);
+    let options = SearchOptions::default();
+    let start = pos(&ed, 0, 0);
+    assert_eq!(ed.match_position("cat", options, None).0, 2);
+    let second = ed
+        .find("cat", options, pos(&ed, 0, 3), true)
+        .expect("second");
+    assert_eq!(
+        ed.match_position("cat", options, Some(&second)),
+        (2, Some(2))
+    );
+    // Typing a third occurrence: the list is rebuilt, not reused.
+    ed.set_caret(pos(&ed, 2, 5), false);
+    ed.insert_text(" cat").expect("type");
+    assert_eq!(ed.match_position("cat", options, None).0, 3);
+    let third = ed
+        .find("cat", options, pos(&ed, 2, 0), true)
+        .expect("third");
+    assert_eq!(third.range, 6..9);
+    assert_eq!(
+        ed.match_position("cat", options, Some(&third)),
+        (3, Some(3))
+    );
+    // Undo takes it away again.
+    ed.undo().expect("undo");
+    assert_eq!(ed.match_position("cat", options, None).0, 2);
+    // Another query, and other options, never see the old list.
+    assert_eq!(ed.match_position("two", options, None).0, 1);
+    let cased = SearchOptions {
+        match_case: true,
+        whole_word: false,
+    };
+    assert_eq!(ed.match_position("Cat", cased, None).0, 0);
+    // Backwards from the very start wraps to the last match; forwards from the end wraps
+    // to the first.
+    let last = ed.find("cat", options, start, false).expect("wrap back");
+    assert_eq!(last.block, ed.document().paragraph_at(1).expect("p").id);
+    let first = ed
+        .find("cat", options, pos(&ed, 2, 5), true)
+        .expect("wrap on");
+    assert_eq!(first.block, ed.document().paragraph_at(0).expect("p").id);
+    // A match that is not in the list has no position.
+    let stray = SearchMatch {
+        block: first.block,
+        range: 1..4,
+    };
+    assert_eq!(ed.match_position("cat", options, Some(&stray)), (2, None));
+    // A new document is searched afresh even though its revision starts over.
+    ed.replace_document(doc(&["no felines here"]));
+    assert_eq!(ed.match_position("cat", options, None).0, 0);
+}
+
+#[test]
+fn a_query_typed_letter_by_letter_finds_what_a_fresh_search_finds() {
+    let texts = [
+        "Catalogue of cats",
+        "a dog",
+        "Concatenate the CATALOGUE",
+        "cat",
+        "",
+    ];
+    for options in [
+        SearchOptions::default(),
+        SearchOptions {
+            match_case: true,
+            whole_word: false,
+        },
+        SearchOptions {
+            match_case: false,
+            whole_word: true,
+        },
+    ] {
+        let typed = editor(&texts);
+        let query = "catalogue";
+        for end in 1..=query.len() {
+            let needle = &query[..end];
+            // The typed editor narrows from the shorter query; a fresh one reads everything.
+            let fresh = editor(&texts);
+            let mut from = pos(&typed, 0, 0);
+            let mut narrowed = Vec::new();
+            let mut whole = Vec::new();
+            let total = typed.match_position(needle, options, None).0;
+            for _ in 0..total {
+                let Some(found) = typed.find(needle, options, from, true) else {
+                    break;
+                };
+                from = DocPosition {
+                    block: found.block,
+                    offset: found.range.start + 1,
+                };
+                narrowed.push(found.range);
+            }
+            let mut from = pos(&fresh, 0, 0);
+            for _ in 0..fresh.match_position(needle, options, None).0 {
+                let Some(found) = fresh.find(needle, options, from, true) else {
+                    break;
+                };
+                from = DocPosition {
+                    block: found.block,
+                    offset: found.range.start + 1,
+                };
+                whole.push(found.range);
+            }
+            assert_eq!(narrowed, whole, "{needle:?} with {options:?}");
+            assert_eq!(total, fresh.match_position(needle, options, None).0);
+        }
+        // Deleting a letter widens the search again.
+        assert_eq!(
+            typed.match_position("cat", options, None).0,
+            editor(&texts).match_position("cat", options, None).0
+        );
+    }
+}
+
+#[test]
+fn a_watermark_goes_on_every_section_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let mut d = ed.document().clone();
+    d.sections.push(libertum_model::Section::default());
+    ed.replace_document(d);
+    assert!(ed.watermark().is_none());
+    let mark = libertum_model::Watermark::new("DRAFT", true);
+    ed.set_watermark(mark.clone()).expect("set");
+    assert!(ed.document().sections.iter().all(|s| s.watermark == mark));
+    assert_eq!(ed.watermark().map(|w| w.text.as_str()), Some("DRAFT"));
+    // The same again is not an undo step.
+    let steps = ed.history().undo_len();
+    assert!(ed.set_watermark(mark).expect("same").is_empty());
+    assert_eq!(ed.history().undo_len(), steps);
+    ed.undo().expect("undo");
+    assert!(ed.document().sections.iter().all(|s| s.watermark.is_none()));
+}

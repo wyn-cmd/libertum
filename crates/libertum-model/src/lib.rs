@@ -20,7 +20,7 @@ pub use bookmark::Bookmark;
 pub use document::{
     BlockList, ChangeSet, DEFAULT_COLUMN_GUTTER_PT, DEFAULT_HEADER_FOOTER_DISTANCE_PT, Document,
     MAX_COLUMNS, ModelError, PageNumberHorizontal, PageNumberPos, PageNumberVertical, ParaLocation,
-    Section, TableCellLocation,
+    Section, TableCellLocation, Watermark,
 };
 pub use format::{
     BOLD, BorderSides, Borders, CharFormat, Ligatures, LineSpacing, MAX_TAB_STOPS, ParaFormat,

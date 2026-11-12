@@ -2219,3 +2219,83 @@ fn a_pageless_view_draws_no_page_numbers_or_headers() {
             .any(|d| matches!(d, Decoration::Text { text, .. } if text == "Running head"))
     );
 }
+
+#[test]
+fn the_caret_is_as_tall_as_the_text_not_the_line() {
+    let mut s = LayoutState::new(
+        PageGeometry::a4(),
+        vec![para(1, "Caret height")],
+        LayoutOptions::default(),
+    );
+    s.paginate_all();
+    let caret = s.caret_rect(0, 0, 1.0).expect("a caret");
+    let layout = s.paragraph_layout(0).expect("layout");
+    let line = &layout.lines[0];
+    // 12 pt Cambria at the default line spacing: the line box is about 16-17 pt, the glyph
+    // box about 13-14 pt. The caret follows the text, or it looks oversized.
+    assert!(
+        (9.0..15.0).contains(&caret.height),
+        "caret height {} is not the text's",
+        caret.height
+    );
+    assert!(
+        caret.height < line.height,
+        "the caret ({} pt) should be shorter than the line box ({} pt)",
+        caret.height,
+        line.height
+    );
+}
+
+#[test]
+fn a_watermark_is_sized_to_the_page_and_centred_on_it() {
+    use libertum_model::{BlockId, Document, Paragraph, Watermark};
+    if !fcx_has_fonts() {
+        return;
+    }
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Body")]);
+    let geo = PageGeometry::a4();
+    let mut plain = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    plain.paginate_all();
+    assert!(plain.page_watermark(0).is_none(), "no watermark by default");
+    let plain_hash = plain.page_content_hash(0);
+
+    doc.sections[0].watermark = Watermark::new("DRAFT", true);
+    let mut s = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    s.paginate_all();
+    let w = s.page_watermark(0).expect("a watermark");
+    assert_eq!(w.text, "DRAFT");
+    assert!((w.centre_x - geo.width_pt / 2.0).abs() < 0.01);
+    assert!((w.centre_y - geo.height_pt / 2.0).abs() < 0.01);
+    assert!(
+        w.angle_deg < -45.0 && w.angle_deg > -60.0,
+        "rises along the diagonal: {}",
+        w.angle_deg
+    );
+    let diagonal = (geo.width_pt.powi(2) + geo.height_pt.powi(2)).sqrt();
+    let width = w.layout.layout.width();
+    assert!(
+        width > diagonal * 0.4 && width < diagonal * 0.8,
+        "spans most of it: {width}"
+    );
+    assert_ne!(s.page_content_hash(0), plain_hash, "the page repaints");
+    assert!(
+        s.page_items(0)
+            .iter()
+            .any(|i| i.top <= 0.0 && i.bottom >= geo.height_pt - 0.01)
+    );
+
+    doc.sections[0].watermark = Watermark::new("CONFIDENTIAL COPY", false);
+    let mut h = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    h.paginate_all();
+    let w = h.page_watermark(0).expect("a watermark");
+    assert_eq!(w.angle_deg, 0.0);
+    assert!(w.layout.layout.width() <= geo.width_pt * 0.85);
+    assert!(
+        Watermark::new("   ", true).is_none(),
+        "blank text is no watermark"
+    );
+    assert_eq!(
+        Watermark::new("a\nb", true).map(|w| w.text),
+        Some("a b".to_owned())
+    );
+}

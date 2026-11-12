@@ -35,8 +35,8 @@ const ZOOM_INSET: f32 = 2.0;
 /// The combined Zoom control: inset, two step buttons, the number, the unit and the chevron.
 const W_ZOOM: f32 =
     ZOOM_INSET * 2.0 + ZOOM_STEP_W * 2.0 + ZOOM_NUMBER_W + ZOOM_UNIT_W + ZOOM_CHEVRON_W;
-const W_PAGE_BREAK: f32 = 68.0;
-const CENTRE_WIDTHS: [f32; 6] = [58.0, 52.0, 52.0, 64.0, 62.0, 68.0];
+const W_FULL_SCREEN: f32 = 68.0;
+const CENTRE_WIDTHS: [f32; 4] = [58.0, 52.0, 52.0, 64.0];
 /// The four inspector buttons (Format, Document, Headers, Notes) share one width and one gap,
 /// so the group reads as an even strip whatever the active pane is or how long a caption is.
 const W_INSPECTOR: f32 = 76.0;
@@ -46,9 +46,9 @@ fn group_width(widths: &[f32]) -> f32 {
     widths.iter().sum::<f32>() + BUTTON_SPACING * widths.len().saturating_sub(1) as f32
 }
 
-/// Width of the left group: View, Page Break and the combined Zoom control.
+/// Width of the left group: View, Full Screen and the combined Zoom control.
 fn left_width() -> f32 {
-    group_width(&[W_VIEW, W_PAGE_BREAK, W_ZOOM])
+    group_width(&[W_VIEW, W_FULL_SCREEN, W_ZOOM])
 }
 
 /// Left edge of the View button, in window coordinates.
@@ -56,14 +56,14 @@ fn view_x() -> f32 {
     LEFT_INSET
 }
 
-/// Left edge of the Page Break button, which follows View.
-fn page_break_x() -> f32 {
+/// Left edge of the Full Screen button, which follows View.
+fn full_screen_x() -> f32 {
     view_x() + W_VIEW + BUTTON_SPACING
 }
 
-/// Left edge of the Zoom button, which follows Page Break and its stepper.
+/// Left edge of the Zoom button, which follows Full Screen.
 fn zoom_x() -> f32 {
-    page_break_x() + W_PAGE_BREAK + BUTTON_SPACING
+    full_screen_x() + W_FULL_SCREEN + BUTTON_SPACING
 }
 
 /// Left edge of the Insert button, which sits at the start of the centred group.
@@ -324,9 +324,19 @@ pub fn view<'a>(state: &'a AppState, zoom_percent: u16, t: Tokens) -> Element<'a
             .active(state.open_menu == Some(Menu::View))
             .on_press(Message::ToggleMenu(Menu::View))
             .view(t),
-        Btn::icon(Icon::FilePlus, s::TB_PAGE_BREAK, W_PAGE_BREAK)
-            .on_press(Message::Insert(InsertAction::PageBreak))
-            .view(t),
+        // Page Break lives in the Insert menu and on Ctrl/Cmd+Enter.
+        Btn::icon(
+            if state.fullscreen {
+                Icon::Minimize
+            } else {
+                Icon::Maximize
+            },
+            s::TB_FULL_SCREEN,
+            W_FULL_SCREEN,
+        )
+        .active(state.fullscreen)
+        .on_press(Message::ToggleFullScreen)
+        .view(t),
         zoom_control(state, zoom_percent, t),
     ]
     .spacing(BUTTON_SPACING)
@@ -345,9 +355,6 @@ pub fn view<'a>(state: &'a AppState, zoom_percent: u16, t: Tokens) -> Element<'a
             .on_press(Message::Insert(InsertAction::Image)),
         Btn::icon(Icon::Asterisk, s::TB_FOOTNOTE, CENTRE_WIDTHS[3])
             .on_press(Message::Insert(InsertAction::Footnote)),
-        // Placeholders: no text boxes yet, and comments are out of scope for v1.
-        Btn::icon(Icon::TextBox, s::TB_TEXT_BOX, CENTRE_WIDTHS[4]),
-        Btn::icon(Icon::Comment, s::TB_COMMENT, CENTRE_WIDTHS[5]),
     ]
     .into_iter()
     .map(|b: Btn| b.view(t)))
@@ -472,6 +479,18 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             Entry::item(s::VIEW_FIND, Message::OpenFind).shortcut(shortcuts::label(Shortcut::Find)),
             Entry::item(s::VIEW_SETTINGS, Message::OpenSettings)
                 .shortcut(shortcuts::label(Shortcut::Settings)),
+            Entry::item(s::VIEW_HOME, Message::GoHome)
+                .shortcut(shortcuts::label(Shortcut::CloseDocument)),
+            Entry::item(s::VIEW_STITCH, Message::OpenStitch),
+            Entry::item(
+                if state.fullscreen {
+                    s::VIEW_EXIT_FULL_SCREEN
+                } else {
+                    s::VIEW_ENTER_FULL_SCREEN
+                },
+                Message::ToggleFullScreen,
+            )
+            .shortcut(shortcuts::label(Shortcut::FullScreen)),
             Entry::item(s::VIEW_WORD_COUNT, Message::View(ViewAction::WordCount))
                 .checked(state.show_word_count),
             Entry::Separator,
@@ -485,7 +504,12 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 Message::ToggleInspector(Inspector::Bookmarks),
             )
             .checked(state.sidebar_visible && state.inspector == Inspector::Bookmarks),
-            Entry::disabled(s::VIEW_THUMBNAILS),
+            // Thumbnails show pages, so they are off in the pageless view.
+            if state.pageless {
+                Entry::disabled(s::VIEW_THUMBNAILS)
+            } else {
+                Entry::item(s::VIEW_THUMBNAILS, Message::ToggleThumbnails).checked(state.thumbnails)
+            },
         ],
         Menu::Zoom => {
             let mut list: Vec<Entry> = vec![
@@ -806,8 +830,8 @@ mod tests {
 
     #[test]
     fn left_buttons_are_ordered_view_page_break_zoom() {
-        assert!(view_x() < page_break_x());
-        assert!(page_break_x() < zoom_x());
+        assert!(view_x() < full_screen_x());
+        assert!(full_screen_x() < zoom_x());
         // The combined Zoom control ends after its own width, then Insert starts.
         let zoom_end = zoom_x() + W_ZOOM;
         assert!(menu_x(Menu::Insert, 1200.0) >= zoom_end);
@@ -822,7 +846,7 @@ mod tests {
 
     #[test]
     fn left_width_matches_the_row_it_describes() {
-        let expected = W_VIEW + W_PAGE_BREAK + W_ZOOM + 2.0 * BUTTON_SPACING;
+        let expected = W_VIEW + W_FULL_SCREEN + W_ZOOM + 2.0 * BUTTON_SPACING;
         assert!((left_width() - expected).abs() < 0.01);
     }
 

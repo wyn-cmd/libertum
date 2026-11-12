@@ -38,8 +38,22 @@ use crate::state::Zoom;
 /// Gap between pages and padding around the page strip, in logical pixels.
 const PAGE_GAP: f32 = 24.0;
 const STRIP_PADDING: f32 = 24.0;
-/// Logical pixels per wheel "line".
-const LINE_PX: f32 = 80.0;
+/// Logical pixels per wheel "line": one notch of a mouse wheel moves the page this far, the
+/// distance browsers and Word use on Windows (three lines of text at the default setting).
+const LINE_PX: f32 = 100.0;
+
+/// Whether a wheel event is a notch of a mouse wheel rather than a trackpad's fine motion.
+/// A wheel reports whole lines; a precision trackpad reports pixels (macOS, Linux) or small
+/// fractions of a line many times a second (Windows), already smoothed by the system.
+fn wheel_is_stepped(delta: &mouse::ScrollDelta) -> bool {
+    match *delta {
+        mouse::ScrollDelta::Lines { x, y } => {
+            let whole = |v: f32| v != 0.0 && v.fract() == 0.0;
+            (whole(x) || x == 0.0) && (whole(y) || y == 0.0) && (x != 0.0 || y != 0.0)
+        }
+        mouse::ScrollDelta::Pixels { .. } => false,
+    }
+}
 /// Logical px per point at 100% zoom (CSS 96 dpi over 72 pt per inch).
 const PX_PER_PT: f32 = 96.0 / 72.0;
 /// Scrollbar thickness and minimum thumb length, logical pixels.
@@ -48,6 +62,14 @@ const MIN_THUMB: f32 = 28.0;
 /// A second press within this window and slop counts as a double-click (third: triple).
 const DOUBLE_CLICK_MAX: std::time::Duration = std::time::Duration::from_millis(400);
 const CLICK_SLOP: f32 = 4.0;
+/// Tint of the text Find found last (amber, translucent so the glyphs stay readable).
+const FIND_MATCH_COLOUR: iced::Color = iced::Color {
+    r: 1.0,
+    g: 0.78,
+    b: 0.0,
+    a: 0.5,
+};
+
 /// Drag-selection auto-scroll: minimum step and cap per pointer move, logical pixels.
 const DRAG_SCROLL_MIN: f32 = 10.0;
 const DRAG_SCROLL_MAX: f32 = 60.0;
@@ -369,6 +391,9 @@ pub struct CanvasProps {
     pub caret: Option<CaretRect>,
     /// Selection highlight rectangles in page coordinates.
     pub selection: Vec<SelectionRect>,
+    /// The text Find found last, in page coordinates: drawn in a stronger colour over the
+    /// selection so the match stands out exactly.
+    pub find: Vec<SelectionRect>,
     /// IME composition text, drawn inline at the caret until it is committed.
     pub preedit: Option<PreeditOverlay>,
     /// Keep requesting a redraw every frame (autoscroll test; `App` ticks on `window::frames`).
@@ -399,7 +424,10 @@ pub struct PreeditOverlay {
 #[derive(Debug, Clone, Copy)]
 pub enum CanvasEvent {
     /// Wheel scrolling, in logical pixels (positive y scrolls down).
-    Wheel { dx: f32, dy: f32 },
+    /// Scroll by this many logical pixels. `stepped` is true for a mouse wheel's notches,
+    /// which the app glides to; a trackpad's fine deltas (and a drag past the edge) are
+    /// applied as they come, because the system already smooths them.
+    Wheel { dx: f32, dy: f32, stepped: bool },
     /// Scrollbar drag: absolute offsets in physical pixels (`None` leaves an axis alone).
     ScrollTo { x: Option<f32>, y: Option<f32> },
     /// The widget's size in logical pixels changed.
@@ -803,6 +831,7 @@ where
                     shell.capture_event();
                     return;
                 }
+                let stepped = wheel_is_stepped(delta);
                 let (mut dx, mut dy) = match *delta {
                     mouse::ScrollDelta::Lines { x, y } => (-x * LINE_PX, -y * LINE_PX),
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
@@ -810,7 +839,7 @@ where
                 if state.shift && dx == 0.0 {
                     (dx, dy) = (dy, 0.0);
                 }
-                shell.publish((self.on_event)(CanvasEvent::Wheel { dx, dy }));
+                shell.publish((self.on_event)(CanvasEvent::Wheel { dx, dy, stepped }));
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
@@ -918,7 +947,11 @@ where
                     if over != 0.0 {
                         let dy =
                             over.signum() * (over.abs().min(DRAG_SCROLL_MAX) + DRAG_SCROLL_MIN);
-                        shell.publish((self.on_event)(CanvasEvent::Wheel { dx: 0.0, dy }));
+                        shell.publish((self.on_event)(CanvasEvent::Wheel {
+                            dx: 0.0,
+                            dy,
+                            stepped: false,
+                        }));
                     }
                     shell.capture_event();
                     return;
@@ -1064,6 +1097,24 @@ where
                                 ..Quad::default()
                             },
                             selection_colour,
+                        );
+                    }
+                }
+            }
+
+            // The current Find match: amber over the selection tint, so it reads as "found
+            // here" rather than as an ordinary selection, on white pages in both themes.
+            for s in &self.props.find {
+                if let Some(rect) = page_point_rect(
+                    &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
+                ) {
+                    if rect.intersects(&bounds) {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: rect,
+                                ..Quad::default()
+                            },
+                            FIND_MATCH_COLOUR,
                         );
                     }
                 }
@@ -1264,6 +1315,7 @@ mod tests {
             source: view.source.clone(),
             caret,
             selection: Vec::new(),
+            find: Vec::new(),
             preedit: None,
             animate: false,
             booklet: false,
@@ -1376,5 +1428,28 @@ mod variable_page_tests {
         assert!(m.page_rect(1, 1000.0).width > m.page_rect(0, 1000.0).width);
         assert!((m.page_top(1) - (m.page_rect(0, 1000.0).height + m.gap + m.pad)).abs() < 0.01);
         assert_eq!(m.visible_pages(0.0, 2000.0), 0..2);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn whole_lines_are_wheel_notches_and_fine_deltas_are_a_trackpad() {
+        let lines = |x, y| mouse::ScrollDelta::Lines { x, y };
+        assert!(wheel_is_stepped(&lines(0.0, 1.0)));
+        assert!(wheel_is_stepped(&lines(0.0, -3.0)));
+        assert!(wheel_is_stepped(&lines(1.0, 0.0)));
+        assert!(
+            !wheel_is_stepped(&lines(0.0, 0.25)),
+            "a precision trackpad on Windows"
+        );
+        assert!(!wheel_is_stepped(&lines(0.0, -1.5)));
+        assert!(!wheel_is_stepped(&lines(0.0, 0.0)));
+        assert!(!wheel_is_stepped(&mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: 40.0
+        }));
     }
 }

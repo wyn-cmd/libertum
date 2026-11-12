@@ -263,6 +263,45 @@ pub struct Section {
     pub link_headers_to_previous: bool,
     /// Use the previous section's footers (Word "Link to Previous").
     pub link_footers_to_previous: bool,
+    /// Text drawn large and faint behind the body of every page of this section ("DRAFT",
+    /// "CONFIDENTIAL"). The app sets it on every section at once.
+    pub watermark: Option<Watermark>,
+}
+
+/// A text watermark: drawn behind the page's content, centred, in light grey.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Watermark {
+    pub text: String,
+    /// Along the page's diagonal, rising to the right; otherwise horizontal.
+    pub diagonal: bool,
+}
+
+impl Default for Watermark {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            diagonal: true,
+        }
+    }
+}
+
+impl Watermark {
+    /// Longest watermark text kept, characters.
+    pub const MAX_CHARS: usize = 60;
+
+    /// A watermark for `text`, or `None` when the text is blank. Line breaks become spaces
+    /// and the text is cut to [`MAX_CHARS`](Self::MAX_CHARS).
+    pub fn new(text: &str, diagonal: bool) -> Option<Self> {
+        let text: String = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(Self::MAX_CHARS)
+            .collect();
+        (!text.is_empty()).then_some(Self { text, diagonal })
+    }
 }
 
 /// Most columns a section may use. Word allows up to 45; the inspector caps it at 12, and the
@@ -291,6 +330,7 @@ impl Default for Section {
             column_gutter_pt: DEFAULT_COLUMN_GUTTER_PT,
             link_headers_to_previous: false,
             link_footers_to_previous: false,
+            watermark: None,
         }
     }
 }
@@ -396,9 +436,23 @@ impl ChangeSet {
     }
 }
 
+/// How many operations a document has had applied. It tells caches built from the content
+/// (the Find match list) that they are stale. It is bookkeeping, not content, so it never
+/// makes two documents unequal and is never written to a file.
+#[derive(Clone, Copy, Debug, Default)]
+struct Revision(u64);
+
+impl PartialEq for Revision {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// The document: body blocks plus the bookkeeping needed by the editor.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Document {
+    #[serde(skip)]
+    revision: Revision,
     body: BlockList,
     next_id: u64,
     #[serde(skip)]
@@ -452,6 +506,7 @@ impl Document {
             body: BlockList::new(),
             next_id: 1,
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections: vec![Section::default()],
@@ -461,6 +516,75 @@ impl Document {
         doc.body.push(Block::Paragraph(Paragraph::new(id, "")));
         doc.reindex();
         doc
+    }
+
+    /// The next id this document would allocate: stitching shifts a following document's ids
+    /// from here so nothing collides.
+    /// A counter that changes with every operation applied (undo and redo included). Equal
+    /// values on the same document mean nothing has changed in between.
+    pub fn revision(&self) -> u64 {
+        self.revision.0
+    }
+
+    pub fn next_free_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// The largest list group in use (0 when there are no lists).
+    pub fn max_list_group(&self) -> u64 {
+        self.paragraphs()
+            .filter_map(|paragraph| paragraph.props.list.as_ref().map(|list| list.group))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Shifts every paragraph and table id, the TOC targets that point at them, and every list
+    /// group. Table cell paragraphs shift with everything else. Used by document stitching.
+    pub fn restamp(&mut self, shift: u64, list_shift: u64) {
+        for block in &mut self.body.blocks {
+            match block {
+                Block::Paragraph(paragraph) => paragraph.restamp(shift, list_shift),
+                Block::Table(table) => {
+                    table.id = BlockId(table.id.0 + shift);
+                    for row in &mut table.rows {
+                        for cell in &mut row.cells {
+                            for paragraph in &mut cell.paragraphs {
+                                paragraph.restamp(shift, list_shift);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.next_id = self.next_id.saturating_add(shift);
+        self.revision.0 = self.revision.0.wrapping_add(1);
+        self.reindex();
+    }
+
+    /// Appends blocks at the end of the body and rebuilds the index. Used by stitching, where
+    /// ids have already been made unique with [`restamp`](Self::restamp).
+    pub fn append_blocks(&mut self, blocks: Vec<Block>) {
+        if blocks.is_empty() {
+            return;
+        }
+        for block in &blocks {
+            if let Block::Paragraph(paragraph) = block {
+                self.next_id = self.next_id.max(paragraph.id.0 + 1);
+            }
+            if let Block::Table(table) = block {
+                self.next_id = self.next_id.max(table.id.0 + 1);
+            }
+        }
+        self.word_count += blocks
+            .iter()
+            .map(|block| match block {
+                Block::Paragraph(paragraph) => paragraph.word_count(),
+                Block::Table(table) => table.word_count(),
+            })
+            .sum::<usize>();
+        self.body.blocks.extend(blocks);
+        self.revision.0 = self.revision.0.wrapping_add(1);
+        self.reindex();
     }
 
     /// Rebuilds a document from its stored parts without touching the ids, so bookmarks,
@@ -479,6 +603,7 @@ impl Document {
             body,
             next_id: next_id.max(1),
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections,
@@ -550,6 +675,7 @@ impl Document {
             body: BlockList::from_blocks(list),
             next_id,
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections: vec![Section::default()],
@@ -724,6 +850,7 @@ impl Document {
     /// Applies one operation and returns its inverse. The document is unchanged when this
     /// returns an error.
     pub fn apply(&mut self, op: Operation) -> Result<Operation, ModelError> {
+        self.revision.0 = self.revision.0.wrapping_add(1);
         match op {
             Operation::InsertText {
                 block,

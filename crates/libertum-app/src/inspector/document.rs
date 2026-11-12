@@ -100,6 +100,7 @@ fn document_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     column![
         section(t, s::SECTION_PAPER, paper),
         section(t, s::SECTION_HEADER_FOOTER, header_footer(state, t)),
+        section(t, s::SECTION_WATERMARK, watermark(state, t)),
         section(
             t,
             s::SECTION_MARGINS,
@@ -217,6 +218,54 @@ fn header_footer<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     }
     body = body.push(caption(t, s::HF_FIELD_HINT));
     body.into()
+}
+
+/// The watermark text (applied on Return or Apply), its direction and Remove.
+fn watermark<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
+    let d = &state.document;
+    let input = text_input(s::WATERMARK_PLACEHOLDER, &d.watermark_text)
+        .on_input(|text| Message::Document(DocumentMsg::WatermarkText(text)))
+        .on_submit(Message::Document(DocumentMsg::WatermarkApply))
+        .size(13)
+        .padding(Padding {
+            top: 4.0,
+            bottom: 4.0,
+            left: 8.0,
+            right: 8.0,
+        })
+        .width(Length::Fill);
+    let button = |label: &'static str, message: Option<DocumentMsg>| {
+        iced::widget::button(iced::widget::text(label).size(12))
+            .padding([4, 10])
+            .style(move |_, status| crate::widgets::controls::flat(t, status))
+            .on_press_maybe(message.map(Message::Document))
+    };
+    let can_apply = !d.watermark_text.trim().is_empty();
+    column![
+        input,
+        row![
+            container(check(
+                t,
+                s::WATERMARK_DIAGONAL,
+                Mixed::Value(d.watermark_diagonal),
+                DocumentMsg::WatermarkDiagonal
+            ))
+            .width(Length::Fill),
+            button(
+                s::WATERMARK_APPLY,
+                can_apply.then_some(DocumentMsg::WatermarkApply)
+            ),
+            button(
+                s::WATERMARK_REMOVE,
+                d.watermark_on.then_some(DocumentMsg::WatermarkRemove)
+            ),
+        ]
+        .spacing(6)
+        .align_y(Center),
+        caption(t, s::WATERMARK_HINT),
+    ]
+    .spacing(8)
+    .into()
 }
 
 /// A one-line text input styled like the other inspector controls.

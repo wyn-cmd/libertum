@@ -104,6 +104,7 @@ CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on W
 | `LIBERTUM_THEME=light\|dark` | Force the theme |
 | `LIBERTUM_INSPECTOR=format-style\|format-layout\|format-more\|document\|section` | Open a given inspector pane at start |
 | `LIBERTUM_BOOKLET=1` | Start in the booklet (two-page spread) view |
+| `LIBERTUM_THUMBNAILS=1` | Start with the page thumbnails column shown |
 | `LIBERTUM_MENU=view\|zoom` | Open a toolbar menu at start (for screenshots) |
 | `LIBERTUM_ZOOM=<percent>\|fit` | Initial zoom |
 | `LIBERTUM_UNITS=cm\|in` | Measurement units |

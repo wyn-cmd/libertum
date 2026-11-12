@@ -300,3 +300,48 @@ fn a_large_image_is_downsampled_when_decoded() {
         decoded.height
     );
 }
+
+#[test]
+fn a_watermark_is_drawn_faintly_behind_the_page() {
+    use libertum_model::{BlockId, Document, Paragraph, Watermark};
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "")]);
+    for diagonal in [true, false] {
+        doc.sections[0].watermark = Watermark::new("WATERMARK", diagonal);
+        let mut s = LayoutState::from_document(&doc, PageGeometry::a4(), LayoutOptions::default());
+        s.paginate_all();
+        if !has_fonts(&s) {
+            return;
+        }
+        for scale in [1.0f32, 2.5] {
+            let mut renderer = PageRenderer::default();
+            let pm = renderer.render_page(&s, 0, scale).expect("page");
+            // Pixels near the middle are grey: light, never black, never coloured.
+            let (cx, cy) = (pm.width() / 2, pm.height() / 2);
+            let mut grey = 0;
+            for y in cy.saturating_sub(40)..cy + 40 {
+                for x in cx.saturating_sub(200)..(cx + 200).min(pm.width()) {
+                    let [r, g, b] = pixel(&pm, x, y);
+                    if r < 250 {
+                        grey += 1;
+                        assert!(r > 150, "faint, not dark: {r} at {scale}");
+                        assert!(r.abs_diff(g) <= 2 && g.abs_diff(b) <= 2, "grey");
+                    }
+                }
+            }
+            assert!(
+                grey > 50,
+                "the watermark shows (diagonal {diagonal}, x{scale}): {grey}"
+            );
+            // The corners stay white.
+            assert_eq!(pixel(&pm, 2, 2), [255, 255, 255]);
+            assert_eq!(pixel(&pm, pm.width() - 3, pm.height() - 3), [255, 255, 255]);
+            // A strip has the same pixels as the whole page at that height.
+            let band = renderer
+                .render_band(&s, 0, scale, cy - 10, 20)
+                .expect("band");
+            for x in (0..pm.width()).step_by(7) {
+                assert_eq!(pixel(&band, x, 10), pixel(&pm, x, cy));
+            }
+        }
+    }
+}

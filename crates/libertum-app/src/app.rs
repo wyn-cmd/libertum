@@ -78,6 +78,11 @@ pub enum FormatMsg {
 
 #[derive(Debug, Clone)]
 pub enum DocumentMsg {
+    /// Watermark text being typed; applied with `WatermarkApply`.
+    WatermarkText(String),
+    WatermarkApply,
+    WatermarkDiagonal(bool),
+    WatermarkRemove,
     PageSize(PageSize),
     Orientation(Orientation),
     Header(bool),
@@ -270,6 +275,8 @@ impl FileContext {
 #[derive(Debug, Clone)]
 enum Pending {
     Close,
+    /// Back to the home screen after the unsaved-changes prompt.
+    Home,
     Open(PathBuf),
 }
 
@@ -284,6 +291,8 @@ enum Modal {
     MarkdownLoss { path: PathBuf, losses: Vec<String> },
     /// A snapshot from the last session is waiting: restore or discard it.
     Recovery,
+    /// Documents are being picked and ordered for stitching.
+    Stitch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +334,15 @@ pub enum Message {
     ReplaceAll,
     /// A recent file chosen on the home screen.
     OpenRecent(PathBuf),
+    /// Back to the home screen, closing the current document (Cmd/Ctrl+W or three Escapes).
+    GoHome,
+    /// Stitching: pick files to combine, reorder the list, then join them into one document.
+    OpenStitch,
+    StitchAdd(Vec<PathBuf>),
+    StitchMove(usize, i8),
+    StitchRemove(usize),
+    StitchGo,
+    CloseStitch,
     /// A file dropped on the window.
     FileDropped(PathBuf),
     /// Clipboard commands, from the right-click menu (the keyboard has the same ones).
@@ -350,6 +368,14 @@ pub enum Message {
     Autosaved(Result<(), String>),
     /// A command in the Table toolbar menu.
     Table(TableAction),
+    /// Full screen on or off (toolbar button, View menu, F11 / Ctrl+Cmd+F).
+    ToggleFullScreen,
+    /// Page thumbnails column on or off (View menu).
+    ToggleThumbnails,
+    /// The thumbnails column scrolled: its offset and visible height, logical pixels.
+    ThumbScrolled(f32, f32),
+    /// Show page `index` (0-based) at the top of the view (a thumbnail was clicked).
+    GoToPage(usize),
     /// Apply the built-in table style with this index to the caret's table (`None` removes
     /// the style).
     TableStyle(Option<usize>),
@@ -551,6 +577,10 @@ pub struct App {
     scroll: (f32, f32),
     /// Canvas size in logical pixels, once the widget has reported it.
     viewport: Option<Size>,
+    /// Rendered page thumbnails by page index: the page's content hash and the image.
+    thumb_cache: std::collections::HashMap<usize, (u64, iced::widget::image::Handle)>,
+    /// Offset and visible height of the thumbnails column, logical pixels.
+    thumb_scroll: (f32, f32),
     /// Window scale factor (device pixels per logical pixel).
     scale_factor: f32,
     scale_factor_known: bool,
@@ -593,6 +623,14 @@ pub struct App {
     fps: crate::fps::FrameCounter,
     /// The right-click menu, if one is open.
     context_menu: Option<ContextMenuState>,
+    /// Distance a mouse wheel has asked for that the view has not travelled yet, physical
+    /// pixels: the view glides to it over the next frames instead of jumping.
+    scroll_pending: (f32, f32),
+    last_frame: Option<Instant>,
+    /// Consecutive Escape presses and when the last one arrived: three in a row go home.
+    escape_presses: (u8, Instant),
+    /// Documents chosen for stitching, in order.
+    stitch_sources: Vec<crate::stitch::Source>,
 }
 
 /// An open right-click menu: where it is (window logical pixels) and what it acts on.
@@ -620,6 +658,7 @@ impl App {
             open_menu: menu_hook(),
             zoom: initial_zoom(),
             booklet: booklet_hook(),
+            thumbnails: thumbnails_hook(),
             page_count: doc.as_ref().map_or(0, DocView::page_total),
             current_page: 1,
             word_count: doc.as_ref().map_or(0, DocView::word_count),
@@ -658,9 +697,15 @@ impl App {
             notes: Vec::new(),
             bookmarks: Vec::new(),
             bookmark_draft: None,
+            thumb_cache: std::collections::HashMap::new(),
+            thumb_scroll: (0.0, 0.0),
             recovery_dir: recovery::data_dir().unwrap_or_else(std::env::temp_dir),
             pending_recovery: None,
             settings_open: false,
+            scroll_pending: (0.0, 0.0),
+            last_frame: None,
+            escape_presses: (0, Instant::now()),
+            stitch_sources: Vec::new(),
             #[cfg(feature = "fps")]
             fps: crate::fps::FrameCounter::default(),
             context_menu: None,
@@ -675,7 +720,11 @@ impl App {
     /// Starts on the home screen, or on the generated 500-page demo document when
     /// `LIBERTUM_DEMO=1` or `LIBERTUM_AUTOSCROLL=1` is set (the performance runs need it).
     // TODO(Phase 7): open a Markdown file passed on the command line.
-    pub fn boot(settings: Settings, path: Option<PathBuf>) -> (Self, Task<Message>) {
+    pub fn boot(
+        settings: Settings,
+        path: Option<PathBuf>,
+        open: Option<PathBuf>,
+    ) -> (Self, Task<Message>) {
         let mut tasks = vec![
             iced::system::theme().map(Message::SystemTheme),
             Self::query_scale_factor(),
@@ -727,6 +776,12 @@ impl App {
             None
         };
         let mut app = Self::with_doc(settings, path, doc);
+        // A document given on the command line (a double-clicked file) opens straight into
+        // the editor; an error shows over the home screen instead.
+        if let Some(open) = open.filter(|_| app.doc.is_none()) {
+            tasks.push(app.open_path(open));
+        }
+        // A crash snapshot is offered on the home screen only (see `check_recovery`).
         app.check_recovery();
         (app, Task::batch(tasks))
     }
@@ -834,6 +889,147 @@ impl App {
         let task = self.finish_edit(result);
         self.refresh_format();
         task
+    }
+
+    /// Switches the window between full screen and its normal size.
+    fn toggle_full_screen(&mut self) -> Task<Message> {
+        self.state.open_menu = None;
+        self.state.fullscreen = !self.state.fullscreen;
+        let mode = if self.state.fullscreen {
+            window::Mode::Fullscreen
+        } else {
+            window::Mode::Windowed
+        };
+        window::oldest().and_then(move |id| window::set_mode(id, mode))
+    }
+
+    /// Renders the thumbnails in view that are missing or out of date. Only pages in the
+    /// visible part of the column (plus one either side) are rendered, a few milliseconds
+    /// each, and far-away ones are dropped so the cache stays small.
+    fn refresh_thumbnails(&mut self) {
+        if !self.state.thumbnails || self.state.pageless {
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let total = doc.page_total();
+        let height = if self.thumb_scroll.1 > 0.0 {
+            self.thumb_scroll.1
+        } else {
+            self.viewport.map_or(800.0, |v| v.height)
+        };
+        let (first, last) = thumb_range(self.thumb_scroll.0, height, total);
+        let width_px = (THUMB_W * self.scale_factor).round() as u32;
+        for page in first..last {
+            let Some(hash) = doc.page_content_hash(page) else {
+                continue;
+            };
+            if self
+                .thumb_cache
+                .get(&page)
+                .is_some_and(|(cached, _)| *cached == hash)
+            {
+                continue;
+            }
+            if let Some((w, h, pixels)) = doc.render_thumbnail(page, width_px) {
+                let handle = iced::widget::image::Handle::from_rgba(w, h, pixels);
+                self.thumb_cache.insert(page, (hash, handle));
+            }
+        }
+        if self.thumb_cache.len() > THUMB_CACHE_PAGES {
+            let keep = first.saturating_sub(THUMB_CACHE_PAGES / 2)..last + THUMB_CACHE_PAGES / 2;
+            self.thumb_cache
+                .retain(|page, _| keep.contains(page) && *page < total);
+        }
+    }
+
+    /// The page thumbnails column: only the rows in view are built, with spacers for the
+    /// rest, so a thousand-page document costs the same as a short one.
+    fn thumbnails_panel(&self, total: usize, t: Tokens) -> Element<'_, Message> {
+        let height = if self.thumb_scroll.1 > 0.0 {
+            self.thumb_scroll.1
+        } else {
+            self.viewport.map_or(800.0, |v| v.height)
+        };
+        let (first, last) = thumb_range(self.thumb_scroll.0, height, total);
+        let current = self.state.current_page.saturating_sub(1);
+        let mut list = column![space().height(Length::Fixed(first as f32 * THUMB_ROW_H))];
+        for page in first..last {
+            let picture: Element<'_, Message> = match self.thumb_cache.get(&page) {
+                Some((_, handle)) => iced::widget::image(handle.clone())
+                    .width(Length::Fixed(THUMB_W))
+                    .height(Length::Fixed(THUMB_BOX_H))
+                    .content_fit(iced::ContentFit::Contain)
+                    .into(),
+                // Not paginated or rendered yet: a blank page.
+                None => container(space())
+                    .width(Length::Fixed(THUMB_W))
+                    .height(Length::Fixed(THUMB_BOX_H * 0.95))
+                    .style(|_| container::background(iced::Color::WHITE))
+                    .into(),
+            };
+            let selected = page == current;
+            let frame = container(picture)
+                .padding(2)
+                .style(move |_| container::Style {
+                    border: iced::Border {
+                        color: if selected { t.accent } else { t.divider },
+                        width: if selected { 2.0 } else { 1.0 },
+                        radius: 3.0.into(),
+                    },
+                    ..container::Style::default()
+                });
+            let label = text((page + 1).to_string()).size(11).color(if selected {
+                t.accent
+            } else {
+                t.text_secondary
+            });
+            // The page and its number sit in the middle of the row: the same space on the
+            // left and the right, whatever the column's width.
+            list = list.push(
+                button(
+                    container(column![frame, label].spacing(4).align_x(Center))
+                        .center_x(Length::Fill),
+                )
+                .padding(0)
+                .style(button::text)
+                .on_press(Message::GoToPage(page))
+                .height(Length::Fixed(THUMB_ROW_H))
+                .width(Length::Fill),
+            );
+        }
+        list = list.push(space().height(Length::Fixed(
+            total.saturating_sub(last) as f32 * THUMB_ROW_H,
+        )));
+        let scroll = iced::widget::scrollable(list.align_x(Center).width(Length::Fill))
+            .id(THUMB_LIST_ID)
+            // A thin scrollbar floating over the right-hand padding, as in the inspector, so
+            // it takes no width from the thumbnails and they stay centred.
+            .direction(iced::widget::scrollable::Direction::Vertical(
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(6)
+                    .scroller_width(6)
+                    .margin(2),
+            ))
+            .on_scroll(|viewport| {
+                Message::ThumbScrolled(viewport.absolute_offset().y, viewport.bounds().height)
+            })
+            .height(Length::Fill);
+        let edge = container(space().width(Length::Fixed(1.0)).height(Length::Fill))
+            .style(move |_| container::background(t.chrome_border));
+        container(row![
+            container(scroll)
+                .padding(Padding {
+                    top: 12.0,
+                    ..Padding::ZERO
+                })
+                .width(Length::Fixed(THUMB_PANEL_W - 1.0)),
+            edge
+        ])
+        .height(Length::Fill)
+        .style(move |_| container::background(t.inspector))
+        .into()
     }
 
     /// Width of the text column of the page setup, points (new images are fitted to it).
@@ -1119,6 +1315,7 @@ impl App {
         if self.doc.is_none() {
             return;
         }
+        self.refresh_thumbnails();
         if self.state.inspector == Inspector::Headers {
             self.headings = self.headings();
         }
@@ -1153,11 +1350,36 @@ impl App {
     fn on_canvas_event(&mut self, event: CanvasEvent) -> Task<Message> {
         let sf = self.scale_factor;
         match event {
-            CanvasEvent::Wheel { dx, dy } => {
-                self.scroll.0 += dx * sf;
-                self.scroll.1 += dy * sf;
+            CanvasEvent::Wheel { dx, dy, stepped } => {
+                if stepped {
+                    // A wheel notch: add it to the distance still to travel and glide there.
+                    // Notches add up, so spinning faster scrolls faster, and the total is
+                    // always exactly what the wheel asked for.
+                    if self.scroll_pending == (0.0, 0.0) {
+                        self.last_frame = Some(Instant::now());
+                    }
+                    // A notch the other way cancels what is left instead of fighting it.
+                    let add = |pending: f32, delta: f32| {
+                        if pending != 0.0 && delta != 0.0 && pending.signum() != delta.signum() {
+                            delta
+                        } else {
+                            pending + delta
+                        }
+                    };
+                    self.scroll_pending = (
+                        add(self.scroll_pending.0, dx * sf),
+                        add(self.scroll_pending.1, dy * sf),
+                    );
+                    self.trim_pending_to_edges();
+                } else {
+                    // A trackpad (or a drag past the edge): follow it exactly.
+                    self.scroll_pending = (0.0, 0.0);
+                    self.scroll.0 += dx * sf;
+                    self.scroll.1 += dy * sf;
+                }
             }
             CanvasEvent::ScrollTo { x, y } => {
+                self.scroll_pending = (0.0, 0.0);
                 self.scroll.0 = x.unwrap_or(self.scroll.0);
                 self.scroll.1 = y.unwrap_or(self.scroll.1);
             }
@@ -1536,13 +1758,7 @@ impl App {
         let page_top = m.page_top(caret.page);
         let top = page_top + caret.y * m.scale;
         let bottom = top + (caret.height.max(1.0)) * m.scale;
-        let visible_top = self.scroll.1 + m.pad;
-        let visible_bottom = self.scroll.1 + vp.height - m.pad;
-        if top < visible_top {
-            self.scroll.1 = top - m.pad;
-        } else if bottom > visible_bottom {
-            self.scroll.1 = bottom - vp.height + m.pad;
-        }
+        self.reveal_vertical(top, bottom);
         // Booklet view puts a page left or right of the viewport centre.
         let left = m.page_left(caret.page, vp.width) + caret.x * m.scale;
         let right = left + (caret.width.max(0.75)) * m.scale;
@@ -1554,6 +1770,71 @@ impl App {
             self.scroll.0 = right - vp.width + m.pad;
         }
         self.clamp_scroll();
+    }
+
+    /// Physical pixels at the top and bottom of the canvas that floating chrome covers: the
+    /// Find bar under the toolbar and the page and word count pill. Text scrolled into view
+    /// must clear them. They are ignored when the window is too short to honour them.
+    fn canvas_insets(&self) -> (f32, f32) {
+        let top = if self.state.find.open {
+            FIND_BAR_COVER
+        } else {
+            0.0
+        };
+        let bottom = if self.state.show_word_count {
+            WORD_COUNT_PILL_COVER
+        } else {
+            0.0
+        };
+        let (top, bottom) = (top * self.scale_factor, bottom * self.scale_factor);
+        if self.viewport_physical().height < (top + bottom) * 2.0 {
+            return (0.0, 0.0);
+        }
+        (top, bottom)
+    }
+
+    /// Scrolls vertically so the span `top..bottom` (physical canvas pixels) is in the part
+    /// of the viewport that nothing floats over. A span taller than that part shows its top.
+    fn reveal_vertical(&mut self, top: f32, bottom: f32) {
+        // Showing the caret wins over a wheel glide still in progress.
+        self.scroll_pending = (0.0, 0.0);
+        let m = self.metrics();
+        let vp = self.viewport_physical();
+        let (inset_top, inset_bottom) = self.canvas_insets();
+        let lead = m.pad + inset_top;
+        let trail = m.pad + inset_bottom;
+        let visible_top = self.scroll.1 + lead;
+        let visible_bottom = self.scroll.1 + vp.height - trail;
+        if top < visible_top || bottom - top > vp.height - lead - trail {
+            self.scroll.1 = top - lead;
+        } else if bottom > visible_bottom {
+            self.scroll.1 = bottom - vp.height + trail;
+        }
+    }
+
+    /// The selection's rectangles when the selection is exactly the match Find found last
+    /// (so the highlight goes away as soon as the caret moves or the text changes).
+    fn find_match_rects(&self) -> Vec<libertum_layout::SelectionRect> {
+        let (Some(doc), Some(found)) = (self.doc.as_ref(), self.state.find.last.as_ref()) else {
+            return Vec::new();
+        };
+        if !self.state.find.open {
+            return Vec::new();
+        }
+        let matches = doc
+            .editor()
+            .ordered_selection()
+            .is_some_and(|(start, end)| {
+                start.block == found.block
+                    && end.block == found.block
+                    && start.offset == found.range.start
+                    && end.offset == found.range.end
+            });
+        if matches {
+            doc.selection_rects()
+        } else {
+            Vec::new()
+        }
     }
 
     fn preedit_overlay(&self) -> Option<canvas::PreeditOverlay> {
@@ -1775,6 +2056,127 @@ impl App {
         Task::run(events, Message::Doc)
     }
 
+    // ------------------------------------------------------------ scrolling and going home
+
+    /// Glides the view towards where the mouse wheel asked it to go: each frame covers a
+    /// fixed fraction of what is left per unit of time, so the motion starts at once, eases
+    /// out, and ends exactly on the requested distance whatever the frame rate.
+    fn coast(&mut self, now: Instant) {
+        let dt = self
+            .last_frame
+            .map_or(0.0, |last| {
+                now.saturating_duration_since(last).as_secs_f32()
+            })
+            .clamp(0.0, 0.05);
+        self.last_frame = Some(now);
+        if dt == 0.0 || self.scroll_pending == (0.0, 0.0) {
+            return;
+        }
+        let fraction = 1.0 - (-SCROLL_GLIDE_RATE * dt).exp();
+        let step = |pending: f32| {
+            // The last physical pixel is taken in one go rather than approached forever.
+            if pending.abs() <= 1.0 {
+                pending
+            } else {
+                pending * fraction
+            }
+        };
+        let (sx, sy) = (step(self.scroll_pending.0), step(self.scroll_pending.1));
+        self.scroll.0 += sx;
+        self.scroll.1 += sy;
+        self.scroll_pending = (self.scroll_pending.0 - sx, self.scroll_pending.1 - sy);
+        self.trim_pending_to_edges();
+        self.clamp_scroll();
+    }
+
+    /// Drops the part of the pending distance that lies past the document's edges, so the
+    /// glide stops at the edge instead of running frames against it.
+    fn trim_pending_to_edges(&mut self) {
+        let (max_x, max_y) = self.metrics().max_scroll(self.viewport_physical());
+        let trim = |at: f32, pending: f32, max: f32| (at + pending).clamp(0.0, max.max(0.0)) - at;
+        self.scroll_pending = (
+            trim(self.scroll.0, self.scroll_pending.0, max_x),
+            trim(self.scroll.1, self.scroll_pending.1, max_y),
+        );
+        if self.scroll_pending.0.abs() < 0.01 {
+            self.scroll_pending.0 = 0.0;
+        }
+        if self.scroll_pending.1.abs() < 0.01 {
+            self.scroll_pending.1 = 0.0;
+        }
+    }
+
+    /// Cmd/Ctrl+W or three Escapes: back to the home screen, asking about unsaved changes.
+    fn request_home(&mut self) -> Task<Message> {
+        if self.doc.is_none() {
+            return Task::none();
+        }
+        if self.dirty {
+            self.modal = Some(Modal::Unsaved {
+                pending: Pending::Home,
+            });
+            return Task::none();
+        }
+        self.go_home();
+        Task::none()
+    }
+
+    /// Closes the document and shows the home screen with its templates and recent files.
+    fn go_home(&mut self) {
+        self.doc = None;
+        self.file = None;
+        self.file_context = None;
+        self.dirty = false;
+        self.modal = None;
+        self.after_save = None;
+        self.context_menu = None;
+        self.state.find = crate::state::FindState::default();
+        self.bookmark_draft = None;
+        self.scroll = (0.0, 0.0);
+        self.scroll_pending = (0.0, 0.0);
+        self.canvas_focused = false;
+        self.ime_preedit = None;
+        self.escape_presses = (0, Instant::now());
+        recovery::clear(&self.recovery_dir);
+        self.refresh_view();
+    }
+
+    /// Joins the chosen documents into a new, unsaved document, with its table of contents
+    /// rebuilt from all the headings.
+    fn stitch_now(&mut self) -> Task<Message> {
+        let sources = std::mem::take(&mut self.stitch_sources);
+        if sources.is_empty() {
+            self.modal = Some(Modal::Stitch);
+            return Task::none();
+        }
+        let documents = sources.into_iter().map(|source| source.document).collect();
+        let stitched = match crate::stitch::stitch(documents) {
+            Ok(document) => document,
+            Err(error) => {
+                self.modal = Some(Modal::Error(error.to_string()));
+                return Task::none();
+            }
+        };
+        let (mut doc, events) = DocView::open(stitched);
+        let _ = doc.edit(|ed| ed.refresh_table_of_contents());
+        doc.move_caret(|ed| ed.move_doc_start(false));
+        self.state.fonts = installed_fonts(&doc);
+        self.state.word_count = doc.word_count();
+        self.state.page_count = doc.page_total();
+        self.state.current_page = 1;
+        self.doc = Some(doc);
+        self.file = None;
+        self.file_context = None;
+        self.dirty = true;
+        self.modal = None;
+        self.scroll = (0.0, 0.0);
+        self.canvas_focused = true;
+        self.refresh_document();
+        self.refresh_view();
+        self.refresh_format();
+        Task::run(events, Message::Doc)
+    }
+
     // ------------------------------------------------------------ autosave and recovery
 
     /// The autosave period, when there is a document open and autosave is switched on.
@@ -1785,7 +2187,9 @@ impl App {
 
     /// Offers a snapshot from the last session, if one survived.
     fn check_recovery(&mut self) {
-        if self.doc.is_some() {
+        // Not over an open document, and not in place of a prompt already shown (an error
+        // opening the file Libertum was started with): the snapshot stays for next time.
+        if self.doc.is_some() || self.modal.is_some() {
             return;
         }
         if let Some((document, meta)) = recovery::load(&self.recovery_dir) {
@@ -1834,11 +2238,14 @@ impl App {
     // ------------------------------------------------------------ find and replace
 
     /// Cmd/Ctrl+F: opens the bar, seeded with a one-line selection the way Word does.
-    fn open_find(&mut self) {
+    /// Opens the Find bar with the keyboard in its query field, so the search can be typed
+    /// straight away, and searches at once when a selection seeded the query.
+    fn open_find(&mut self) -> Task<Message> {
         self.state.open_menu = None;
         self.state.find.open = true;
         self.state.find.notice = None;
         self.state.find.last = None;
+        self.state.find.count = None;
         if let Some(doc) = self.doc.as_ref()
             && let Some(text) = doc.editor().copy()
             && !text.is_empty()
@@ -1848,11 +2255,14 @@ impl App {
             self.state.find.query = text;
         }
         self.canvas_focused = false;
+        let search = self.find_as_typed();
+        Task::batch([search, iced::widget::operation::focus(FIND_FIELD_ID)])
     }
 
     fn close_find(&mut self) {
         self.state.find.open = false;
         self.state.find.last = None;
+        self.state.find.count = None;
         self.state.find.notice = None;
         self.canvas_focused = self.doc.is_some();
     }
@@ -1867,17 +2277,50 @@ impl App {
     /// Finds the next (or previous) match and selects it, so the canvas shows it without a
     /// second highlight system.
     fn find_step(&mut self, forward: bool) -> Task<Message> {
+        let Some(doc) = self.doc.as_ref() else {
+            return Task::none();
+        };
+        // From the far edge of the current match onwards: "next" moves on, "previous" goes
+        // back.
+        let from = match doc.editor().ordered_selection() {
+            Some((start, end)) => {
+                if forward {
+                    end
+                } else {
+                    start
+                }
+            }
+            None => doc.editor().caret(),
+        };
+        self.find_from(from, forward)
+    }
+
+    /// Search as the query is typed: from the start of the selection, so a match that still
+    /// fits the longer query stays where it is instead of jumping to the next one.
+    fn find_as_typed(&mut self) -> Task<Message> {
+        self.state.find.last = None;
+        self.state.find.count = None;
+        self.state.find.notice = None;
+        if self.state.find.query.is_empty() {
+            return Task::none();
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            return Task::none();
+        };
+        let from = doc
+            .editor()
+            .ordered_selection()
+            .map_or_else(|| doc.editor().caret(), |(start, _)| start);
+        self.find_from(from, true)
+    }
+
+    /// Finds the first match from `from` in the given direction, selects it and scrolls the
+    /// whole of it clear of the Find bar and the word-count pill.
+    fn find_from(&mut self, from: libertum_editor::DocPosition, forward: bool) -> Task<Message> {
         let query = self.state.find.query.clone();
         let options = self.find_options();
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
-        };
-        let selection = doc.editor().selection();
-        // From the edge of the current match onwards: "next" moves on, "previous" goes back.
-        let from = if forward {
-            selection.head
-        } else {
-            selection.anchor
         };
         match doc.editor().find(&query, options, from, forward) {
             Some(found) => {
@@ -1889,14 +2332,37 @@ impl App {
                     block: found.block,
                     offset: found.range.end,
                 };
+                // How many there are and which one this is: "3 of 17".
+                let (total, position) = doc.editor().match_position(&query, options, Some(&found));
+                self.state.find.count = Some((position, total));
                 self.state.find.last = Some(found);
                 self.state.find.notice = None;
                 doc.move_caret(|ed| ed.set_selection(start, end));
                 self.ensure_caret_visible();
+                // The caret is the match's end; bring its start into view as well.
+                let rects = self
+                    .doc
+                    .as_ref()
+                    .map(DocView::selection_rects)
+                    .unwrap_or_default();
+                if self.viewport.is_some() && !rects.is_empty() {
+                    let m = self.metrics();
+                    let top = rects
+                        .iter()
+                        .map(|r| m.page_top(r.page) + r.y * m.scale)
+                        .fold(f32::MAX, f32::min);
+                    let bottom = rects
+                        .iter()
+                        .map(|r| m.page_top(r.page) + (r.y + r.height) * m.scale)
+                        .fold(f32::MIN, f32::max);
+                    self.reveal_vertical(top, bottom);
+                    self.clamp_scroll();
+                }
                 self.refresh_view();
             }
             None => {
                 self.state.find.last = None;
+                self.state.find.count = None;
                 self.state.find.notice = Some(if query.is_empty() {
                     s::FIND_PLACEHOLDER.to_owned()
                 } else {
@@ -1919,6 +2385,7 @@ impl App {
         let result = doc.edit(|ed| ed.replace_match(&found, &replacement));
         let task = self.finish_edit(result);
         self.state.find.last = None;
+        self.state.find.count = None;
         self.refresh_format();
         Task::batch([task, self.find_step(true)])
     }
@@ -1939,6 +2406,7 @@ impl App {
         });
         let task = self.finish_edit(result);
         self.state.find.last = None;
+        self.state.find.count = None;
         self.state.find.notice = Some(if replaced == 0 {
             s::FIND_NO_MATCHES.to_owned()
         } else {
@@ -1965,21 +2433,19 @@ impl App {
             .unwrap_or_else(|| Format::from_settings(&self.settings));
         let mut path = if save_as { None } else { self.file.clone() };
         if path.is_none() {
+            // The name without its extension: the dialog adds the extension of the file type
+            // chosen in its list, so picking another type really changes the format.
             let suggested = self
                 .file
                 .as_ref()
-                .and_then(|path| path.file_name())
+                .and_then(|path| path.file_stem())
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("{}.{}", s::UNTITLED, current.extension()));
-            path = rfd::FileDialog::new()
-                .add_filter(
-                    s::FILE_FILTER_SUPPORTED,
-                    &[s::EXT_ODT, s::EXT_DOCX, s::EXT_MARKDOWN, s::EXT_RTF],
-                )
-                .add_filter(s::FILE_FILTER_ODT, &[s::EXT_ODT])
-                .add_filter(s::FILE_FILTER_DOCX, &[s::EXT_DOCX])
-                .add_filter(s::FILE_FILTER_MARKDOWN, &[s::EXT_MARKDOWN])
-                .add_filter(s::FILE_FILTER_RTF, &[s::EXT_RTF])
+                .unwrap_or_else(|| s::UNTITLED.to_owned());
+            let mut dialog = rfd::FileDialog::new();
+            for (label, extension) in save_filters(current) {
+                dialog = dialog.add_filter(label, &[extension]);
+            }
+            path = dialog
                 .set_title(s::FILE_SAVE_TITLE)
                 .set_file_name(suggested)
                 .save_file();
@@ -2094,7 +2560,15 @@ impl App {
             }
             (Modal::Unsaved { pending }, ModalChoice::Discard) => self.perform(pending),
             (Modal::Unsaved { .. }, ModalChoice::Cancel | ModalChoice::Restore) => Task::none(),
-            (Modal::Error(_), _) => Task::none(),
+            (Modal::Error(_), _) => {
+                // An error while adding files to a stitch (one file would not open) goes
+                // back to the stitch list, which still holds the files that did open.
+                if !self.stitch_sources.is_empty() {
+                    self.modal = Some(Modal::Stitch);
+                }
+                Task::none()
+            }
+            (Modal::Stitch, _) => Task::none(),
             (Modal::Recovery, ModalChoice::Restore) => self.restore_recovery(),
             (Modal::Recovery, _) => {
                 self.discard_recovery();
@@ -2114,6 +2588,10 @@ impl App {
             Pending::Close => {
                 recovery::clear(&self.recovery_dir);
                 iced::exit()
+            }
+            Pending::Home => {
+                self.go_home();
+                Task::none()
             }
             Pending::Open(path) => self.open_path(path),
         }
@@ -2159,7 +2637,8 @@ impl App {
             window::close_requests().map(|_| Message::CloseRequested),
         ];
         let autoscrolling = self.autoscroll.as_ref().is_some_and(AutoScroll::active);
-        if autoscrolling || self.state.sidebar_animating() {
+        let coasting = self.scroll_pending != (0.0, 0.0);
+        if autoscrolling || coasting || self.state.sidebar_animating() {
             subs.push(window::frames().map(Message::Frame));
         }
         if self.blinking(Instant::now()) {
@@ -2330,23 +2809,20 @@ impl App {
                 self.bookmark_draft = None;
                 self.persist_sidebar();
             }
-            Message::OpenFind => self.open_find(),
+            Message::OpenFind => return self.open_find(),
             Message::CloseFind => self.close_find(),
             Message::FindQuery(query) => {
                 self.state.find.query = query;
-                self.state.find.last = None;
-                self.state.find.notice = None;
+                return self.find_as_typed();
             }
             Message::ReplaceQuery(replace) => self.state.find.replace = replace,
             Message::ToggleFindCase => {
                 self.state.find.match_case = !self.state.find.match_case;
-                self.state.find.last = None;
-                self.state.find.notice = None;
+                return self.find_as_typed();
             }
             Message::ToggleFindWord => {
                 self.state.find.whole_word = !self.state.find.whole_word;
-                self.state.find.last = None;
-                self.state.find.notice = None;
+                return self.find_as_typed();
             }
             Message::FindNext => return self.find_step(true),
             Message::FindPrevious => return self.find_step(false),
@@ -2361,6 +2837,70 @@ impl App {
                 }
                 return self.after_move();
             }
+            Message::GoHome => return self.request_home(),
+            Message::OpenStitch => {
+                let picked = rfd::FileDialog::new()
+                    .add_filter(
+                        s::FILE_FILTER_SUPPORTED,
+                        &[
+                            s::EXT_NATIVE,
+                            s::EXT_ODT,
+                            s::EXT_DOCX,
+                            s::EXT_MARKDOWN,
+                            s::EXT_RTF,
+                        ],
+                    )
+                    .set_title(s::STITCH_ADD)
+                    .pick_files();
+                if let Some(paths) = picked {
+                    return self.update(Message::StitchAdd(paths));
+                }
+            }
+            Message::StitchAdd(paths) => {
+                let mut failed = Vec::new();
+                for path in paths {
+                    match FileContext::open(&path) {
+                        Ok((_context, document, warnings)) => {
+                            for warning in warnings {
+                                tracing::info!(%warning, path = %path.display(), "stitch import warning");
+                            }
+                            self.stitch_sources
+                                .push(crate::stitch::Source { path, document });
+                        }
+                        Err(error) => failed.push(format!("{}: {error}", path.display())),
+                    }
+                }
+                if !failed.is_empty() {
+                    self.modal = Some(Modal::Error(format!(
+                        "{} {}",
+                        s::OPEN_FAILED,
+                        failed.join("; ")
+                    )));
+                    return Task::none();
+                }
+                self.modal = Some(Modal::Stitch);
+            }
+            Message::StitchMove(index, direction) => {
+                let target = if direction < 0 {
+                    index.checked_sub(1)
+                } else {
+                    Some(index + 1).filter(|target| *target < self.stitch_sources.len())
+                };
+                if let Some(target) = target {
+                    self.stitch_sources.swap(index, target);
+                }
+            }
+            Message::StitchRemove(index) => {
+                if index < self.stitch_sources.len() {
+                    self.stitch_sources.remove(index);
+                }
+            }
+            Message::CloseStitch => {
+                self.stitch_sources.clear();
+                self.modal = None;
+            }
+            Message::StitchGo => return self.stitch_now(),
+            Message::Shortcut(Shortcut::CloseDocument) => return self.request_home(),
             Message::OpenSettings => {
                 self.state.open_menu = None;
                 self.settings_open = true;
@@ -2439,7 +2979,7 @@ impl App {
                 self.state.open_menu = None;
                 self.settings_open = true;
             }
-            Message::Shortcut(Shortcut::Find) => self.open_find(),
+            Message::Shortcut(Shortcut::Find) => return self.open_find(),
             Message::Shortcut(Shortcut::FindNext) => return self.find_step(true),
             Message::Shortcut(Shortcut::FindPrevious) => return self.find_step(false),
             Message::Shortcut(Shortcut::Save) => return self.save_document(false),
@@ -2504,11 +3044,33 @@ impl App {
                 if self.settings_open {
                     self.settings_open = false;
                 }
+                let something_open = self.settings_open
+                    || self.state.find.open
+                    || self.state.open_menu.is_some()
+                    || self.state.open_swatch.is_some();
                 if self.state.find.open {
                     self.close_find();
                 }
                 self.state.open_menu = None;
                 self.state.open_swatch = None;
+                // With nothing else in front, Escape leaves full screen first.
+                if self.state.fullscreen && !something_open {
+                    self.escape_presses = (0, Instant::now());
+                    return self.toggle_full_screen();
+                }
+                // Three Escapes in a row go back to the home screen, for anyone who does not
+                // know Ctrl/Cmd+W.
+                let now = Instant::now();
+                let (count, last) = self.escape_presses;
+                self.escape_presses = if now.duration_since(last).as_millis() <= 900 {
+                    (count.saturating_add(1), now)
+                } else {
+                    (1, now)
+                };
+                if self.escape_presses.0 >= 3 {
+                    self.escape_presses = (0, now);
+                    return self.request_home();
+                }
             }
             Message::ZoomSelected(zoom) => {
                 self.state.open_menu = None;
@@ -2567,6 +3129,7 @@ impl App {
             Message::BlinkTick(now) => self.on_blink_tick(now),
             Message::Frame(now) => {
                 self.state.tick_sidebar(now);
+                self.coast(now);
                 return self.autoscroll_frame(now);
             }
             Message::Insert(action) => {
@@ -2619,6 +3182,40 @@ impl App {
             Message::Table(action) => {
                 self.state.open_menu = None;
                 return self.table_action(action);
+            }
+            Message::ToggleFullScreen | Message::Shortcut(Shortcut::FullScreen) => {
+                return self.toggle_full_screen();
+            }
+            Message::ToggleThumbnails => {
+                self.state.open_menu = None;
+                self.state.thumbnails = !self.state.thumbnails;
+                if !self.state.thumbnails {
+                    self.thumb_cache.clear();
+                    return Task::none();
+                }
+                // Open on the page in view.
+                let current = self.state.current_page.saturating_sub(1);
+                let offset = (current as f32 * THUMB_ROW_H - THUMB_ROW_H).max(0.0);
+                self.thumb_scroll.0 = offset;
+                self.refresh_thumbnails();
+                return iced::widget::operation::scroll_to(
+                    THUMB_LIST_ID,
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(offset),
+                    },
+                );
+            }
+            Message::ThumbScrolled(offset, height) => {
+                self.thumb_scroll = (offset, height);
+                self.refresh_thumbnails();
+            }
+            Message::GoToPage(page) => {
+                let m = self.metrics();
+                self.scroll_pending = (0.0, 0.0);
+                self.scroll.1 = m.page_top(page) - m.pad;
+                self.clamp_scroll();
+                self.refresh_view();
             }
             Message::TableStyle(index) => {
                 self.state.open_menu = None;
@@ -3310,6 +3907,46 @@ impl App {
     // section. Headers, footers and section columns remain unbound until those units.
     fn apply_document(&mut self, msg: DocumentMsg) {
         match msg {
+            DocumentMsg::WatermarkText(text) => {
+                self.state.document.watermark_text = text;
+            }
+            DocumentMsg::WatermarkApply => {
+                let d = &self.state.document;
+                let watermark =
+                    libertum_model::Watermark::new(&d.watermark_text, d.watermark_diagonal);
+                if watermark.is_none() {
+                    return;
+                }
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| ed.set_watermark(watermark));
+                    let _ = self.finish_edit(result);
+                }
+                self.refresh_document();
+            }
+            DocumentMsg::WatermarkDiagonal(on) => {
+                self.state.document.watermark_diagonal = on;
+                // A watermark already on the pages turns at once.
+                let current = self
+                    .doc
+                    .as_ref()
+                    .and_then(|doc| doc.editor().watermark().cloned());
+                if let (Some(current), Some(doc)) = (current, self.doc.as_mut()) {
+                    let watermark = libertum_model::Watermark {
+                        diagonal: on,
+                        ..current
+                    };
+                    let result = doc.edit(|ed| ed.set_watermark(Some(watermark)));
+                    let _ = self.finish_edit(result);
+                    self.refresh_document();
+                }
+            }
+            DocumentMsg::WatermarkRemove => {
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| ed.set_watermark(None));
+                    let _ = self.finish_edit(result);
+                }
+                self.refresh_document();
+            }
             DocumentMsg::Hyphenation(on) => {
                 if let Some(doc) = self.doc.as_mut() {
                     let result = doc.edit(|ed| ed.set_document_hyphenation(on));
@@ -3496,6 +4133,10 @@ impl App {
         d.margin_right = Mixed::Value(Margin::from_points(setup.margins.right));
         d.hyphenation = Mixed::Value(document.styles.para_defaults.hyphenate);
         d.ligatures = Mixed::Value(document.styles.defaults.ligatures != Ligatures::None);
+        let watermark = document.sections.first().and_then(|s| s.watermark.clone());
+        d.watermark_on = watermark.is_some();
+        d.watermark_diagonal = watermark.as_ref().is_none_or(|w| w.diagonal);
+        d.watermark_text = watermark.map(|w| w.text).unwrap_or_default();
         self.refresh_section();
     }
 
@@ -3562,7 +4203,13 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let t = Tokens::of(self.scheme());
         let Some(doc) = &self.doc else {
-            return home::view(self.home_selection, &self.settings.recent_files, t);
+            // Prompts (the stitch dialog, an open error, crash recovery) belong on the home
+            // screen too: without this layer they were set but never drawn.
+            let home = home::view(self.home_selection, &self.settings.recent_files, t);
+            return match &self.modal {
+                None => home,
+                Some(_) => stack![home, self.modal_layer(t)].into(),
+            };
         };
         // The canvas uses the geometry the document is laid out with, so a page-setup change
         // resizes the pages as soon as `DocView` has re-paginated.
@@ -3578,6 +4225,7 @@ impl App {
                 ime_enabled: self.canvas_focused && self.state.editing.is_none(),
                 ime_caret: doc.caret_rect(),
                 selection: doc.selection_rects(),
+                find: self.find_match_rects(),
                 preedit: self.preedit_overlay(),
                 animate: self.autoscroll.as_ref().is_some_and(AutoScroll::active),
                 booklet: self.state.booklet,
@@ -3602,7 +4250,11 @@ impl App {
             canvas_stack = canvas_stack.push(self.fps_pill(t));
         }
 
-        let mut main = row![canvas_stack].height(Length::Fill);
+        let mut main = row![].height(Length::Fill);
+        if self.state.thumbnails && !doc.pageless {
+            main = main.push(self.thumbnails_panel(doc.page_total(), t));
+        }
+        main = main.push(canvas_stack);
         let headings: &[HeadingEntry] = if self.state.inspector == Inspector::Headers {
             &self.headings
         } else {
@@ -3673,6 +4325,88 @@ impl App {
             None => base,
             Some(_) => stack![base, self.modal_layer(t)].into(),
         }
+    }
+
+    /// The stitch dialog: the chosen documents in order, with add, move, remove and Stitch.
+    fn stitch_layer(&self, t: Tokens) -> Element<'_, Message> {
+        use crate::widgets::controls::{bold, caption};
+        let plain = |label: &'static str, message: Message| -> Element<'_, Message> {
+            button(text(label).size(12))
+                .padding([3, 8])
+                .style(move |_, status| flat(t, status))
+                .on_press(message)
+                .into()
+        };
+        let list = self.stitch_sources.iter().enumerate().fold(
+            column![].spacing(3),
+            |list, (index, source)| {
+                let name = source
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| source.path.display().to_string());
+                list.push(
+                    row![
+                        text(format!("{}. {name}", index + 1))
+                            .size(12)
+                            .color(t.text)
+                            .width(Length::Fill),
+                        plain("↑", Message::StitchMove(index, -1)),
+                        plain("↓", Message::StitchMove(index, 1)),
+                        plain("✕", Message::StitchRemove(index)),
+                    ]
+                    .spacing(4)
+                    .align_y(Center),
+                )
+            },
+        );
+        let body: Element<'_, Message> = if self.stitch_sources.is_empty() {
+            caption(t, s::STITCH_EMPTY)
+        } else {
+            list.into()
+        };
+        let footer = row![
+            space::horizontal(),
+            plain(s::STITCH_ADD, Message::OpenStitch),
+            plain(s::CANCEL, Message::CloseStitch),
+            button(text(s::STITCH_GO).size(12))
+                .padding([4, 14])
+                .style(move |_, _| button::Style {
+                    background: Some(t.accent.into()),
+                    text_color: t.on_accent,
+                    border: border::rounded(6),
+                    ..button::Style::default()
+                })
+                .on_press(Message::StitchGo),
+        ]
+        .spacing(8)
+        .align_y(Center);
+        let card = container(
+            column![
+                text(s::STITCH_TITLE).size(16).font(bold()).color(t.text),
+                caption(t, s::STITCH_HINT),
+                body,
+                footer,
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(Length::Fixed(520.0))
+        .style(move |_| container::Style {
+            background: Some(t.chrome.into()),
+            border: border::rounded(10),
+            ..container::Style::default()
+        });
+        stack![
+            mouse_area(space().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseStitch),
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
     }
 
     /// The Settings window: a card over the canvas. Every change applies at once and is
@@ -3806,7 +4540,8 @@ impl App {
                     .padding(6)
                     .width(Length::Fixed(150.0));
             if let Some(submit) = submit {
-                input = input.on_submit(submit);
+                // The query field: Enter finds the next match, and Find opens focused on it.
+                input = input.on_submit(submit).id(FIND_FIELD_ID);
             }
             let element: Element<'_, Message> = input.into();
             element
@@ -3855,6 +4590,12 @@ impl App {
         .align_y(Center);
         if let Some(notice) = &f.notice {
             bar = bar.push(text(notice.clone()).size(12).color(t.text_secondary));
+        } else if let Some((position, total)) = f.count {
+            bar = bar.push(
+                text(s::find_count(position, total))
+                    .size(12)
+                    .color(t.text_secondary),
+            );
         }
         container(
             container(bar)
@@ -3882,9 +4623,13 @@ impl App {
         let Some(modal) = &self.modal else {
             return space().into();
         };
+        if matches!(modal, Modal::Stitch) {
+            return self.stitch_layer(t);
+        }
         let (title, detail): (String, String) = match modal {
             Modal::Unsaved { .. } => (s::UNSAVED_TITLE.to_owned(), s::UNSAVED_DETAIL.to_owned()),
             Modal::Error(message) => (message.clone(), String::new()),
+            Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
             Modal::Recovery => {
                 let detail = match self
                     .pending_recovery
@@ -3928,6 +4673,7 @@ impl App {
                 self.modal_button(s::SAVE_ANYWAY, true, ModalChoice::Save),
                 self.modal_button(s::CANCEL, false, ModalChoice::Cancel),
             ],
+            Modal::Stitch => Vec::new(),
             Modal::Recovery => vec![
                 self.modal_button(s::RECOVERY_RESTORE, true, ModalChoice::Restore),
                 self.modal_button(s::RECOVERY_DISCARD, false, ModalChoice::Discard),
@@ -4089,6 +4835,64 @@ fn is_document_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// The Save dialog's file types, one per format the app writes: `current` first (the
+/// dialog preselects the first), then the native format and the others.
+fn save_filters(current: Format) -> Vec<(&'static str, &'static str)> {
+    let all = [
+        (Format::Native, s::FILE_FILTER_NATIVE),
+        (Format::Odt, s::FILE_FILTER_ODT),
+        (Format::Docx, s::FILE_FILTER_DOCX),
+        (Format::Rtf, s::FILE_FILTER_RTF),
+        (Format::Markdown, s::FILE_FILTER_MARKDOWN),
+    ];
+    let mut out: Vec<(&'static str, &'static str)> = all
+        .iter()
+        .filter(|(format, _)| *format == current)
+        .map(|(format, label)| (*label, format.extension()))
+        .collect();
+    out.extend(
+        all.iter()
+            .filter(|(format, _)| *format != current)
+            .map(|(format, label)| (*label, format.extension())),
+    );
+    out
+}
+
+/// How quickly a wheel glide closes the distance left, per second: about 86% of it in the
+/// first 100 ms and all but a pixel of a notch within a quarter of a second. Fast enough to
+/// feel direct, slow enough that the eye can follow the text.
+const SCROLL_GLIDE_RATE: f32 = 20.0;
+
+/// Page thumbnails: image width, the box a page is fitted into (an A4 page's proportions),
+/// one row's height with its number, the column's width, and how many rendered thumbnails
+/// are kept (about 70 KB each at 100% display scale).
+const THUMB_W: f32 = 112.0;
+const THUMB_BOX_H: f32 = 160.0;
+const THUMB_ROW_H: f32 = 196.0;
+const THUMB_PANEL_W: f32 = 150.0;
+const THUMB_CACHE_PAGES: usize = 200;
+/// Widget id of the thumbnails column's scroll area.
+const THUMB_LIST_ID: &str = "libertum-thumbnails";
+
+/// Pages whose thumbnail rows are in the visible part of a column scrolled to `offset`
+/// with `height` visible, one row either side: `first..last`.
+fn thumb_range(offset: f32, height: f32, total: usize) -> (usize, usize) {
+    let first = ((offset / THUMB_ROW_H).floor().max(0.0) as usize).saturating_sub(1);
+    let rows = (height / THUMB_ROW_H).ceil().max(1.0) as usize + 2;
+    let first = first.min(total);
+    (first, (first + rows).min(total))
+}
+
+/// Widget id of the Find bar's query field (focused when the bar opens).
+const FIND_FIELD_ID: &str = "libertum-find-query";
+
+/// Logical pixels below the toolbar that the Find bar covers (its 10 px gap, its height and
+/// a little air).
+const FIND_BAR_COVER: f32 = 64.0;
+/// Logical pixels above the canvas's bottom edge that the page and word count pill covers
+/// (its 14 px gap, its height and a little air).
+const WORD_COUNT_PILL_COVER: f32 = 52.0;
+
 fn ensure_extension(mut path: PathBuf, fallback: Format) -> PathBuf {
     let known = path.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case(s::EXT_DOCX)
@@ -4123,6 +4927,11 @@ fn key_event(event: Event, _status: event::Status, _window: window::Id) -> Optio
 fn demo_requested() -> bool {
     let on = |var: &str| std::env::var(var).is_ok_and(|v| v != "0" && !v.is_empty());
     on("LIBERTUM_DEMO") || on("LIBERTUM_AUTOSCROLL")
+}
+
+/// Test hook: `LIBERTUM_THUMBNAILS=1` opens with the page thumbnails column shown.
+fn thumbnails_hook() -> bool {
+    std::env::var("LIBERTUM_THUMBNAILS").is_ok_and(|v| v != "0" && !v.is_empty())
 }
 
 /// Test hook: `LIBERTUM_BOOKLET=1` opens in the booklet (spread) view for screenshots.
@@ -6328,15 +7137,20 @@ mod tests {
         let _ = app.update(Message::PasteText(Some("cat sat on the cat mat".into())));
         let _ = app.update(Message::OpenFind);
         assert!(app.state.find.open, "the bar opens");
+        // Typing the query already selects the first match and counts them all.
         let _ = app.update(Message::FindQuery("cat".into()));
-
-        // Next selects the first match, then the second, then wraps.
-        let _ = app.update(Message::FindNext);
+        assert_eq!(app.doc().editor().selection().anchor.offset, 0);
         assert_eq!(app.doc().editor().selection().head.offset, 3);
+        assert_eq!(app.state.find.count, Some((Some(1), 2)));
+        assert_eq!(s::find_count(Some(1), 2), "1 of 2");
+
+        // Next selects the second match, then wraps to the first.
         let _ = app.update(Message::FindNext);
         assert_eq!(app.doc().editor().selection().head.offset, 18);
+        assert_eq!(app.state.find.count, Some((Some(2), 2)));
         let _ = app.update(Message::FindNext);
         assert_eq!(app.doc().editor().selection().head.offset, 3);
+        assert_eq!(app.state.find.count, Some((Some(1), 2)));
         // Previous goes back the other way.
         let _ = app.update(Message::FindPrevious);
         assert_eq!(app.doc().editor().selection().head.offset, 18);
@@ -6760,5 +7574,625 @@ mod tests {
             "a rate is known after two windows"
         );
         let _ = app.view();
+    }
+
+    #[test]
+    fn ctrl_w_goes_home_and_asks_about_unsaved_changes() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert!(app.doc.is_some());
+        let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        assert!(app.doc.is_none(), "a clean document goes straight home");
+        assert!(app.file.is_none());
+
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("edited".into())));
+        let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        assert!(matches!(app.modal, Some(Modal::Unsaved { .. })));
+        assert!(
+            app.doc.is_some(),
+            "nothing closes until the prompt is answered"
+        );
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert!(app.doc.is_some(), "Cancel keeps the document");
+        let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        let _ = app.update(Message::ModalChoice(ModalChoice::Discard));
+        assert!(app.doc.is_none(), "Discard closes it");
+    }
+
+    #[test]
+    fn three_escapes_go_home() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(app.doc.is_some(), "two Escapes do nothing");
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(app.doc.is_none(), "the third goes home");
+    }
+
+    #[test]
+    fn a_wheel_notch_glides_exactly_one_step_and_a_trackpad_is_followed_directly() {
+        let mut app = scrolling_app();
+        app.scroll = (0.0, 0.0);
+        let notch = 100.0; // logical pixels per notch at scale 1
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: notch,
+            stepped: true,
+        }));
+        assert_eq!(app.scroll.1, 0.0, "nothing jumps: the view glides");
+        assert_eq!(app.scroll_pending.1, notch);
+        // Frames at 60 Hz: the position only ever moves forward, each step smaller than
+        // the one before, and it ends on the notch exactly.
+        let start = app.last_frame.expect("the glide is timed from the notch");
+        let mut previous = 0.0f32;
+        let mut last_step = f32::MAX;
+        let mut frames = 0u32;
+        while app.scroll_pending != (0.0, 0.0) && frames < 120 {
+            frames += 1;
+            app.coast(start + Duration::from_millis(u64::from(frames) * 16));
+            let step = app.scroll.1 - previous;
+            // (The last pixel is taken in one go, so that final step may be the larger.)
+            assert!(
+                step > 0.0 && (step <= last_step + 0.01 || step <= 1.0),
+                "eases out: {step}"
+            );
+            last_step = step;
+            previous = app.scroll.1;
+        }
+        assert!(
+            (app.scroll.1 - notch).abs() < 0.01,
+            "ends on the notch: {}",
+            app.scroll.1
+        );
+        assert!(frames < 30, "within half a second: {frames} frames");
+        let first_frame = 1.0 - (-SCROLL_GLIDE_RATE * 0.016f32).exp();
+        assert!(first_frame > 0.2, "it starts moving at once");
+
+        // Three quick notches travel three notches in all.
+        for _ in 0..3 {
+            let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+                dx: 0.0,
+                dy: notch,
+                stepped: true,
+            }));
+        }
+        let start = app.last_frame.expect("timed");
+        for frame in 1..=120u32 {
+            app.coast(start + Duration::from_millis(u64::from(frame) * 16));
+        }
+        assert!(
+            (app.scroll.1 - 4.0 * notch).abs() < 0.01,
+            "{}",
+            app.scroll.1
+        );
+
+        // A notch the other way cancels a glide in progress instead of fighting it.
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: notch,
+            stepped: true,
+        }));
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: -notch,
+            stepped: true,
+        }));
+        assert_eq!(app.scroll_pending.1, -notch);
+
+        // A trackpad delta is applied as it comes and ends any glide.
+        let before = app.scroll.1;
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: 7.5,
+            stepped: false,
+        }));
+        assert_eq!(app.scroll.1, before + 7.5);
+        assert_eq!(app.scroll_pending, (0.0, 0.0));
+
+        // At the top edge a notch upwards asks for nothing, so no frames are run for it.
+        app.scroll = (0.0, 0.0);
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: -notch,
+            stepped: true,
+        }));
+        assert_eq!(app.scroll_pending, (0.0, 0.0));
+        // Moving the caret into view ends a glide.
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: notch,
+            stepped: true,
+        }));
+        app.ensure_caret_visible();
+        assert_eq!(app.scroll_pending, (0.0, 0.0));
+    }
+
+    #[test]
+    fn stitching_joins_the_chosen_documents_into_a_new_one() {
+        let dir = std::env::temp_dir().join(format!("libertum-stitch-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let write =
+            |name: &str, text: &str| {
+                let path = dir.join(name);
+                let document = libertum_model::Document::from_paragraphs(vec![
+                    libertum_model::Paragraph::new(libertum_model::BlockId(1), text),
+                ]);
+                std::fs::write(&path, Odt::new(document).to_bytes().expect("odt")).expect("write");
+                path
+            };
+        let one = write("one.odt", "Chapter One");
+        let two = write("two.odt", "Chapter Two");
+
+        let mut app = home();
+        let _ = app.update(Message::StitchAdd(vec![one.clone(), two.clone()]));
+        assert!(matches!(app.modal, Some(Modal::Stitch)), "the dialog opens");
+        assert_eq!(app.stitch_sources.len(), 2);
+        let _ = app.view();
+
+        // The order can be changed before stitching.
+        let _ = app.update(Message::StitchMove(0, 1));
+        assert_eq!(app.stitch_sources[0].path, two);
+        let _ = app.update(Message::StitchMove(1, -1));
+        assert_eq!(app.stitch_sources[0].path, one);
+
+        let _ = app.update(Message::StitchGo);
+        assert_eq!(
+            paragraph_texts(&app),
+            vec!["Chapter One".to_owned(), "Chapter Two".to_owned()]
+        );
+        assert!(app.dirty, "a stitched book is a new, unsaved document");
+        assert!(app.file.is_none());
+        assert!(app.modal.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stitch_source_can_be_removed_and_the_dialog_cancelled() {
+        let mut app = home();
+        let document =
+            libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+                libertum_model::BlockId(1),
+                "Only",
+            )]);
+        app.stitch_sources = vec![crate::stitch::Source {
+            path: std::path::PathBuf::from("only.odt"),
+            document,
+        }];
+        app.modal = Some(Modal::Stitch);
+        let _ = app.update(Message::StitchRemove(0));
+        assert!(app.stitch_sources.is_empty());
+        let _ = app.update(Message::CloseStitch);
+        assert!(app.modal.is_none(), "Cancel closes the dialog");
+    }
+
+    /// A document long enough to scroll, in a 900 x 600 window at scale 1.
+    fn scrolling_app() -> App {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let body = (0..400)
+            .map(|i| format!("Line {i} of a long document with a needle{i} in it."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = app.update(Message::PasteText(Some(body)));
+        app.viewport = Some(Size::new(900.0, 600.0));
+        app.scale_factor = 1.0;
+        app.doc_mut().paginate_everything();
+        app
+    }
+
+    /// Top and bottom of the caret in viewport pixels (0 is the top edge of the canvas).
+    fn caret_in_viewport(app: &App) -> (f32, f32) {
+        let caret = app.doc().caret_rect().expect("caret");
+        let m = app.metrics();
+        let top = m.page_top(caret.page) + caret.y * m.scale - app.scroll.1;
+        (top, top + caret.height * m.scale)
+    }
+
+    #[test]
+    fn the_caret_is_shown_above_the_word_count_pill() {
+        let mut app = scrolling_app();
+        // From the top of the document, walk the caret down past the first screen.
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        app.scroll = (0.0, 0.0);
+        app.state.show_word_count = true;
+        let mut lowest: f32 = 0.0;
+        for _ in 0..60 {
+            app.doc_mut().move_caret(|ed| ed.move_paragraph(1, false));
+            app.ensure_caret_visible();
+            let (_, bottom) = caret_in_viewport(&app);
+            lowest = lowest.max(bottom);
+        }
+        assert!(app.scroll.1 > 0.0, "the view scrolled");
+        let limit = 600.0 - WORD_COUNT_PILL_COVER;
+        assert!(
+            lowest <= limit + 0.5,
+            "the caret never sits under the pill: lowest bottom {lowest}, limit {limit}"
+        );
+        // With the pill hidden the caret may use the room it took.
+        app.state.show_word_count = false;
+        let mut lowest_without: f32 = 0.0;
+        for _ in 0..60 {
+            app.doc_mut().move_caret(|ed| ed.move_paragraph(1, false));
+            app.ensure_caret_visible();
+            lowest_without = lowest_without.max(caret_in_viewport(&app).1);
+        }
+        assert!(lowest_without > limit, "{lowest_without} vs {limit}");
+    }
+
+    #[test]
+    fn a_found_match_is_highlighted_exactly_and_clear_of_the_find_bar_and_pill() {
+        let mut app = scrolling_app();
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        app.scroll = (0.0, 0.0);
+        let _ = app.update(Message::OpenFind);
+        // Far down the document: the view has to scroll to it.
+        let _ = app.update(Message::FindQuery("needle300".into()));
+        let found = app.state.find.last.clone().expect("a match");
+        assert_eq!(found.range.len(), "needle300".len());
+        assert_eq!(app.state.find.count, Some((Some(1), 1)));
+        // The highlight is the match and nothing else: its rectangles are the selection's,
+        // and the selection is exactly the matched bytes.
+        let (start, end) = app.doc().editor().ordered_selection().expect("selection");
+        assert_eq!(
+            (start.offset, end.offset),
+            (found.range.start, found.range.end)
+        );
+        let rects = app.find_match_rects();
+        assert!(!rects.is_empty(), "the match is highlighted");
+        assert_eq!(rects, app.doc().selection_rects());
+        let width: f32 = rects.iter().map(|r| r.width).sum();
+        assert!(
+            width > 20.0 && width < 120.0,
+            "nine characters wide: {width}"
+        );
+        // It sits below the Find bar and above the pill.
+        let m = app.metrics();
+        for r in &rects {
+            let top = m.page_top(r.page) + r.y * m.scale - app.scroll.1;
+            let bottom = top + r.height * m.scale;
+            assert!(top >= FIND_BAR_COVER - 0.5, "under the Find bar: {top}");
+            assert!(
+                bottom <= 600.0 - WORD_COUNT_PILL_COVER + 0.5,
+                "under the pill: {bottom}"
+            );
+        }
+        // A match above the view comes back down below the Find bar too.
+        let _ = app.update(Message::FindQuery("needle2 ".into()));
+        let rects = app.find_match_rects();
+        assert!(!rects.is_empty());
+        let top = m.page_top(rects[0].page) + rects[0].y * m.scale - app.scroll.1;
+        assert!(top >= FIND_BAR_COVER - 0.5 || app.scroll.1 == 0.0, "{top}");
+        // Moving the caret away ends the highlight; so does closing the bar.
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        assert!(app.find_match_rects().is_empty());
+        let _ = app.update(Message::FindNext);
+        assert!(!app.find_match_rects().is_empty());
+        let _ = app.update(Message::CloseFind);
+        assert!(app.find_match_rects().is_empty());
+    }
+
+    #[test]
+    fn the_find_count_follows_the_query_and_its_options() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("Cat cat concat\ncat".into())));
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQuery("cat".into()));
+        assert_eq!(app.state.find.count.map(|c| c.1), Some(4));
+        let _ = app.update(Message::ToggleFindWord);
+        assert_eq!(app.state.find.count.map(|c| c.1), Some(3));
+        let _ = app.update(Message::ToggleFindCase);
+        assert_eq!(app.state.find.count.map(|c| c.1), Some(2));
+        // Nothing found: the count goes and the notice says so.
+        let _ = app.update(Message::FindQuery("dog".into()));
+        assert_eq!(app.state.find.count, None);
+        assert_eq!(app.state.find.notice, Some(s::FIND_NO_MATCHES.to_owned()));
+        // An empty query is not a search.
+        let _ = app.update(Message::FindQuery(String::new()));
+        assert_eq!(app.state.find.count, None);
+        assert_eq!(app.state.find.notice, None);
+        assert_eq!(s::find_count(None, 5), "5 found");
+        let _ = app.view();
+    }
+
+    #[test]
+    fn the_stitch_dialog_opens_and_works_from_the_home_screen() {
+        let dir = std::env::temp_dir().join(format!("libertum-home-stitch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let one = dir.join("one.md");
+        let two = dir.join("two.md");
+        std::fs::write(&one, "# First\n\nBody one.\n").expect("write");
+        std::fs::write(&two, "# Second\n\nBody two.\n").expect("write");
+
+        let mut app = home();
+        assert!(app.doc.is_none(), "on the home screen");
+        let _ = app.update(Message::StitchAdd(vec![one.clone(), two.clone()]));
+        assert!(matches!(app.modal, Some(Modal::Stitch)));
+        assert_eq!(app.stitch_sources.len(), 2);
+        // The home screen draws the dialog (it used to return the bare home view, so the
+        // dialog was open but invisible). Building the view must not panic either way.
+        let _ = app.view();
+        let _ = app.update(Message::StitchGo);
+        assert!(app.modal.is_none());
+        let texts = paragraph_texts(&app);
+        assert!(texts.iter().any(|t| t == "Body one."), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Body two."), "{texts:?}");
+        assert!(app.dirty, "a stitched document is new and unsaved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_save_dialog_offers_every_format_with_the_current_one_first() {
+        for current in [
+            Format::Native,
+            Format::Odt,
+            Format::Docx,
+            Format::Rtf,
+            Format::Markdown,
+        ] {
+            let filters = save_filters(current);
+            assert_eq!(filters.len(), 5);
+            assert_eq!(
+                filters[0].1,
+                current.extension(),
+                "the current format leads"
+            );
+            let mut extensions: Vec<&str> = filters.iter().map(|f| f.1).collect();
+            extensions.sort_unstable();
+            assert_eq!(extensions, vec!["docx", "lbtd", "md", "odt", "rtf"]);
+        }
+        // The native format is in the list by name, not only by extension.
+        assert!(
+            save_filters(Format::Odt)
+                .iter()
+                .any(|(label, extension)| *label == s::FILE_FILTER_NATIVE && *extension == "lbtd")
+        );
+        // A name typed without an extension gets the current format's.
+        let path = ensure_extension(PathBuf::from("book"), Format::Native);
+        assert_eq!(path, PathBuf::from("book.lbtd"));
+        let kept = ensure_extension(PathBuf::from("book.lbtd"), Format::Odt);
+        assert_eq!(kept, PathBuf::from("book.lbtd"));
+    }
+
+    #[test]
+    fn large_files_in_three_formats_stitch_into_one_book() {
+        let dir = std::env::temp_dir().join(format!("libertum-big-stitch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let pages = 150;
+        let sources: Vec<(PathBuf, usize)> = ["odt", "docx", "rtf"]
+            .iter()
+            .enumerate()
+            .map(|(i, extension)| {
+                let document =
+                    libertum_layout::spike::generate_model_document(pages, 11 + i as u64);
+                let count = document.paragraph_count();
+                let path = dir.join(format!("part{i}.{extension}"));
+                FileContext::new(Format::for_path(&path), document)
+                    .save(&path)
+                    .expect("write a source");
+                (path, count)
+            })
+            .collect();
+        let expected: usize = sources.iter().map(|(_, count)| count).sum();
+
+        let mut app = home();
+        let started = Instant::now();
+        let _ = app.update(Message::StitchAdd(
+            sources.iter().map(|(path, _)| path.clone()).collect(),
+        ));
+        let read = started.elapsed();
+        assert!(matches!(app.modal, Some(Modal::Stitch)), "all three opened");
+        let started = Instant::now();
+        let _ = app.update(Message::StitchGo);
+        let stitched = started.elapsed();
+        println!("stitch of 3 x {pages} pages: read {read:?}, stitch and open {stitched:?}");
+
+        let document = app.doc().editor().document();
+        assert_eq!(
+            document.paragraph_count(),
+            expected,
+            "every paragraph arrived"
+        );
+        let starts = document
+            .paragraphs()
+            .filter(|p| p.props.section_start)
+            .count();
+        assert_eq!(starts, 2, "each later file opens a section");
+        assert_eq!(document.sections.len(), 3);
+        let ids: std::collections::HashSet<u64> = document.paragraphs().map(|p| p.id.0).collect();
+        assert_eq!(ids.len(), expected, "ids are unique");
+        // Every paragraph's style exists in the book's sheet.
+        assert!(
+            document
+                .paragraphs()
+                .all(|p| document.styles.get(p.props.style).is_some())
+        );
+        // The first screen is laid out at once; the rest paginates to the end.
+        assert!(app.doc().page_total() >= 1);
+        app.doc_mut().paginate_everything();
+        assert!(
+            app.doc().page_total() > 300,
+            "{} pages",
+            app.doc().page_total()
+        );
+        // The last paragraph is reachable and has a place on a page.
+        app.doc_mut().move_caret(|ed| ed.move_doc_end(false));
+        assert!(app.doc().caret_rect().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_fails_to_open_returns_to_the_stitch_list() {
+        let dir = std::env::temp_dir().join(format!("libertum-bad-stitch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let good = dir.join("good.md");
+        let bad = dir.join("bad.odt");
+        std::fs::write(
+            &good,
+            "# Good
+
+Text.
+",
+        )
+        .expect("write");
+        std::fs::write(&bad, "this is not a zip package").expect("write");
+        let mut app = home();
+        let _ = app.update(Message::StitchAdd(vec![good, bad]));
+        assert!(
+            matches!(app.modal, Some(Modal::Error(_))),
+            "the failure is shown"
+        );
+        assert_eq!(app.stitch_sources.len(), 1, "the good file is kept");
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert!(matches!(app.modal, Some(Modal::Stitch)), "back to the list");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_screen_toggles_from_the_button_the_key_and_escape() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert!(!app.state.fullscreen);
+        let _ = app.update(Message::ToggleFullScreen);
+        assert!(app.state.fullscreen);
+        let _ = app.view();
+        // Escape with a menu open closes the menu first and stays in full screen.
+        app.state.open_menu = Some(Menu::View);
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(app.state.open_menu.is_none());
+        assert!(app.state.fullscreen);
+        // With nothing else open, Escape leaves full screen, and does not count towards
+        // the three Escapes that go home.
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(!app.state.fullscreen);
+        assert!(app.doc.is_some());
+        let _ = app.update(Message::Shortcut(Shortcut::FullScreen));
+        assert!(app.state.fullscreen);
+        let _ = app.update(Message::ToggleFullScreen);
+        assert!(!app.state.fullscreen);
+        if !cfg!(target_os = "macos") {
+            let f11 = keyboard::Key::Named(keyboard::key::Named::F11);
+            assert_eq!(
+                crate::shortcuts::lookup(&f11, keyboard::Modifiers::empty()),
+                Some(Shortcut::FullScreen)
+            );
+        }
+    }
+
+    #[test]
+    fn page_thumbnails_render_the_pages_in_view_and_jump_to_a_page() {
+        let mut app = scrolling_app();
+        app.state.current_page = 1;
+        assert!(!app.state.thumbnails);
+        let _ = app.update(Message::ToggleThumbnails);
+        assert!(app.state.thumbnails);
+        // The column shows about three rows in a 600 px window: those are rendered.
+        let _ = app.update(Message::ThumbScrolled(0.0, 600.0));
+        let total = app.doc().page_total();
+        assert!(total > 5, "a long document: {total} pages");
+        let mut rendered: Vec<usize> = app.thumb_cache.keys().copied().collect();
+        rendered.sort_unstable();
+        assert!(!rendered.is_empty(), "thumbnails were rendered");
+        assert!(
+            rendered.iter().all(|p| *p < 6),
+            "only pages in view: {rendered:?}"
+        );
+        let _ = app.view();
+        // Scrolling the column renders the pages that come into view.
+        let _ = app.update(Message::ThumbScrolled(4.0 * THUMB_ROW_H, 600.0));
+        assert!(app.thumb_cache.contains_key(&4));
+        // An edit on a page redraws its thumbnail (its content hash changes).
+        let _ = app.update(Message::ThumbScrolled(0.0, 600.0));
+        let before = app.thumb_cache.get(&0).map(|(hash, _)| *hash);
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("New words ".into())));
+        let after = app.thumb_cache.get(&0).map(|(hash, _)| *hash);
+        assert!(before.is_some() && after.is_some());
+        assert_ne!(before, after, "the first page thumbnail was redrawn");
+        // Clicking a thumbnail shows that page.
+        let _ = app.update(Message::GoToPage(5));
+        let m = app.metrics();
+        assert!((app.scroll.1 - (m.page_top(5) - m.pad)).abs() < 1.0);
+        assert_eq!(app.state.current_page, 6);
+        // Closing the column frees the images.
+        let _ = app.update(Message::ToggleThumbnails);
+        assert!(!app.state.thumbnails);
+        assert!(app.thumb_cache.is_empty());
+        assert_eq!(thumb_range(0.0, 600.0, 2), (0, 2));
+        assert_eq!(thumb_range(10_000.0, 600.0, 3), (3, 3));
+    }
+
+    #[test]
+    fn the_watermark_is_typed_applied_turned_and_removed_from_the_document_pane() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkText(
+            "Draft copy".into(),
+        )));
+        assert!(
+            app.doc().editor().watermark().is_none(),
+            "typing does not apply it"
+        );
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkApply));
+        let applied = app.doc().editor().watermark().cloned().expect("applied");
+        assert_eq!(applied.text, "Draft copy");
+        assert!(applied.diagonal);
+        assert!(app.state.document.watermark_on);
+        assert!(app.dirty);
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkDiagonal(false)));
+        assert_eq!(
+            app.doc().editor().watermark().map(|w| w.diagonal),
+            Some(false)
+        );
+        let _ = app.view();
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkRemove));
+        assert!(app.doc().editor().watermark().is_none());
+        assert!(!app.state.document.watermark_on);
+        assert_eq!(app.state.document.watermark_text, "");
+        // Blank text applies nothing.
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkText("   ".into())));
+        let _ = app.update(Message::Document(DocumentMsg::WatermarkApply));
+        assert!(app.doc().editor().watermark().is_none());
+    }
+
+    #[test]
+    fn a_file_given_at_start_opens_straight_into_the_editor() {
+        let dir = std::env::temp_dir().join(format!("libertum-argv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("Double clicked.md");
+        std::fs::write(
+            &file,
+            "# Chapter
+
+Opened from Explorer.
+",
+        )
+        .expect("write");
+        let settings = test_settings();
+        let (app, _task) = App::boot(settings.clone(), None, Some(file.clone()));
+        assert!(app.doc.is_some(), "the editor is open, not the home screen");
+        assert_eq!(app.file.as_deref(), Some(file.as_path()));
+        assert!(!app.dirty);
+        assert!(
+            paragraph_texts(&app)
+                .iter()
+                .any(|t| t == "Opened from Explorer.")
+        );
+        assert!(app.modal.is_none());
+        // A file that cannot be opened shows the error over the home screen.
+        let (app, _task) = App::boot(settings.clone(), None, Some(dir.join("missing.odt")));
+        assert!(app.doc.is_none());
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        // No argument: the home screen.
+        let (app, _task) = App::boot(settings, None, None);
+        assert!(app.doc.is_none() || demo_requested());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
