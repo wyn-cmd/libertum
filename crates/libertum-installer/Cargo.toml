@@ -10,5 +10,9 @@ description = "Self-contained Windows installer for Libertum: one .exe that carr
 name = "libertum-installer"
 path = "src/main.rs"
 
-# No dependencies: the installer talks to Windows through two system calls (a message box)
+# No runtime dependencies: the installer talks to Windows through two system calls (a message box)
 # and runs the install script that ships beside the program.
+
+# Windows only: embeds the logo as the .exe icon (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }

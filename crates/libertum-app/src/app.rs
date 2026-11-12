@@ -659,6 +659,11 @@ pub struct App {
     /// Distance a mouse wheel has asked for that the view has not travelled yet, physical
     /// pixels: the view glides to it over the next frames instead of jumping.
     scroll_pending: (f32, f32),
+    /// Trackpad inertia: the velocity (physical pixels per second) measured from the finger's
+    /// motion, which carries the page on after the events stop, and when the last trackpad
+    /// event arrived.
+    fling: (f32, f32),
+    trackpad_at: Option<Instant>,
     last_frame: Option<Instant>,
     /// Consecutive Escape presses and when the last one arrived: three in a row go home.
     escape_presses: (u8, Instant),
@@ -737,6 +742,8 @@ impl App {
             pending_recovery: None,
             settings_open: false,
             scroll_pending: (0.0, 0.0),
+            fling: (0.0, 0.0),
+            trackpad_at: None,
             last_frame: None,
             escape_presses: (0, Instant::now()),
             stitch_sources: Vec::new(),
@@ -758,6 +765,10 @@ impl App {
         path: Option<PathBuf>,
         open: Option<PathBuf>,
     ) -> (Self, Task<Message>) {
+        // macOS ignores Iced's window icon and this build has no .app bundle: the Dock icon
+        // is set here, once the event loop exists (see src/macos_icon.rs).
+        #[cfg(all(target_os = "macos", not(test)))]
+        crate::macos_icon::set_dock_icon();
         let mut tasks = vec![
             iced::system::theme().map(Message::SystemTheme),
             Self::query_scale_factor(),
@@ -1405,6 +1416,7 @@ impl App {
                     if self.scroll_pending == (0.0, 0.0) {
                         self.last_frame = Some(Instant::now());
                     }
+                    self.fling = (0.0, 0.0);
                     // A notch the other way cancels what is left instead of fighting it.
                     let add = |pending: f32, delta: f32| {
                         if pending != 0.0 && delta != 0.0 && pending.signum() != delta.signum() {
@@ -1419,14 +1431,22 @@ impl App {
                     );
                     self.trim_pending_to_edges();
                 } else {
-                    // A trackpad (or a drag past the edge): follow it exactly.
+                    // A trackpad (or a drag past the edge): follow it exactly, and note how
+                    // fast the finger is moving so the page can carry on when it lifts.
+                    let now = Instant::now();
                     self.scroll_pending = (0.0, 0.0);
-                    self.scroll.0 += dx * sf;
-                    self.scroll.1 += dy * sf;
+                    let (px, py) = (dx * sf, dy * sf);
+                    self.scroll.0 += px;
+                    self.scroll.1 += py;
+                    self.track_fling(now, (px, py));
+                    if self.fling != (0.0, 0.0) && self.last_frame.is_none_or(|t| now > t) {
+                        self.last_frame = Some(now);
+                    }
                 }
             }
             CanvasEvent::ScrollTo { x, y } => {
                 self.scroll_pending = (0.0, 0.0);
+                self.fling = (0.0, 0.0);
                 self.scroll.0 = x.unwrap_or(self.scroll.0);
                 self.scroll.1 = y.unwrap_or(self.scroll.1);
             }
@@ -1845,6 +1865,7 @@ impl App {
     fn reveal_vertical(&mut self, top: f32, bottom: f32) {
         // Showing the caret wins over a wheel glide still in progress.
         self.scroll_pending = (0.0, 0.0);
+        self.fling = (0.0, 0.0);
         let m = self.metrics();
         let vp = self.viewport_physical();
         let (inset_top, inset_bottom) = self.canvas_insets();
@@ -2116,6 +2137,7 @@ impl App {
             })
             .clamp(0.0, 0.05);
         self.last_frame = Some(now);
+        self.fling_step(now, dt);
         if dt == 0.0 || self.scroll_pending == (0.0, 0.0) {
             return;
         }
@@ -2133,6 +2155,61 @@ impl App {
         self.scroll.1 += sy;
         self.scroll_pending = (self.scroll_pending.0 - sx, self.scroll_pending.1 - sy);
         self.trim_pending_to_edges();
+        self.clamp_scroll();
+    }
+
+    /// Updates the finger's velocity from one trackpad event that moved the view by `moved`
+    /// physical pixels. Events close together are averaged (recent motion counts most); one
+    /// after a pause starts afresh, and so ends any fling that was carrying the page.
+    fn track_fling(&mut self, now: Instant, moved: (f32, f32)) {
+        let gap = self
+            .trackpad_at
+            .map(|at| now.saturating_duration_since(at).as_secs_f32());
+        self.trackpad_at = Some(now);
+        match gap {
+            Some(gap) if gap < FLING_SAMPLE_WINDOW => {
+                let gap = gap.max(0.004);
+                let blend = |old: f32, moved: f32| {
+                    let speed = (moved / gap).clamp(-FLING_MAX_SPEED, FLING_MAX_SPEED);
+                    old * (1.0 - FLING_RECENT_WEIGHT) + speed * FLING_RECENT_WEIGHT
+                };
+                self.fling = (blend(self.fling.0, moved.0), blend(self.fling.1, moved.1));
+            }
+            _ => self.fling = (0.0, 0.0),
+        }
+    }
+
+    /// Carries the page on after the trackpad's events stop: the velocity measured while the
+    /// fingers moved decays exponentially, so the page glides a little and slows to rest.
+    fn fling_step(&mut self, now: Instant, dt: f32) {
+        if self.fling == (0.0, 0.0) {
+            return;
+        }
+        let idle = self
+            .trackpad_at
+            .is_none_or(|at| now.saturating_duration_since(at).as_secs_f32() >= FLING_IDLE);
+        if !idle {
+            // Still being driven by the fingers: nothing to add yet.
+            return;
+        }
+        if self.fling.0.hypot(self.fling.1) < FLING_MIN_SPEED {
+            self.fling = (0.0, 0.0);
+            return;
+        }
+        // Distance over this frame is the integral of an exponential decay, so the total
+        // glide (speed / rate) does not depend on the frame rate.
+        let decay = (-FLING_DECAY_RATE * dt).exp();
+        let travel = (1.0 - decay) / FLING_DECAY_RATE;
+        self.scroll.0 += self.fling.0 * travel;
+        self.scroll.1 += self.fling.1 * travel;
+        self.fling = (self.fling.0 * decay, self.fling.1 * decay);
+        let (max_x, max_y) = self.metrics().max_scroll(self.viewport_physical());
+        if self.scroll.0 <= 0.0 || self.scroll.0 >= max_x {
+            self.fling.0 = 0.0;
+        }
+        if self.scroll.1 <= 0.0 || self.scroll.1 >= max_y {
+            self.fling.1 = 0.0;
+        }
         self.clamp_scroll();
     }
 
@@ -2181,6 +2258,7 @@ impl App {
         self.bookmark_draft = None;
         self.scroll = (0.0, 0.0);
         self.scroll_pending = (0.0, 0.0);
+        self.fling = (0.0, 0.0);
         self.canvas_focused = false;
         self.ime_preedit = None;
         self.escape_presses = (0, Instant::now());
@@ -2712,7 +2790,7 @@ impl App {
             window::close_requests().map(|_| Message::CloseRequested),
         ];
         let autoscrolling = self.autoscroll.as_ref().is_some_and(AutoScroll::active);
-        let coasting = self.scroll_pending != (0.0, 0.0);
+        let coasting = self.scroll_pending != (0.0, 0.0) || self.fling != (0.0, 0.0);
         if autoscrolling || coasting || self.state.sidebar_animating() {
             subs.push(window::frames().map(Message::Frame));
         }
@@ -3363,6 +3441,7 @@ impl App {
             Message::GoToPage(page) => {
                 let m = self.metrics();
                 self.scroll_pending = (0.0, 0.0);
+                self.fling = (0.0, 0.0);
                 self.scroll.1 = m.page_top(page) - m.pad;
                 self.clamp_scroll();
                 self.refresh_view();
@@ -5152,6 +5231,20 @@ fn save_filters(current: Format) -> Vec<(&'static str, &'static str)> {
 /// first 100 ms and all but a pixel of a notch within a quarter of a second. Fast enough to
 /// feel direct, slow enough that the eye can follow the text.
 const SCROLL_GLIDE_RATE: f32 = 20.0;
+
+/// Trackpad inertia. Events closer together than the window are one gesture; the page is
+/// carried on once none has arrived for the idle time; the velocity decays by this rate per
+/// second (about a sixth of a second to halve; the page travels speed / rate in all); and it
+/// ends below the minimum speed. The cap stops one noisy event from launching the page.
+const FLING_SAMPLE_WINDOW: f32 = 0.1;
+const FLING_IDLE: f32 = 0.04;
+const FLING_DECAY_RATE: f32 = 4.0;
+/// How much the newest event counts in the velocity (the rest is what came before). High, so
+/// a finger that slows down or stops is read as slow, not as the fast motion before it.
+const FLING_RECENT_WEIGHT: f32 = 0.8;
+/// Below this the finger was moving too slowly to mean a flick, so the page just stops.
+const FLING_MIN_SPEED: f32 = 300.0;
+const FLING_MAX_SPEED: f32 = 12_000.0;
 
 /// Page thumbnails: image width, the box a page is fitted into (an A4 page's proportions),
 /// one row's height with its number, the column's width, and how many rendered thumbnails
@@ -8100,6 +8193,70 @@ mod tests {
         }));
         app.ensure_caret_visible();
         assert_eq!(app.scroll_pending, (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_trackpad_flick_carries_the_page_on_and_slows_to_rest() {
+        let mut app = scrolling_app();
+        app.scroll = (0.0, 100.0);
+        let t0 = Instant::now();
+        // Fingers moving at 10 px per 8 ms (1,250 px/s), as the OS reports them.
+        for i in 0..6u32 {
+            app.track_fling(t0 + Duration::from_millis(u64::from(i) * 8), (0.0, 10.0));
+        }
+        let lift = t0 + Duration::from_millis(40);
+        assert!(app.fling.1 > 600.0, "velocity measured: {}", app.fling.1);
+        // A finger that slows down and stops leaves the page where it is: no glide.
+        let mut slowing = app.fling;
+        let held_at = app.scroll.1;
+        for (i, moved) in [3.0f32, 2.0, 1.0].into_iter().enumerate() {
+            app.track_fling(t0 + Duration::from_millis(48 + 10 * i as u64), (0.0, moved));
+        }
+        assert!(app.fling.1 < FLING_MIN_SPEED, "slowed: {}", app.fling.1);
+        app.fling_step(t0 + Duration::from_millis(200), 0.016);
+        assert_eq!(app.fling, (0.0, 0.0));
+        assert_eq!(app.scroll.1, held_at, "it does not move on");
+        // Restore the flick for the rest of the test.
+        app.fling = std::mem::take(&mut slowing);
+        app.trackpad_at = Some(t0 + Duration::from_millis(40));
+        // While events are still arriving, nothing extra is added.
+        let held = app.scroll.1;
+        app.fling_step(lift + Duration::from_millis(10), 0.016);
+        assert_eq!(app.scroll.1, held);
+        // After the fingers lift, the page keeps moving, each frame by less than the last.
+        app.trackpad_at = Some(lift);
+        let mut now = lift + Duration::from_millis(60);
+        let mut last_step = f32::MAX;
+        let mut frames = 0;
+        while app.fling != (0.0, 0.0) && frames < 600 {
+            let before = app.scroll.1;
+            app.fling_step(now, 0.016);
+            let step = app.scroll.1 - before;
+            assert!(step >= 0.0 && step <= last_step + 0.01, "slows: {step}");
+            last_step = step;
+            now += Duration::from_millis(16);
+            frames += 1;
+        }
+        assert_eq!(app.fling, (0.0, 0.0), "comes to rest");
+        assert!(
+            app.scroll.1 > held + 50.0,
+            "it glided: {}",
+            app.scroll.1 - held
+        );
+        assert!(frames < 120, "within about two seconds: {frames}");
+
+        // A new touch after a pause starts afresh and cancels a fling in progress.
+        app.fling = (0.0, 900.0);
+        app.track_fling(now + Duration::from_secs(1), (0.0, 5.0));
+        assert_eq!(app.fling, (0.0, 0.0));
+        // A wheel notch ends a fling too.
+        app.fling = (0.0, 900.0);
+        let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
+            dx: 0.0,
+            dy: 100.0,
+            stepped: true,
+        }));
+        assert_eq!(app.fling, (0.0, 0.0));
     }
 
     #[test]

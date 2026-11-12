@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Libertum
+GenericName=Word Processor
+Comment=Write and edit long documents
+Exec=libertum %F
+TryExec=libertum
+Icon=libertum
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=application/x-libertum;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/rtf;text/rtf;text/markdown;
+Keywords=word;document;writer;odt;docx;rtf;markdown;book;novel;
+StartupNotify=true
+StartupWMClass=libertum

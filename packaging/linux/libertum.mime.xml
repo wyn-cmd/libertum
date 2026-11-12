@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <!-- The native Libertum document format (docs/format-libertum-native.md). -->
+  <mime-type type="application/x-libertum">
+    <comment>Libertum document</comment>
+    <comment xml:lang="en-GB">Libertum document</comment>
+    <glob pattern="*.lbtd"/>
+    <icon name="libertum"/>
+  </mime-type>
+</mime-info>

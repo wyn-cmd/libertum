@@ -33,6 +33,7 @@ cargo bench -p libertum-editor --bench editing        # keystroke and undo bench
 cargo bench -p libertum-layout --bench pagination     # full and incremental pagination benches
 cargo run --release -p libertum-editor --example find_bench           # Find on a 1,000-page document
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1   # dist\Libertum-Setup-<version>.exe
+packaging/linux/build-packages.sh                     # dist/libertum_<version>_amd64.deb and dist/libertum-<version>-1.x86_64.rpm
 ```
 
 The macOS compile check covers the whole workspace; to lint the platform-specific code for macOS with warnings as errors (as CI does), leave out the benches, whose C dependencies need a macOS compiler: `cargo clippy -p libertum-app -p libertum-installer -p libertum-render --bins --lib --tests --examples --all-features --target aarch64-apple-darwin -- -D warnings`.
@@ -41,11 +42,11 @@ The macOS compile check covers the whole workspace; to lint the platform-specifi
 
 **Definition of done for any task:** fmt is clean, clippy passes with `-D warnings` (with and without `--all-features`), all tests pass, the macOS compile check passes if you touched platform or GPU code, and the performance budgets still hold if you touched the canvas, layout or rendering. Report anything you could not verify. Do not claim it works.
 
-CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. Each platform's build is uploaded as a run artifact (`libertum-<target>`), and the Windows job also packs `Libertum-Setup.exe`. `RUSTFLAGS=-D warnings` is set for every job, so code used only on one platform must not leave dead code on the others.
+CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. Each platform's build is uploaded as a run artifact (`libertum-<target>`), and the Windows job also packs `Libertum-Setup.exe`; the Linux job also builds the `.deb` and `.rpm` (`packaging/linux/build-packages.sh`) and installs both on the runner as a check. `RUSTFLAGS=-D warnings` is set for every job, so code used only on one platform must not leave dead code on the others. The Linux job runs on `ubuntu-24.04` on purpose: the `.deb` records the glibc the binary needs (2.39), and a newer runner image would silently raise it.
 
 ## Releases
 
-A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`. Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
+A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`; for Linux attach the `.deb` and the `.rpm` from the Linux artifact. Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
 
 ## Workspace layout
 

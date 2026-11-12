@@ -28,3 +28,13 @@ directories = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
+
+# Windows only: embeds the logo as the .exe icon (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
+
+# macOS only: sets the Dock icon at startup (see src/macos_icon.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-foundation = { workspace = true }

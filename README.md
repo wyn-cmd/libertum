@@ -46,8 +46,28 @@ The installer and the program are not code-signed, so Windows SmartScreen may wa
 time: choose "More info", then "Run anyway". Double-clicking a document that Libertum is set to
 open starts it straight in that document.
 
-On macOS and Linux the release has the `libertum` program itself, unsigned and without an
-installer: run it from a terminal (on macOS, the first time, right-click it and choose Open).
+## Install on Linux
+
+The Linux build is shipped three ways, all unsigned: a `.deb`, an `.rpm`, and the plain
+`libertum` program inside `Libertum-<version>-linux-x64.zip`. A release has the packages
+attached; any green CI run has them in its `libertum-x86_64-unknown-linux-gnu` artifact.
+
+```sh
+sudo apt install ./libertum_0.1.1_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.1.1-1.x86_64.rpm               # Fedora, openSUSE, ...
+```
+
+The package puts `libertum` in `/usr/bin` and installs the desktop entry, the icon and a
+shared-mime-info entry for `.lbtd` files, so Libertum appears in the application menu and in
+"Open with". `sudo apt remove libertum` (or `sudo dnf remove libertum`) takes it away again.
+
+The packages are built on Ubuntu 24.04, so they need glibc 2.39 or newer: Debian 13, Ubuntu
+24.04, Fedora 41 and later. Older distributions can run a build of their own (see below). The
+runtime libraries are declared as dependencies — fontconfig, X11, Wayland, `libxkbcommon`,
+Vulkan and EGL/GLES — because the fonts, the window and the compositor are chosen at run time.
+
+On macOS the release has the `libertum` program itself, unsigned and without an installer: run
+it from a terminal (on macOS, the first time, right-click it and choose Open).
 
 To build the installer: `powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1`
 (it writes `dist\Libertum-Setup-<version>.exe`). The same install can be done by hand by running
@@ -62,6 +82,7 @@ cargo run --release -p libertum-app          # the binary is named `libertum`
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+packaging/linux/build-packages.sh             # dist/libertum_<version>_amd64.deb and .rpm
 ```
 
 The release profile matters for anything you judge by feel: a debug build pages far slower, and

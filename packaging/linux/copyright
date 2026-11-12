@@ -1,0 +1,13 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: libertum
+Source: https://github.com/wyn-cmd/libertum
+Comment: The package is built from this repository by its owner. See
+ docs/third-party-licences.md in the package documentation for the
+ dependencies, embedded data and notices that ship inside the program.
+
+Files: *
+Copyright: 2026 Libertum contributors
+License: Proprietary
+ Libertum is a private project and no licence has been granted for it.
+ Redistribution, modification and use beyond the owner's own installations
+ are not permitted without the copyright holder's written permission.

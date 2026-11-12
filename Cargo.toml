@@ -54,6 +54,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 slotmap = "1.1"
 smallvec = "1"
 thiserror = "2"
+# Build scripts only (Windows): embeds the application icon in the .exe files. MIT.
+winresource = { version = "0.1", default-features = false }
+# macOS only: the Dock icon (crates/libertum-app/src/macos_icon.rs). MIT.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
