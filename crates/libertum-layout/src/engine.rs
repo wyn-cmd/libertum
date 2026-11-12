@@ -178,9 +178,9 @@ fn frame(para: &SpikeParagraph, base: f32, width: f32) -> (f32, f32, f32) {
         .indent_right_pt
         .clamp(0.0, (width - left - min_width).max(0.0));
     let mut break_width = width - left - right;
-    if para.hyphenate {
-        break_width -= base * HYPHEN_RESERVE_EM;
-    }
+    // Hyphenated lines reserve the hyphen's room line by line (see `layout_once`): reserving
+    // it for the whole paragraph would leave every other line short of the margin.
+    let _ = base;
     if para.toc_target.is_some() {
         break_width = (break_width - TOC_NUMBER_RESERVE_PT).max(break_width * 0.5);
     }
@@ -681,6 +681,42 @@ impl Engine {
             layout.set_text_indent(first, IndentOptions::default());
         }
         layout.break_all_lines(Some(break_width));
+        // Hyphenated lines keep room for the drawn hyphen, and only those lines: the line is
+        // justified to a width one hyphen narrower, so its text ends where the hyphen starts
+        // while every other line still reaches the margin. Breaking is unchanged (both passes
+        // use the same width), so the line indices from this pass are the final ones.
+        if !points.is_empty() {
+            let byte_points: HashSet<usize> = text
+                .char_indices()
+                .enumerate()
+                .filter(|(ci, _)| points.contains(ci))
+                .map(|(_, (b, _))| b)
+                .collect();
+            let n = layout.len();
+            let mut hyphenated = vec![false; n];
+            for (li, hyphen) in hyphenated.iter_mut().enumerate().take(n.saturating_sub(1)) {
+                if let Some(line) = layout.get(li) {
+                    *hyphen = byte_points.contains(&line.text_range().end);
+                }
+            }
+            if hyphenated.iter().any(|h| *h) {
+                let reserve = base * HYPHEN_RESERVE_EM;
+                let mut breaker = layout.break_lines();
+                breaker.state_mut().set_layout_max_advance(break_width);
+                breaker.state_mut().set_line_max_advance(break_width);
+                let mut i = 0;
+                while breaker.break_next().is_some() {
+                    let line_width = if hyphenated.get(i).copied().unwrap_or(false) {
+                        (break_width - reserve).max(1.0)
+                    } else {
+                        break_width
+                    };
+                    breaker.set_prior_line_width(line_width);
+                    i += 1;
+                }
+                breaker.finish();
+            }
+        }
         let alignment = match para.align {
             Align::Start => Alignment::Start,
             Align::Centre => Alignment::Center,

@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use libertum_model::{
-    Block, BlockId, Bookmark, CharFormat, CrossRef, CrossRefKind, Document, HeaderFooter,
-    HeadersFooters, InlineImage, Media, Note, NoteKind, ParaProps, Paragraph, Run, Section,
-    StyleId, Table, TableCell, TableRow, TableStyle, test_png_header,
+    Block, BlockId, Bookmark, CharFormat, CrossRef, CrossRefKind, DateTimeField, DateTimeFormat,
+    DateTimeSource, Document, HeaderFooter, HeadersFooters, InlineImage, Media, Note, NoteKind,
+    ParaProps, Paragraph, Run, Section, StyleId, Table, TableCell, TableRow, TableStyle,
+    test_png_header,
 };
 use proptest::prelude::*;
 
@@ -128,6 +129,46 @@ fn a_rich_document_round_trips() {
         Some("Banded Rows")
     );
     assert_eq!(table.rows[1].cells[0].col_span, 2);
+}
+
+#[test]
+fn date_time_fields_and_the_save_time_survive_a_round_trip() {
+    let text = "Saved on 12 November 2026";
+    let start = "Saved on ".len();
+    let end = start + "12 November 2026".len();
+    let mut paragraph = Paragraph::new(BlockId(1), text);
+    paragraph.set_date_fields(vec![
+        DateTimeField::new(
+            start..end,
+            DateTimeSource::Updated,
+            DateTimeFormat::DateLong,
+        ),
+        DateTimeField::new(0..5, DateTimeSource::Inserted, DateTimeFormat::DateIso),
+    ]);
+    let mut document = Document::from_paragraphs(vec![paragraph]);
+    document.set_saved_at(1_760_000_000);
+    let bytes = Native::new(document).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    let paragraph = read.document().paragraph_at(0).expect("the paragraph");
+    assert_eq!(paragraph.date_fields().len(), 2, "both fields are kept");
+    // Sorted by where they start.
+    assert_eq!(
+        paragraph.date_fields()[0],
+        DateTimeField::new(0..5, DateTimeSource::Inserted, DateTimeFormat::DateIso)
+    );
+    assert_eq!(
+        paragraph.date_fields()[1],
+        DateTimeField::new(
+            start..end,
+            DateTimeSource::Updated,
+            DateTimeFormat::DateLong
+        )
+    );
+    assert_eq!(
+        read.document().saved_at(),
+        Some(1_760_000_000),
+        "the last save time is written"
+    );
 }
 
 #[test]
@@ -296,4 +337,16 @@ proptest! {
         prop_assert_eq!(read.view().pageless, pageless);
         prop_assert_eq!(read.view().zoom_percent, zoom);
     }
+}
+
+#[test]
+fn a_watermark_round_trips() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(0), "Text")]);
+    document.sections[0].watermark = libertum_model::Watermark::new("DRAFT", false);
+    let bytes = Native::new(document.clone()).to_bytes().expect("write");
+    let back = Native::parse(&bytes).expect("read");
+    assert_eq!(
+        back.document().sections[0].watermark,
+        document.sections[0].watermark
+    );
 }

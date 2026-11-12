@@ -1,6 +1,6 @@
 //! Document inspector: Document (paper, header and footer, margins) and Section panes.
 
-use iced::widget::{column, container, radio, row, space, text_input};
+use iced::widget::{column, container, row, space, text_input};
 use iced::{Border, Center, Element, Length, Padding};
 
 use crate::app::{DocumentMsg, Message};
@@ -100,6 +100,7 @@ fn document_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     column![
         section(t, s::SECTION_PAPER, paper),
         section(t, s::SECTION_HEADER_FOOTER, header_footer(state, t)),
+        section(t, s::SECTION_WATERMARK, watermark(state, t)),
         section(
             t,
             s::SECTION_MARGINS,
@@ -219,6 +220,54 @@ fn header_footer<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     body.into()
 }
 
+/// The watermark text (applied on Return or Apply), its direction and Remove.
+fn watermark<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
+    let d = &state.document;
+    let input = text_input(s::WATERMARK_PLACEHOLDER, &d.watermark_text)
+        .on_input(|text| Message::Document(DocumentMsg::WatermarkText(text)))
+        .on_submit(Message::Document(DocumentMsg::WatermarkApply))
+        .size(13)
+        .padding(Padding {
+            top: 4.0,
+            bottom: 4.0,
+            left: 8.0,
+            right: 8.0,
+        })
+        .width(Length::Fill);
+    let button = |label: &'static str, message: Option<DocumentMsg>| {
+        iced::widget::button(iced::widget::text(label).size(12))
+            .padding([4, 10])
+            .style(move |_, status| crate::widgets::controls::flat(t, status))
+            .on_press_maybe(message.map(Message::Document))
+    };
+    let can_apply = !d.watermark_text.trim().is_empty();
+    column![
+        input,
+        row![
+            container(check(
+                t,
+                s::WATERMARK_DIAGONAL,
+                Mixed::Value(d.watermark_diagonal),
+                DocumentMsg::WatermarkDiagonal
+            ))
+            .width(Length::Fill),
+            button(
+                s::WATERMARK_APPLY,
+                can_apply.then_some(DocumentMsg::WatermarkApply)
+            ),
+            button(
+                s::WATERMARK_REMOVE,
+                d.watermark_on.then_some(DocumentMsg::WatermarkRemove)
+            ),
+        ]
+        .spacing(6)
+        .align_y(Center),
+        caption(t, s::WATERMARK_HINT),
+    ]
+    .spacing(8)
+    .into()
+}
+
 /// A one-line text input styled like the other inspector controls.
 fn text_line<'a>(
     t: Tokens,
@@ -307,45 +356,35 @@ fn check_with_distance<'a>(
 
 fn section_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     let d = &state.document;
-    let continuing = d.numbering_start.is_none();
-    let style = move |_: &iced::Theme, status: radio::Status| {
-        let selected = matches!(
-            status,
-            radio::Status::Active { is_selected: true }
-                | radio::Status::Hovered { is_selected: true }
-        );
-        radio::Style {
-            background: t.control.into(),
-            dot_color: t.accent,
-            border_width: 1.0,
-            border_color: if selected { t.accent } else { t.control_border },
-            text_color: Some(t.text),
-        }
+    let plain = |label: &'static str, msg: DocumentMsg| -> Element<'a, Message> {
+        iced::widget::button(iced::widget::text(label).size(12))
+            .padding([4, 10])
+            .style(move |_, status| crate::widgets::controls::flat(t, status))
+            .on_press(Message::Document(msg))
+            .into()
     };
-    let continue_radio = radio(s::NUMBERING_CONTINUE, true, Some(continuing), |_| {
-        Message::Document(DocumentMsg::NumberingContinue(true))
-    })
-    .size(15)
-    .text_size(13)
-    .style(style);
-    let start_radio = radio(s::NUMBERING_START, false, Some(continuing), |_| {
-        Message::Document(DocumentMsg::NumberingContinue(false))
-    })
-    .size(15)
-    .text_size(13)
-    .style(style);
-
-    let start_row: Element<'a, Message> = if continuing {
-        row![start_radio].into()
-    } else {
+    let start_row: Element<'a, Message> = column![
+        labelled(
+            t,
+            s::NUMBERING_START_PAGE,
+            field(state, t, Field::NumberingStartPage)
+        ),
         row![
-            container(start_radio).width(Length::Fill),
-            container(field(state, t, Field::NumberingStart)).width(Length::Fixed(STEPPER_W)),
+            plain(
+                s::NUMBERING_USE_CURRENT,
+                DocumentMsg::NumberingUseCurrentPage
+            ),
+            plain(s::NUMBERING_UPDATE, DocumentMsg::NumberingUpdate),
         ]
-        .align_y(Center)
-        .spacing(8)
-        .into()
-    };
+        .spacing(8),
+    ]
+    .spacing(8)
+    .into();
+    let first_number = labelled(
+        t,
+        s::NUMBERING_FIRST_NUMBER,
+        field(state, t, Field::NumberingStart),
+    );
 
     let vertical = segmented::select(
         t,
@@ -390,8 +429,9 @@ fn section_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
                     d.numbering_on.is_mixed(),
                     |on| Message::Document(DocumentMsg::NumberingOn(on))
                 ),
-                continue_radio,
+                caption(t, s::NUMBERING_WHOLE_DOC),
                 start_row,
+                first_number,
                 check(
                     t,
                     s::HIDE_ON_FIRST_PAGE,

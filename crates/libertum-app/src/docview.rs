@@ -37,8 +37,9 @@ use libertum_render::{PageRenderer, page_pixel_size};
 
 use crate::perf;
 
-/// Pages the paginator thread adds per write-lock hold (about 25 ms of work on the dev box).
-const PAGINATE_CHUNK: usize = 8;
+/// Pages the paginator thread adds per write-lock hold (about 12 ms of work on the dev box):
+/// the longest another thread waits for the layout, under one frame.
+const PAGINATE_CHUNK: usize = 4;
 /// Pages paginated synchronously on open and after a page-setup change, so the first
 /// screenful can be drawn before the background pass catches up.
 const FIRST_SCREEN_PAGES: usize = 4;
@@ -483,7 +484,7 @@ pub struct DocView {
     /// The model document and editor state. Owned by the UI thread.
     editor: Editor,
     /// Shared with the paginator and render worker.
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     /// Where worker threads report; kept so a page-setup change can restart the paginator.
     events: UnboundedSender<DocEvent>,
     /// Bumped to retire a running paginator before a new one starts.
@@ -491,6 +492,8 @@ pub struct DocView {
     /// Bumped whenever a paragraph style changes. Folded into snapshot versions, so layouts
     /// cached under a paragraph's old formatting are never reused (PLAN §4.2 `style_epoch`).
     style_epoch: u64,
+    /// Renders page thumbnails on the UI thread (a few at a time, only those in view).
+    thumbs: libertum_render::PageRenderer,
 }
 
 /// Bits of a snapshot version above the paragraph's own edit count that hold the style
@@ -611,7 +614,7 @@ impl DocView {
                 .collect();
             m.complete = state.is_complete();
         }
-        let layout = Arc::new(RwLock::new(state));
+        let layout = Arc::new(SharedLayout::new(state));
         let cache = Arc::new(Mutex::new(HandleCache::new(HANDLE_CACHE_BYTES)));
         let plans = Arc::new(Mutex::new(Plans::default()));
         let queue = Arc::new(RenderQueue::default());
@@ -654,6 +657,7 @@ impl DocView {
                 events: tx,
                 paginate_epoch,
                 style_epoch: 0,
+                thumbs: libertum_render::PageRenderer::new(0),
             },
             rx,
         )
@@ -677,7 +681,45 @@ impl DocView {
         (0..total).map(|page| layout.page_geometry(page)).collect()
     }
 
+    /// How much of each page is used, in points (the canvas stacks pageless pages by this so
+    /// no blank page tail opens between the lines of a split paragraph or table).
+    pub fn page_used_heights(&self) -> Vec<f32> {
+        let total = self.page_total();
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        (0..total)
+            .map(|page| layout.page_used_height(page))
+            .collect()
+    }
+
+    /// Hash of what page `page` shows, once it is paginated (thumbnail cache key).
+    pub fn page_content_hash(&self, page: usize) -> Option<u64> {
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.page_content_hash(page)
+    }
+
+    /// Page `page` rendered `width_px` device pixels wide, as straight RGBA (the page is
+    /// opaque, so premultiplied and straight are the same). `None` until it is paginated.
+    pub fn render_thumbnail(&mut self, page: usize, width_px: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        if page >= layout.page_count() {
+            return None;
+        }
+        let geometry = layout.page_geometry(page);
+        let scale = width_px.max(8) as f32 / geometry.width_pt.max(1.0);
+        let pixmap = self.thumbs.render_page(&layout, page, scale)?;
+        Some((pixmap.width(), pixmap.height(), pixmap.data().to_vec()))
+    }
+
     /// The displayed page number of a block, once pagination has reached it.
+    /// 0-based index of the physical page the caret is on, once that page is paginated.
+    /// "Use Current Page" for page numbering starts from this, not from the viewport middle.
+    pub fn caret_page_index(&self) -> Option<usize> {
+        let block = self.editor.caret().block;
+        let index = self.document().index_of(block)?;
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        (index < layout.paragraph_count()).then(|| layout.page_of_para(index))
+    }
+
     pub fn page_number_of_block(&self, block: libertum_model::BlockId) -> Option<u32> {
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
         layout.page_number_of_block(block.0)
@@ -733,6 +775,15 @@ impl DocView {
         self.geometry = geometry;
         self.estimated_pages = estimated_pages_for(self.chars, &geometry);
         self.restart_paginator();
+    }
+
+    /// Paginates the whole document now (tests: the app does it on a worker).
+    #[cfg(test)]
+    pub fn paginate_everything(&mut self) {
+        self.layout
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .paginate_all();
     }
 
     /// List markers drawn on page `page` (tests).
@@ -918,6 +969,8 @@ impl DocView {
                 }
                 // A header or footer taller than the margins re-paginates too.
                 relayout |= layout.set_sections(doc.sections.clone());
+                // Whole-document page numbering: only numbers and decorations change.
+                layout.set_numbering(doc.page_numbering());
             }
             if relayout {
                 // The first screenful is laid out here so the canvas has something to draw
@@ -1054,6 +1107,14 @@ impl DocView {
         layout.caret_rect(index, caret.offset, 1.0)
     }
 
+    /// The line box the caret is on, in page coordinates (see `LayoutState::line_rect`).
+    fn caret_line_rect(&self) -> Option<CaretRect> {
+        let caret = self.editor.caret();
+        let index = self.editor.document().index_of(caret.block)?;
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.line_rect(index, caret.offset)
+    }
+
     /// Selection highlight rectangles in page coordinates, one entry per visual line.
     pub fn selection_rects(&self) -> Vec<SelectionRect> {
         let Some((start, end)) = self.editor.ordered_selection() else {
@@ -1150,7 +1211,9 @@ impl DocView {
     /// Moves the caret one visual line up (`direction < 0`) or down, using the layout to
     /// decide where the previous/next line starts. Crosses page boundaries.
     pub fn move_vertical(&mut self, direction: i32, extend: bool) -> bool {
-        let Some(caret) = self.caret_rect() else {
+        // The whole line box, not the caret: the caret is only as tall as the text, and a
+        // step that short can stop in the space between paragraphs and stay on the line.
+        let Some(caret) = self.caret_line_rect() else {
             return false;
         };
         // The laid-out text area: header and footer insets may shrink it from the page setup.
@@ -1162,8 +1225,23 @@ impl DocView {
         let line = caret.height.max(1.0);
         let last_page = self.page_total().saturating_sub(1);
         let mut page = caret.page;
-        // Aim for the middle of the neighbouring line.
-        let mut y = caret.y + line * 0.5 + direction as f32 * line;
+        // Keep the column across short lines: aim for the remembered x, not the caret's.
+        let x = self.editor.preferred_x().unwrap_or(caret.x);
+        // Aim for the middle of the neighbouring line on this page, wherever it is (the
+        // space between paragraphs can be wider than a line); off the page, the next one.
+        let neighbour = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            layout.neighbour_line_y(page, x, caret.y, caret.y + line, direction)
+        };
+        if let Some(y) = neighbour {
+            let Some((block, offset)) = self.hit_test(page, x, y) else {
+                return false;
+            };
+            self.editor
+                .set_caret_vertical(DocPosition { block, offset }, extend, x);
+            return true;
+        }
+        let mut y = if direction > 0 { bottom } else { top - 1.0 };
         if y < top {
             if page > 0 {
                 page -= 1;
@@ -1179,8 +1257,6 @@ impl DocView {
                 y = bottom - line;
             }
         }
-        // Keep the column across short lines: aim for the remembered x, not the caret's.
-        let x = self.editor.preferred_x().unwrap_or(caret.x);
         let Some((block, offset)) = self.hit_test(page, x, y) else {
             return false;
         };
@@ -1190,8 +1266,55 @@ impl DocView {
     }
 }
 
+/// The layout behind its lock, with a count of the threads waiting for it.
+///
+/// The background paginator takes the write lock for one chunk of pages after another. The
+/// system lock is not fair: a thread that releases it and asks again straight away usually
+/// gets it back, so the UI thread and the page renderer could wait for the whole document
+/// to paginate (over a second on a few hundred pages) before reading a caret position or
+/// drawing a page. Everyone but the paginator announces that it is waiting, and the
+/// paginator does not start its next chunk while anyone is: the longest wait is one chunk.
+pub(crate) struct SharedLayout {
+    lock: RwLock<LayoutState>,
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+impl SharedLayout {
+    fn new(state: LayoutState) -> Self {
+        Self {
+            lock: RwLock::new(state),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn read(&self) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, LayoutState>> {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let guard = self.lock.read();
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        guard
+    }
+
+    fn write(&self) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, LayoutState>> {
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let guard = self.lock.write();
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        guard
+    }
+
+    /// The write lock for the background paginator: taken only once nobody else is
+    /// waiting for the layout.
+    fn write_in_background(
+        &self,
+    ) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, LayoutState>> {
+        while self.waiting.load(Ordering::Acquire) > 0 {
+            std::thread::yield_now();
+        }
+        self.lock.write()
+    }
+}
+
 fn spawn_paginator(
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     map: PageMap,
     tx: UnboundedSender<DocEvent>,
     epoch: Arc<AtomicU64>,
@@ -1207,7 +1330,9 @@ fn spawn_paginator(
                     return;
                 }
                 let (pages, complete) = {
-                    let mut st = layout.write().unwrap_or_else(|e| e.into_inner());
+                    let mut st = layout
+                        .write_in_background()
+                        .unwrap_or_else(|e| e.into_inner());
                     let have = st.page_count();
                     if !st.is_complete() {
                         st.paginate_until(have + PAGINATE_CHUNK);
@@ -1235,8 +1360,8 @@ fn spawn_paginator(
                     );
                     return;
                 }
-                // Let the render worker take the read lock between chunks.
-                std::thread::yield_now();
+                // The next chunk waits in `write_in_background` for anyone who wants the
+                // layout first.
             }
         });
     if let Err(error) = spawned {
@@ -1245,7 +1370,7 @@ fn spawn_paginator(
 }
 
 fn spawn_render_worker(
-    layout: Arc<RwLock<LayoutState>>,
+    layout: Arc<SharedLayout>,
     map: PageMap,
     cache: Arc<Mutex<HandleCache>>,
     plans: Arc<Mutex<Plans>>,
@@ -1485,6 +1610,48 @@ mod tests {
     }
 
     #[test]
+    fn down_and_up_cross_wide_space_between_paragraphs() {
+        use libertum_model::{ParaFormat, ParaProps, Paragraph};
+        // Space after each paragraph wider than a line: a step the height of the text alone
+        // would stop in the gap and leave the caret where it was.
+        let spaced = |id: u64, text: &str| {
+            Paragraph::new(BlockId(id), text).with_props(ParaProps {
+                format: ParaFormat {
+                    space_after_pt: Some(30.0),
+                    ..ParaFormat::default()
+                },
+                ..ParaProps::default()
+            })
+        };
+        let doc = Document::from_paragraphs(vec![
+            spaced(1, "First paragraph"),
+            spaced(2, "Second paragraph"),
+            spaced(3, "Third paragraph"),
+        ]);
+        let (mut view, _rx) = DocView::open(doc);
+        view.move_caret(|ed| {
+            ed.set_caret(
+                DocPosition {
+                    block: BlockId(1),
+                    offset: 3,
+                },
+                false,
+            )
+        });
+        assert!(view.move_vertical(1, false));
+        assert_eq!(view.editor().caret().block, BlockId(2));
+        assert!(view.move_vertical(1, false));
+        assert_eq!(view.editor().caret().block, BlockId(3));
+        assert!(view.move_vertical(-1, false));
+        assert_eq!(view.editor().caret().block, BlockId(2));
+        // The caret itself stays as tall as the text, inside its line box.
+        let caret = view.caret_rect().expect("caret");
+        let line = view.caret_line_rect().expect("line");
+        assert!(caret.height <= line.height + 0.01);
+        assert!(caret.y >= line.y - 0.01 && caret.y + caret.height <= line.y + line.height + 0.01);
+    }
+
+    #[test]
     fn up_and_down_keep_the_column_across_a_short_line() {
         use libertum_model::Paragraph;
         let doc = Document::from_paragraphs(vec![
@@ -1647,6 +1814,38 @@ mod tests {
         let (view, _events) = DocView::open_pageless(document);
         assert!(view.pageless, "opened pageless");
         assert_eq!(view.geometry.margins.top, 0.0);
+    }
+
+    #[test]
+    fn a_pageless_document_reports_how_much_of_each_page_its_text_uses() {
+        let text = "The quick brown fox jumps over the lazy dog. ".repeat(4_000);
+        let document =
+            libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+                libertum_model::BlockId(1),
+                text,
+            )]);
+        let (mut view, _events) = DocView::open_pageless(document);
+        view.paginate_everything();
+        let used = view.page_used_heights();
+        assert!(used.len() > 2, "the paragraph spans pages: {}", used.len());
+        assert_eq!(used.len(), view.page_total());
+        let content_h = view.geometry.content_height();
+        // Every page reports the text it actually holds, never the whole sheet: the canvas
+        // stacks the next page at that point, so the blank tail of a split paragraph or
+        // table never shows as a gap.
+        for (page, height) in used.iter().enumerate() {
+            assert!(*height > 0.0, "page {page} has text");
+            assert!(
+                *height <= content_h + 0.01,
+                "page {page} claims {height} pt on a {content_h} pt page"
+            );
+        }
+        assert!(
+            used.iter().any(|height| content_h - height > 1.0),
+            "at least one page is not completely full"
+        );
+        // The last page is no taller than a page either.
+        assert!(*used.last().expect("pages") <= content_h + 0.01);
     }
 
     #[test]

@@ -75,4 +75,33 @@ jobs:
       - name: Test (GPU feature)
         run: cargo test -p libertum-render --features gpu -- --nocapture
       - name: Build release binary
-        run: cargo build --release -p libertum-app
+        run: cargo build --release -p libertum-app -p libertum-installer
+      # The Windows installer: one .exe carrying the program, install.ps1 and the README
+      # (see crates/libertum-installer and packaging/windows/build-installer.ps1).
+      - name: Pack the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $release = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # The installer is a windowed program: PowerShell only waits for it when told to.
+          $pack = Start-Process -FilePath "$release/libertum-installer.exe" -Wait -NoNewWindow -PassThru `
+            -ArgumentList 'pack', '--app', "$release/libertum.exe", '--script', 'packaging/windows/install.ps1', `
+              '--readme', 'README.md', '--out', 'dist/Libertum-Setup.exe'
+          if ($pack.ExitCode -ne 0 -or -not (Test-Path dist/Libertum-Setup.exe)) { throw 'packing the installer failed' }
+          Copy-Item "$release/libertum.exe" dist/
+          Copy-Item packaging/windows/install.ps1, README.md dist/
+      - name: Collect the macOS and Linux binary
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/libertum" dist/
+          cp README.md dist/
+      # Downloadable from the run's summary page for 30 days.
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: libertum-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

@@ -9,11 +9,6 @@ license.workspace = true
 name = "libertum"
 path = "src/main.rs"
 
-[features]
-default = []
-# The frame-rate counter. Off in every official build; see src/fps.rs.
-fps = []
-
 [dependencies]
 iced = { workspace = true, features = ["advanced", "image-without-codecs", "svg"] }
 libertum-layout = { workspace = true }

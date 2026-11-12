@@ -9,7 +9,7 @@ use parley::layout::Affinity;
 
 use libertum_model::{
     Align, DEFAULT_CELL_MARGIN_PT, Document, HeaderFooter, HeadersFooters, HfKind, HfVariant,
-    PageNumberHorizontal, PageNumberVertical, ResolvedChar, Section, TableBorders,
+    PageNumberHorizontal, PageNumberVertical, PageNumbering, ResolvedChar, Section, TableBorders,
 };
 
 use crate::engine::{Engine, EngineStats, FontReport, LayoutOptions, ParagraphLayout};
@@ -126,8 +126,10 @@ pub struct PageLayout {
     pub used_height: f32,
     /// Section the page belongs to (index into the document's sections).
     pub section: usize,
-    /// Page number, counted per the sections' restart settings (shown or not).
+    /// Page number for the whole document (the document's numbering setting).
     pub number: u32,
+    /// False on pages before the numbering's start page: they carry no number.
+    pub number_shown: bool,
     /// True when this is the first page of its section (a title page, typically).
     pub first_in_section: bool,
     /// Table rows placed on this page, painted under the text.
@@ -164,6 +166,28 @@ pub enum Decoration {
         height: f32,
     },
 }
+
+/// A page's watermark, ready to draw: a one-line layout of the text, centred on
+/// (`centre_x`, `centre_y`) page points and turned by `angle_deg` (negative rises to the
+/// right). It is drawn behind everything else on the page.
+#[derive(Clone)]
+pub struct WatermarkDraw {
+    pub layout: Arc<ParagraphLayout>,
+    pub text: String,
+    pub centre_x: f32,
+    pub centre_y: f32,
+    pub angle_deg: f32,
+    /// Straight RGBA; the alpha is how faint the watermark is.
+    pub colour: [u8; 4],
+}
+
+/// Colour of a watermark: mid grey at about a third strength, readable under black text.
+pub const WATERMARK_COLOUR: [u8; 4] = [128, 128, 128, 80];
+/// Font size the watermark text is measured at before it is scaled to the page, points.
+const WATERMARK_MEASURE_PT: f32 = 100.0;
+/// Smallest and largest watermark font size, points.
+const WATERMARK_MIN_PT: f32 = 18.0;
+const WATERMARK_MAX_PT: f32 = 220.0;
 
 /// One thing drawn on a page, for strip invalidation: see [`LayoutState::page_items`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -314,6 +338,8 @@ pub struct LayoutState {
     /// Pageless view: one endless column. Page numbers, headers and footers are not drawn
     /// and reserve no room, because there are no pages to put them on.
     pageless: bool,
+    /// Whole-document page numbering (show, position, start page and number).
+    numbering: PageNumbering,
     /// Whether the document-end endnote page has been appended.
     endnotes_emitted: bool,
     engine: Mutex<Engine>,
@@ -351,6 +377,7 @@ impl LayoutState {
             furniture_epoch: 0,
             ignore_section_margins: false,
             pageless: false,
+            numbering: PageNumbering::default(),
             endnotes_emitted: false,
             engine: Mutex::new(Engine::new(options)),
         };
@@ -375,6 +402,18 @@ impl LayoutState {
             .map(|page| page.geometry)
             .unwrap_or(self.geometry)
     }
+    /// Height of the content on `page`, in points. A pageless view stacks pages by this
+    /// instead of by the full paper height, so the blank below the last line of a page does
+    /// not open a gap where a paragraph or table simply continued.
+    ///
+    /// Pages that are not paginated yet report the height they will use: the full content
+    /// height, so the scroll extent does not jump about while pagination runs.
+    pub fn page_used_height(&self, page: usize) -> f32 {
+        self.pages
+            .get(page)
+            .map_or_else(|| self.geometry.content_height(), |page| page.used_height)
+    }
+
     /// The document's page setup, before header and footer insets.
     pub fn base_geometry(&self) -> &PageGeometry {
         &self.base_geometry
@@ -585,6 +624,7 @@ impl LayoutState {
         state.furniture_style = SpanStyle::from(&doc.styles.defaults);
         state.renumber_notes();
         state.set_sections(doc.sections.clone());
+        state.set_numbering(doc.page_numbering());
         state.set_tables(table_snapshots(doc));
         state
     }
@@ -650,6 +690,23 @@ impl LayoutState {
             self.renumber_from(0);
         }
         reflow
+    }
+
+    /// Replaces the whole-document page numbering. Page layout does not change, so only the
+    /// numbers and their decorations are recomputed; returns whether it changed.
+    pub fn set_numbering(&mut self, numbering: PageNumbering) -> bool {
+        let numbering = numbering.clamped();
+        if self.numbering == numbering {
+            return false;
+        }
+        self.numbering = numbering;
+        self.renumber_from(0);
+        true
+    }
+
+    /// The document's page numbering as this layout uses it.
+    pub fn numbering(&self) -> PageNumbering {
+        self.numbering
     }
 
     /// Drops every paginated page so the next pass starts at the top of the document.
@@ -833,24 +890,32 @@ impl LayoutState {
         self.pages.len().min(u32::MAX as usize) as u32
     }
 
-    /// (section, number) of a page that starts at `start`, given the page before it.
-    fn number_for(&self, start: FlowPos, prev: Option<&PageLayout>) -> (usize, u32) {
+    /// (section, number, shown) of the page at `index` (0-based), given the page before it.
+    /// The number itself is the document's: physical page `start_page` is `start_at`, and
+    /// pages before it carry no number. Section breaks still decide headers, footers and
+    /// columns, but no longer restart the count.
+    fn number_for(
+        &self,
+        index: usize,
+        start: FlowPos,
+        prev: Option<&PageLayout>,
+    ) -> (usize, u32, bool) {
         let opens_section = start.line == 0
             && start.para > 0
             && self
                 .paragraphs
                 .get(start.para)
                 .is_some_and(|p| p.section_start);
+        let (number, shown) = self.numbering.number_on(index as u32 + 1);
         let Some(prev) = prev else {
-            return (0, self.section(0).first_page_number.unwrap_or(1));
+            return (0, number, shown);
         };
-        if opens_section {
-            let section = (prev.section + 1).min(self.sections.len().saturating_sub(1));
-            let restart = self.section(prev.section + 1).first_page_number;
-            (section, restart.unwrap_or(prev.number + 1))
+        let section = if opens_section {
+            (prev.section + 1).min(self.sections.len().saturating_sub(1))
         } else {
-            (prev.section, prev.number + 1)
-        }
+            prev.section
+        };
+        (section, number, shown)
     }
 
     /// Recounts section and page number from page `from` on. Stops at the first page whose
@@ -859,13 +924,18 @@ impl LayoutState {
     fn renumber_from(&mut self, from: usize) {
         for i in from..self.pages.len() {
             let prev = i.checked_sub(1).map(|j| &self.pages[j]);
-            let (section, number) = self.number_for(self.pages[i].start, prev);
+            let (section, number, number_shown) = self.number_for(i, self.pages[i].start, prev);
             let page = &mut self.pages[i];
-            if i > from && page.section == section && page.number == number {
+            if i > from
+                && page.section == section
+                && page.number == number
+                && page.number_shown == number_shown
+            {
                 break;
             }
             page.section = section;
             page.number = number;
+            page.number_shown = number_shown;
         }
     }
 
@@ -1117,7 +1187,8 @@ impl LayoutState {
                     }
                 }
             }
-            let (section, number) = self.number_for(pos, self.pages.last());
+            let (section, number, number_shown) =
+                self.number_for(self.pages.len(), pos, self.pages.last());
             let section_settings = self.section(section);
             let geo = self.geometry_for_section(section);
             let full_h = geo.content_height();
@@ -1153,7 +1224,7 @@ impl LayoutState {
                 }
                 body_h = wanted;
             };
-            (page.section, page.number) = (section, number);
+            (page.section, page.number, page.number_shown) = (section, number, number_shown);
             page.first_in_section = self
                 .pages
                 .last()
@@ -1203,14 +1274,10 @@ impl LayoutState {
                 }
             }
             if !notes.is_empty() {
-                let (section, geometry, number) =
-                    self.pages.last().map_or((0, self.geometry, 1), |last| {
-                        (
-                            last.section,
-                            self.geometry_for_section(last.section),
-                            last.number + 1,
-                        )
-                    });
+                let (section, geometry) = self.pages.last().map_or((0, self.geometry), |last| {
+                    (last.section, self.geometry_for_section(last.section))
+                });
+                let (number, number_shown) = self.numbering.number_on(self.pages.len() as u32 + 1);
                 self.pages.push(PageLayout {
                     start: FlowPos {
                         para: self.paragraphs.len(),
@@ -1223,6 +1290,7 @@ impl LayoutState {
                     used_height: 0.0,
                     section,
                     number,
+                    number_shown,
                     first_in_section: false,
                     tables: Vec::new(),
                 });
@@ -1298,13 +1366,13 @@ impl LayoutState {
             note.number.hash(&mut h);
             note.text.hash(&mut h);
         }
+        self.section(pg.section).watermark.hash(&mut h);
         pg.endnotes.hash(&mut h);
-        if !self.pageless
-            && let Some(pos) = self.section(pg.section).page_numbers
-        {
-            pos.hash(&mut h);
+        if !self.pageless {
+            self.numbering.hash(&mut h);
         }
         pg.number.hash(&mut h);
+        pg.number_shown.hash(&mut h);
         // Header and footer text, with this page's fields filled in.
         for kind in [HfKind::Header, HfKind::Footer] {
             if let Some((variant, hf)) = self.furniture_on(page, kind) {
@@ -1328,6 +1396,56 @@ impl LayoutState {
             return None;
         }
         self.pages.get(self.page_of_para(para)).map(|p| p.number)
+    }
+
+    /// The watermark of page `page`, if its section has one: the text sized to span most of
+    /// the page (along the diagonal when the watermark is diagonal) and centred on it.
+    pub fn page_watermark(&self, page: usize) -> Option<WatermarkDraw> {
+        let pg = self.pages.get(page)?;
+        let watermark = self.section(pg.section).watermark.as_ref()?;
+        if watermark.text.is_empty() {
+            return None;
+        }
+        let geo = pg.geometry;
+        let (width, height) = (geo.width_pt, geo.height_pt);
+        let (span, angle_deg) = if watermark.diagonal {
+            (
+                (width * width + height * height).sqrt() * 0.62,
+                -(height.atan2(width).to_degrees()),
+            )
+        } else {
+            (width * 0.8, 0.0)
+        };
+        let sized = |id: u64, size: f32| {
+            let mut snap = self.furniture_snapshot(id, &watermark.text, Align::Start);
+            let colour = [0, 0, 0, 255];
+            snap.base = Some(SpanStyle {
+                weight: libertum_model::BOLD,
+                color: colour,
+                ..SpanStyle::new(size)
+            });
+            snap.version = {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                watermark.text.hash(&mut h);
+                size.to_bits().hash(&mut h);
+                h.finish()
+            };
+            lock(&self.engine).full(&snap, f32::MAX / 4.0)
+        };
+        let measured = sized(9_800_000, WATERMARK_MEASURE_PT);
+        let measured_width = measured.layout.width().max(1.0);
+        let size = (WATERMARK_MEASURE_PT * span / measured_width)
+            .clamp(WATERMARK_MIN_PT, WATERMARK_MAX_PT);
+        // Whole points: the same text gets the same layout on every page of one size.
+        let layout = sized(9_800_001, size.round());
+        Some(WatermarkDraw {
+            layout,
+            text: watermark.text.clone(),
+            centre_x: width * 0.5,
+            centre_y: height * 0.5,
+            angle_deg,
+            colour: WATERMARK_COLOUR,
+        })
     }
 
     /// Page furniture for page `page`: its page number (if its section shows them) and the
@@ -1554,11 +1672,10 @@ impl LayoutState {
                 });
             }
         }
-        if !self.pageless
-            && let Some(pos) = self.section(pg.section).page_numbers
-        {
-            let hidden = self.section(pg.section).hide_first_page && pg.first_in_section;
+        if !self.pageless && self.numbering.show && pg.number_shown {
+            let hidden = self.numbering.hide_first_page && page == 0;
             if !hidden {
+                let pos = self.numbering.position;
                 let label = lock(&self.engine).label(&pg.number.to_string());
                 let (w, h) = (label.layout.width(), label.height);
                 // Book style: the chosen side on pages 1, 3, 5..., mirrored on 2, 4, 6...
@@ -1760,6 +1877,17 @@ impl LayoutState {
         };
         let geo = pg.geometry;
         let mut out = Vec::new();
+        // A watermark lies under the whole page: every strip repaints when it changes.
+        if let Some(watermark) = self.section(pg.section).watermark.as_ref() {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            watermark.hash(&mut h);
+            (geo.width_pt.to_bits(), geo.height_pt.to_bits()).hash(&mut h);
+            out.push(PageItem {
+                top: 0.0,
+                bottom: geo.height_pt,
+                key: h.finish(),
+            });
+        }
         for s in &pg.slices {
             let (Some(p), Some(pl)) = (self.paragraphs.get(s.para), self.paragraph_layout(s.para))
             else {
@@ -1987,13 +2115,100 @@ impl LayoutState {
         let line = pl.lines.iter().rposition(|l| l.top <= y_mid).unwrap_or(0);
         let (page, s, top) = self.page_and_slice(para, line)?;
         let geo = self.page_geometry(page);
+        // The caret is as tall as the text, not as the line: the line box includes the
+        // leading that separates lines, which made the caret look oversized beside the glyphs.
+        let (caret_top, caret_height) = match pl.layout.get(line) {
+            Some(line) => {
+                let metrics = line.metrics();
+                let top = metrics.content_block_min_coord;
+                (top, (metrics.content_block_max_coord - top).max(1.0))
+            }
+            None => (g.y0 as f32, (g.y1 - g.y0) as f32),
+        };
         Some(CaretRect {
             page,
             x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
-            y: geo.margins.top + s.y + (g.y0 as f32 - top),
+            y: geo.margins.top + s.y + (caret_top - top),
             width: (g.x1 - g.x0) as f32,
-            height: (g.y1 - g.y0) as f32,
+            height: caret_height,
         })
+    }
+
+    /// The whole line box holding byte `byte_offset` of paragraph `para`, in page
+    /// coordinates: as tall as the line with its leading, unlike [`caret_rect`](Self::caret_rect),
+    /// which is only as tall as the text. Moving up or down steps by this box, so the step
+    /// always reaches the neighbouring line whatever the font's proportions.
+    pub fn line_rect(&self, para: usize, byte_offset: usize) -> Option<CaretRect> {
+        let pl = self.paragraph_layout(para)?;
+        let text_len = self.paragraphs.get(para)?.text.len();
+        let cursor =
+            Cursor::from_byte_index(&pl.layout, byte_offset.min(text_len), Affinity::Downstream);
+        let g = cursor.geometry(&pl.layout, 0.0);
+        let y_mid = (g.y0 + g.y1) as f32 * 0.5;
+        let line = pl.lines.iter().rposition(|l| l.top <= y_mid).unwrap_or(0);
+        let (page, s, top) = self.page_and_slice(para, line)?;
+        let geo = self.page_geometry(page);
+        let line_box = pl.lines.get(line)?;
+        Some(CaretRect {
+            page,
+            x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
+            y: geo.margins.top + s.y + (line_box.top - top),
+            width: 0.0,
+            height: line_box.height,
+        })
+    }
+
+    /// The middle (page points) of the line on page `page` just below (`direction` > 0) or
+    /// just above the line spanning `line_top..line_bottom`, preferring lines whose column
+    /// holds `x` (so moving down in a table cell stays in its column). `None` when there is
+    /// no such line on the page: the caller moves on to the next or previous page.
+    pub fn neighbour_line_y(
+        &self,
+        page: usize,
+        x: f32,
+        line_top: f32,
+        line_bottom: f32,
+        direction: i32,
+    ) -> Option<f32> {
+        let pg = self.pages.get(page)?;
+        let geo = pg.geometry;
+        // (holds x, distance from the current line, middle)
+        let mut best: Option<(bool, f32, f32)> = None;
+        for s in &pg.slices {
+            let Some(pl) = self.paragraph_layout(s.para) else {
+                continue;
+            };
+            let Some(first) = pl.lines.get(s.line_start) else {
+                continue;
+            };
+            let left = geo.margins.left + s.x + pl.x_offset;
+            let holds_x = x >= left - 1.0 && x <= left + pl.width + 1.0;
+            for li in s.line_start..s.line_end {
+                let Some(lb) = pl.lines.get(li) else {
+                    continue;
+                };
+                let top = geo.margins.top + s.y + (lb.top - first.top);
+                let bottom = top + lb.height;
+                let distance = if direction > 0 {
+                    top - line_bottom
+                } else {
+                    line_top - bottom
+                };
+                if distance < -EPS * 10.0 {
+                    continue;
+                }
+                let candidate = (holds_x, distance, top + lb.height * 0.5);
+                best = match best {
+                    None => Some(candidate),
+                    Some(current) => {
+                        let better = (candidate.0 && !current.0)
+                            || (candidate.0 == current.0 && candidate.1 < current.1);
+                        Some(if better { candidate } else { current })
+                    }
+                };
+            }
+        }
+        best.map(|(_, _, middle)| middle)
     }
 
     /// Selection highlight rectangles for a byte range in one paragraph, in page coordinates.
@@ -2551,6 +2766,7 @@ fn build_page(
         used_height,
         section: 0,
         number: 0,
+        number_shown: true,
         first_in_section: false,
         tables,
     };

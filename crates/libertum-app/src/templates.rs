@@ -323,6 +323,15 @@ fn book(page: PageSetup) -> NewDocument {
             ..Section::default()
         },
     ];
+    // Numbering belongs to the whole book and starts with chapter one (the third page), so
+    // the title and contents pages carry no number.
+    document.set_page_numbering(Some(libertum_model::PageNumbering {
+        show: true,
+        position: PageNumberPos::BOTTOM_CENTRE,
+        hide_first_page: false,
+        start_page: 3,
+        start_at: 1,
+    }));
     NewDocument { document, options }
 }
 

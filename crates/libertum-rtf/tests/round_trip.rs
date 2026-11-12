@@ -51,6 +51,8 @@ fn table_borders() -> TableBorders {
 
 fn rich_document() -> Document {
     let mut styles = StyleSheet::with_defaults("Georgia", 12.0);
+    // The id of the custom style appended below (the built-ins before it can grow).
+    let aside_style = StyleId(styles.paragraph.len() as u32);
     styles.paragraph.push(ParagraphStyle {
         name: "Aside".to_owned(),
         base: Some(StyleId::BODY),
@@ -176,7 +178,7 @@ fn rich_document() -> Document {
     blocks.push(Block::Paragraph(paragraph(
         "Aside text",
         ParaProps {
-            style: StyleId(6),
+            style: aside_style,
             ..ParaProps::default()
         },
         Vec::new(),

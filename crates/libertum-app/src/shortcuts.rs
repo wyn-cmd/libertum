@@ -37,12 +37,24 @@ pub enum Shortcut {
     FindPrevious,
     /// Cmd/Ctrl+,: the Settings window.
     Settings,
+    /// Cmd/Ctrl+W: back to the home screen (closing the document).
+    CloseDocument,
+    /// F11 (Windows and Linux) or Ctrl+Cmd+F (macOS): full screen on or off.
+    FullScreen,
 }
 
 /// Resolve a key press to a shortcut, if one is bound.
 pub fn lookup(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
     if matches!(key.as_ref(), Key::Named(keyboard::key::Named::Escape)) {
         return Some(Shortcut::CloseMenu);
+    }
+    if !cfg!(target_os = "macos")
+        && matches!(key.as_ref(), Key::Named(keyboard::key::Named::F11))
+        && !modifiers.alt()
+        && !modifiers.command()
+        && !modifiers.shift()
+    {
+        return Some(Shortcut::FullScreen);
     }
     if matches!(key.as_ref(), Key::Named(keyboard::key::Named::F3))
         && !modifiers.alt()
@@ -64,6 +76,14 @@ pub fn lookup(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
     let Key::Character(c) = key.as_ref() else {
         return None;
     };
+    if cfg!(target_os = "macos")
+        && modifiers.logo()
+        && modifiers.control()
+        && !modifiers.alt()
+        && c.eq_ignore_ascii_case("f")
+    {
+        return Some(Shortcut::FullScreen);
+    }
     if modifiers.command() && modifiers.alt() && !modifiers.shift() && c.eq_ignore_ascii_case("i") {
         return Some(Shortcut::ToggleSidebar);
     }
@@ -83,6 +103,9 @@ pub fn lookup(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
         }
         if c == "," && !modifiers.shift() {
             return Some(Shortcut::Settings);
+        }
+        if c.eq_ignore_ascii_case("w") && !modifiers.shift() {
+            return Some(Shortcut::CloseDocument);
         }
         if c.eq_ignore_ascii_case("g") {
             return Some(if modifiers.shift() {
@@ -167,7 +190,21 @@ pub fn label(shortcut: Shortcut) -> &'static str {
             }
         }
         Shortcut::FindNext => "F3",
+        Shortcut::FullScreen => {
+            if cfg!(target_os = "macos") {
+                "Ctrl+Cmd+F"
+            } else {
+                "F11"
+            }
+        }
         Shortcut::FindPrevious => "Shift+F3",
+        Shortcut::CloseDocument => {
+            if cfg!(target_os = "macos") {
+                "Cmd+W"
+            } else {
+                "Ctrl+W"
+            }
+        }
         Shortcut::Settings => {
             if cfg!(target_os = "macos") {
                 "Cmd+,"

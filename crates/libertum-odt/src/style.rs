@@ -577,6 +577,7 @@ impl Styles {
             ("heading 1", StyleId::HEADING_1),
             ("heading 2", StyleId::HEADING_2),
             ("heading 3", StyleId::HEADING_3),
+            ("heading 4", StyleId::HEADING_4),
             ("quote", StyleId::QUOTE),
             ("quotation", StyleId::QUOTE),
         ] {

@@ -18,7 +18,8 @@ shortcut tests, unless the row says otherwise.
 | Alignment | Ctrl+L, E, R, J (Cmd+{, |, } on macOS) |
 | Page break | Cmd/Ctrl+Enter |
 | Sidebar toggle | Cmd/Ctrl+Alt+I |
-| Escape | closes the front-most thing: a prompt (Cancel; Discard for the recovery offer), the Settings window, the Find bar, a menu, a context menu |
+| Full screen | F11 (Ctrl+Cmd+F on macOS); Escape leaves it when nothing else is open |
+| Escape | closes the front-most thing: a prompt (Cancel; Discard for the recovery offer), the Settings window, the Find bar, a menu, a context menu, and then full screen |
 | Caret and selection | arrows, Home/End with the platform modifiers, Shift to extend, Cmd/Ctrl+arrows by word |
 | Undo, redo | Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z and Cmd/Ctrl+Y |
 | Cut, copy, paste, select all | Cmd/Ctrl+X, C, V, A |
@@ -31,11 +32,13 @@ shortcut tests, unless the row says otherwise.
 | Action | Note |
 |---|---|
 | Opening the toolbar menus (View, Zoom, Insert, Table) | Each *command* inside them has another route: everything in View has a shortcut or is a per-document choice; Insert's items are page break (shortcut), table (Table menu), image (no shortcut), footnote (no shortcut), TOC (no shortcut), page number (no shortcut); Table commands are also in the right-click menu; Zoom has the stepper and Cmd/Ctrl+wheel. |
-| Toolbar buttons (Page Break, Insert, Table, Image, Footnote, and the four inspector buttons) | Page Break has Cmd/Ctrl+Enter and the inspector buttons have Alt+Cmd/Ctrl+I; Image and Footnote are mouse-only. |
+| Toolbar buttons (Full Screen, Insert, Table, Image, Footnote, and the four inspector buttons) | Full Screen has F11, Page Break (in the Insert menu) has Cmd/Ctrl+Enter and the inspector buttons have Alt+Cmd/Ctrl+I; Image and Footnote are mouse-only. |
 | Inspector controls | Every *field* can be typed into; the buttons and popups are pointer-only, except where a shortcut does the same thing (B/I/U, alignment, lists' Tab, baseline). |
 | Table commands (insert/delete/merge/split/columns, styles) | Table menu and the right-click menu; no default shortcut (as in Word). |
 | Image size, alt text, remove | Style pane and the right-click menu; no shortcut. |
 | Home screen recent files | Pointer-only; the template chooser itself has arrows and Enter. |
+| Page thumbnails (View > Page Thumbnails) | Pointer-only; from the keyboard, Page Up/Down move the caret ten paragraphs and Cmd/Ctrl+Home/End go to the start or end. |
+| Watermark (Document pane) | The text field takes typing and Return applies it; Diagonal, Apply and Remove are pointer-only. |
 | Modal prompt buttons | Pointer-only. Escape now takes the safe choice (Cancel, or Discard for the recovery offer) so a prompt never traps a keyboard user. |
 
 ## What Iced 0.14 cannot do

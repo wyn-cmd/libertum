@@ -220,6 +220,72 @@ impl PageNumberPos {
     };
 }
 
+/// Page numbering for the whole document: whether numbers are drawn, where, and where the
+/// count begins. It lives on the document rather than on a section, so the controls apply to
+/// every page; `None` on the document means "use the first section's settings", which keeps
+/// files imported before this existed showing their numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PageNumbering {
+    /// Draw a number in each page's margin.
+    pub show: bool,
+    pub position: PageNumberPos,
+    /// Do not draw a number on page 1.
+    pub hide_first_page: bool,
+    /// Physical page (1-based) where numbering begins. Pages before it carry no number.
+    pub start_page: u32,
+    /// Number written on the start page; later pages count up from it.
+    pub start_at: u32,
+}
+
+impl Default for PageNumbering {
+    fn default() -> Self {
+        Self {
+            show: false,
+            position: PageNumberPos::BOTTOM_CENTRE,
+            hide_first_page: false,
+            start_page: 1,
+            start_at: 1,
+        }
+    }
+}
+
+impl PageNumbering {
+    /// The settings an imported or older document's first section carries.
+    pub fn from_sections(sections: &[Section]) -> Self {
+        let first = sections.first();
+        Self {
+            show: first.is_some_and(|section| section.page_numbers.is_some()),
+            position: first
+                .and_then(|section| section.page_numbers)
+                .unwrap_or(PageNumberPos::BOTTOM_CENTRE),
+            hide_first_page: first.is_some_and(|section| section.hide_first_page),
+            start_page: 1,
+            start_at: first
+                .and_then(|section| section.first_page_number)
+                .unwrap_or(1),
+        }
+    }
+
+    /// Clamps the page and number to sensible values (a hand-edited or imported file may
+    /// hold anything).
+    pub fn clamped(mut self) -> Self {
+        self.start_page = self.start_page.max(1);
+        self.start_at = self.start_at.min(1_000_000);
+        self
+    }
+
+    /// The number drawn on physical page `page` (1-based), and whether it is drawn at all.
+    pub fn number_on(&self, page: u32) -> (u32, bool) {
+        let page = page.max(1);
+        if page < self.start_page {
+            (page, false)
+        } else {
+            (self.start_at.saturating_add(page - self.start_page), true)
+        }
+    }
+}
+
 /// A section of the document. Section 0 starts at the first paragraph; section `n` starts at
 /// the `n`-th paragraph with `ParaProps::section_start`.
 ///
@@ -263,6 +329,45 @@ pub struct Section {
     pub link_headers_to_previous: bool,
     /// Use the previous section's footers (Word "Link to Previous").
     pub link_footers_to_previous: bool,
+    /// Text drawn large and faint behind the body of every page of this section ("DRAFT",
+    /// "CONFIDENTIAL"). The app sets it on every section at once.
+    pub watermark: Option<Watermark>,
+}
+
+/// A text watermark: drawn behind the page's content, centred, in light grey.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Watermark {
+    pub text: String,
+    /// Along the page's diagonal, rising to the right; otherwise horizontal.
+    pub diagonal: bool,
+}
+
+impl Default for Watermark {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            diagonal: true,
+        }
+    }
+}
+
+impl Watermark {
+    /// Longest watermark text kept, characters.
+    pub const MAX_CHARS: usize = 60;
+
+    /// A watermark for `text`, or `None` when the text is blank. Line breaks become spaces
+    /// and the text is cut to [`MAX_CHARS`](Self::MAX_CHARS).
+    pub fn new(text: &str, diagonal: bool) -> Option<Self> {
+        let text: String = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(Self::MAX_CHARS)
+            .collect();
+        (!text.is_empty()).then_some(Self { text, diagonal })
+    }
 }
 
 /// Most columns a section may use. Word allows up to 45; the inspector caps it at 12, and the
@@ -291,6 +396,7 @@ impl Default for Section {
             column_gutter_pt: DEFAULT_COLUMN_GUTTER_PT,
             link_headers_to_previous: false,
             link_footers_to_previous: false,
+            watermark: None,
         }
     }
 }
@@ -396,9 +502,36 @@ impl ChangeSet {
     }
 }
 
+/// How many operations a document has had applied. It tells caches built from the content
+/// (the Find match list) that they are stale. It is bookkeeping, not content, so it never
+/// makes two documents unequal and is never written to a file.
+#[derive(Clone, Copy, Debug, Default)]
+struct Revision(u64);
+
+impl PartialEq for Revision {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// The document's last save, unix seconds (UTC). Bookkeeping, not content: it decides what
+/// an "updated date and time" field shows, and two documents with different save times are
+/// still the same document.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SavedAt(pub Option<i64>);
+
+impl PartialEq for SavedAt {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// The document: body blocks plus the bookkeeping needed by the editor.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Document {
+    #[serde(skip)]
+    revision: Revision,
     body: BlockList,
     next_id: u64,
     #[serde(skip)]
@@ -411,6 +544,12 @@ pub struct Document {
     locations: HashMap<BlockId, ParaLocation>,
     pub sections: Vec<Section>,
     pub styles: StyleSheet,
+    /// Page numbering for the whole document. `None` uses the first section's settings (an
+    /// imported or pre-0.1.1 file); the app always sets `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page_numbering: Option<PageNumbering>,
+    /// When the document was last saved, if it ever was.
+    saved_at: SavedAt,
 }
 
 /// Reading a `Document` rebuilds its indexes: the caches are derived state and are never
@@ -428,14 +567,16 @@ impl<'de> serde::Deserialize<'de> for Document {
             sections: Vec<Section>,
             #[serde(default)]
             styles: StyleSheet,
+            #[serde(default)]
+            page_numbering: Option<PageNumbering>,
+            #[serde(default)]
+            saved_at: SavedAt,
         }
         let parts = Parts::deserialize(deserializer)?;
-        Ok(Document::from_parts(
-            parts.body,
-            parts.next_id,
-            parts.sections,
-            parts.styles,
-        ))
+        let mut doc = Document::from_parts(parts.body, parts.next_id, parts.sections, parts.styles);
+        doc.page_numbering = parts.page_numbering.map(PageNumbering::clamped);
+        doc.saved_at = parts.saved_at;
+        Ok(doc)
     }
 }
 
@@ -452,15 +593,123 @@ impl Document {
             body: BlockList::new(),
             next_id: 1,
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections: vec![Section::default()],
             styles: StyleSheet::default(),
+            page_numbering: None,
+            saved_at: SavedAt::default(),
         };
         let id = doc.alloc_id();
         doc.body.push(Block::Paragraph(Paragraph::new(id, "")));
         doc.reindex();
         doc
+    }
+
+    /// Page numbering for the whole document (from the first section when the document has
+    /// no explicit setting, so imported files keep theirs).
+    pub fn page_numbering(&self) -> PageNumbering {
+        self.page_numbering
+            .unwrap_or_else(|| PageNumbering::from_sections(&self.sections))
+            .clamped()
+    }
+
+    /// True when the document carries an explicit whole-document numbering setting.
+    pub fn has_page_numbering(&self) -> bool {
+        self.page_numbering.is_some()
+    }
+
+    /// Sets the whole-document numbering (`None` returns to the first section's settings)
+    /// and returns the old one. Called through `Operation::SetPageNumbering`.
+    pub fn set_page_numbering(
+        &mut self,
+        numbering: Option<PageNumbering>,
+    ) -> Option<PageNumbering> {
+        let old = self.page_numbering;
+        self.page_numbering = numbering.map(PageNumbering::clamped);
+        self.revision.0 = self.revision.0.wrapping_add(1);
+        old
+    }
+
+    /// When the document was last saved, unix seconds (UTC).
+    pub fn saved_at(&self) -> Option<i64> {
+        self.saved_at.0
+    }
+
+    /// Records the last save time (an "updated date and time" field shows it). Bookkeeping:
+    /// it never counts as a content change and never bumps the revision.
+    pub fn set_saved_at(&mut self, seconds: i64) {
+        self.saved_at = SavedAt(Some(seconds));
+    }
+
+    /// The next id this document would allocate: stitching shifts a following document's ids
+    /// from here so nothing collides.
+    /// A counter that changes with every operation applied (undo and redo included). Equal
+    /// values on the same document mean nothing has changed in between.
+    pub fn revision(&self) -> u64 {
+        self.revision.0
+    }
+
+    pub fn next_free_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// The largest list group in use (0 when there are no lists).
+    pub fn max_list_group(&self) -> u64 {
+        self.paragraphs()
+            .filter_map(|paragraph| paragraph.props.list.as_ref().map(|list| list.group))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Shifts every paragraph and table id, the TOC targets that point at them, and every list
+    /// group. Table cell paragraphs shift with everything else. Used by document stitching.
+    pub fn restamp(&mut self, shift: u64, list_shift: u64) {
+        for block in &mut self.body.blocks {
+            match block {
+                Block::Paragraph(paragraph) => paragraph.restamp(shift, list_shift),
+                Block::Table(table) => {
+                    table.id = BlockId(table.id.0 + shift);
+                    for row in &mut table.rows {
+                        for cell in &mut row.cells {
+                            for paragraph in &mut cell.paragraphs {
+                                paragraph.restamp(shift, list_shift);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.next_id = self.next_id.saturating_add(shift);
+        self.revision.0 = self.revision.0.wrapping_add(1);
+        self.reindex();
+    }
+
+    /// Appends blocks at the end of the body and rebuilds the index. Used by stitching, where
+    /// ids have already been made unique with [`restamp`](Self::restamp).
+    pub fn append_blocks(&mut self, blocks: Vec<Block>) {
+        if blocks.is_empty() {
+            return;
+        }
+        for block in &blocks {
+            if let Block::Paragraph(paragraph) = block {
+                self.next_id = self.next_id.max(paragraph.id.0 + 1);
+            }
+            if let Block::Table(table) = block {
+                self.next_id = self.next_id.max(table.id.0 + 1);
+            }
+        }
+        self.word_count += blocks
+            .iter()
+            .map(|block| match block {
+                Block::Paragraph(paragraph) => paragraph.word_count(),
+                Block::Table(table) => table.word_count(),
+            })
+            .sum::<usize>();
+        self.body.blocks.extend(blocks);
+        self.revision.0 = self.revision.0.wrapping_add(1);
+        self.reindex();
     }
 
     /// Rebuilds a document from its stored parts without touching the ids, so bookmarks,
@@ -479,10 +728,13 @@ impl Document {
             body,
             next_id: next_id.max(1),
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections,
             styles,
+            page_numbering: None,
+            saved_at: SavedAt::default(),
         };
         doc.reindex();
         doc.word_count = doc.paragraphs().map(Paragraph::word_count).sum();
@@ -550,10 +802,13 @@ impl Document {
             body: BlockList::from_blocks(list),
             next_id,
             word_count: 0,
+            revision: Revision::default(),
             flat: Vec::new(),
             locations: HashMap::new(),
             sections: vec![Section::default()],
             styles: StyleSheet::default(),
+            page_numbering: None,
+            saved_at: SavedAt::default(),
         };
         doc.recount_words();
         doc.reindex();
@@ -724,6 +979,7 @@ impl Document {
     /// Applies one operation and returns its inverse. The document is unchanged when this
     /// returns an error.
     pub fn apply(&mut self, op: Operation) -> Result<Operation, ModelError> {
+        self.revision.0 = self.revision.0.wrapping_add(1);
         match op {
             Operation::InsertText {
                 block,
@@ -1028,11 +1284,22 @@ impl Document {
                 let old = self.paragraph_mut(block)?.set_images(images);
                 Ok(Operation::SetImages { block, images: old })
             }
+            Operation::SetPageNumbering { numbering } => {
+                let old = self.set_page_numbering(numbering);
+                Ok(Operation::SetPageNumbering { numbering: old })
+            }
             Operation::SetCrossRefs { block, cross_refs } => {
                 let old = self.paragraph_mut(block)?.set_cross_refs(cross_refs);
                 Ok(Operation::SetCrossRefs {
                     block,
                     cross_refs: old,
+                })
+            }
+            Operation::SetDateTimeFields { block, date_fields } => {
+                let old = self.paragraph_mut(block)?.set_date_fields(date_fields);
+                Ok(Operation::SetDateTimeFields {
+                    block,
+                    date_fields: old,
                 })
             }
             Operation::SetSection { index, section } => {
@@ -1209,6 +1476,9 @@ impl ChangeSet {
             Operation::SetBookmarks { block, .. } => set.touch(*block),
             Operation::SetImages { block, .. } => set.touch(*block),
             Operation::SetCrossRefs { block, .. } => set.touch(*block),
+            Operation::SetDateTimeFields { block, .. } => set.touch(*block),
+            // Page numbers are drawn on every page, so every page's hash changes.
+            Operation::SetPageNumbering { .. } => set.sections = true,
             Operation::SetSection { .. } => set.sections = true,
             Operation::SetStyle { id, .. } => set.styles.push(*id),
             // Every paragraph resolves through the defaults.

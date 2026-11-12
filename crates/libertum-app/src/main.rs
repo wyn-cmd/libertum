@@ -1,9 +1,13 @@
 //! Libertum application shell: Pages-style toolbar, document canvas, inspector.
 
+// A release build is a windowed program on Windows: without this, starting it from the
+// Start Menu, a shortcut or a document opens a console window behind the app. Debug builds
+// keep the console for logs. Output still reaches a pipe or file it is redirected to.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod canvas;
 mod docview;
-#[cfg(feature = "fps")]
 mod fps;
 mod home;
 mod icons;
@@ -13,6 +17,7 @@ mod recovery;
 mod settings;
 mod shortcuts;
 mod state;
+mod stitch;
 mod strings;
 mod templates;
 mod theme;
@@ -64,8 +69,32 @@ fn platform_font() -> Font {
     }
 }
 
+/// The application logo, shown as the window and taskbar icon.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+
+/// The logo decoded to the RGBA pixels Iced wants. A logo that will not decode is not fatal:
+/// the window simply gets the platform's default icon.
+fn app_icon() -> Option<window::Icon> {
+    let media = match libertum_model::Media::new(LOGO_PNG.to_vec()) {
+        Ok(media) => media,
+        Err(error) => {
+            tracing::warn!(%error, "the application logo is not a usable PNG");
+            return None;
+        }
+    };
+    let decoded = libertum_render::images::decode(&media)?;
+    match window::icon::from_rgba(decoded.rgba, decoded.width, decoded.height) {
+        Ok(icon) => Some(icon),
+        Err(error) => {
+            tracing::warn!(%error, "the application logo has the wrong pixel count");
+            None
+        }
+    }
+}
+
 fn window_settings() -> window::Settings {
     window::Settings {
+        icon: app_icon(),
         // Fits 1366x768 at 100% (outer height 680 + title bar < 728 usable) and
         // 1920x1080 at 125% (864 logical high, minus taskbar) without being maximised.
         size: Size::new(1200.0, 680.0),
@@ -82,6 +111,12 @@ fn window_settings() -> window::Settings {
     }
 }
 
+/// The first command-line argument that is not an option (`-x` or `--x`), as a path.
+fn document_argument(args: impl Iterator<Item = std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    args.map(std::path::PathBuf::from)
+        .find(|path| !path.to_string_lossy().starts_with('-'))
+}
+
 fn main() -> iced::Result {
     // `LIBERTUM_LOG=debug` for diagnostics (for example, input method events).
     let level = match std::env::var("LIBERTUM_LOG").ok().as_deref() {
@@ -94,9 +129,12 @@ fn main() -> iced::Result {
     perf::init();
     let (settings, settings_path) = Settings::load_or_default();
     select_renderer(&settings);
+    // A document to open: Windows passes the file that was double-clicked (or chosen with
+    // "Open with") as the first argument.
+    let open = document_argument(std::env::args_os().skip(1));
 
     let result = iced::application(
-        move || App::boot(settings.clone(), settings_path.clone()),
+        move || App::boot(settings.clone(), settings_path.clone(), open.clone()),
         App::update,
         App::view,
     )
@@ -113,4 +151,35 @@ fn main() -> iced::Result {
         tracing::info!("{summary}");
     }
     result
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn the_application_logo_decodes_to_a_window_icon() {
+        let icon = app_icon().expect("the bundled logo decodes");
+        let (rgba, size) = icon.into_raw();
+        assert_eq!(size, Size::new(512, 512));
+        assert_eq!(rgba.len(), 512 * 512 * 4);
+    }
+
+    #[test]
+    fn the_first_non_option_argument_is_the_document() {
+        let args = |list: &[&str]| {
+            list.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(document_argument(args(&[]).into_iter()), None);
+        assert_eq!(
+            document_argument(args(&[r"C:\Books\My Novel.odt"]).into_iter()),
+            Some(std::path::PathBuf::from(r"C:\Books\My Novel.odt"))
+        );
+        assert_eq!(
+            document_argument(args(&["--flag", "notes.md"]).into_iter()),
+            Some(std::path::PathBuf::from("notes.md"))
+        );
+    }
 }

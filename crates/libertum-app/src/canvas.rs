@@ -38,8 +38,22 @@ use crate::state::Zoom;
 /// Gap between pages and padding around the page strip, in logical pixels.
 const PAGE_GAP: f32 = 24.0;
 const STRIP_PADDING: f32 = 24.0;
-/// Logical pixels per wheel "line".
-const LINE_PX: f32 = 80.0;
+/// Logical pixels per wheel "line": one notch of a mouse wheel moves the page this far, the
+/// distance browsers and Word use on Windows (three lines of text at the default setting).
+const LINE_PX: f32 = 100.0;
+
+/// Whether a wheel event is a notch of a mouse wheel rather than a trackpad's fine motion.
+/// A wheel reports whole lines; a precision trackpad reports pixels (macOS, Linux) or small
+/// fractions of a line many times a second (Windows), already smoothed by the system.
+fn wheel_is_stepped(delta: &mouse::ScrollDelta) -> bool {
+    match *delta {
+        mouse::ScrollDelta::Lines { x, y } => {
+            let whole = |v: f32| v != 0.0 && v.fract() == 0.0;
+            (whole(x) || x == 0.0) && (whole(y) || y == 0.0) && (x != 0.0 || y != 0.0)
+        }
+        mouse::ScrollDelta::Pixels { .. } => false,
+    }
+}
 /// Logical px per point at 100% zoom (CSS 96 dpi over 72 pt per inch).
 const PX_PER_PT: f32 = 96.0 / 72.0;
 /// Scrollbar thickness and minimum thumb length, logical pixels.
@@ -48,6 +62,14 @@ const MIN_THUMB: f32 = 28.0;
 /// A second press within this window and slop counts as a double-click (third: triple).
 const DOUBLE_CLICK_MAX: std::time::Duration = std::time::Duration::from_millis(400);
 const CLICK_SLOP: f32 = 4.0;
+/// Tint of the text Find found last (amber, translucent so the glyphs stay readable).
+const FIND_MATCH_COLOUR: iced::Color = iced::Color {
+    r: 1.0,
+    g: 0.78,
+    b: 0.0,
+    a: 0.5,
+};
+
 /// Drag-selection auto-scroll: minimum step and cap per pointer move, logical pixels.
 const DRAG_SCROLL_MIN: f32 = 10.0;
 const DRAG_SCROLL_MAX: f32 = 60.0;
@@ -71,6 +93,10 @@ pub struct Metrics {
     pub continuous: bool,
     /// Per-page sizes in physical pixels, index-aligned with the page count.
     pub sizes: Vec<(f32, f32)>,
+    /// Per-page used heights in physical pixels. Only the pageless (continuous) view uses
+    /// them: pages are stacked by how much of each is filled, so the blank tail of a page
+    /// where a paragraph or table continued does not show as a gap.
+    pub used: Vec<f32>,
 }
 
 impl Metrics {
@@ -93,6 +119,7 @@ impl Metrics {
             false,
             false,
             &[],
+            &[],
         )
     }
 
@@ -107,6 +134,7 @@ impl Metrics {
         booklet: bool,
         continuous: bool,
         geometries: &[PageGeometry],
+        used_heights: &[f32],
     ) -> Self {
         let sf = sf.max(0.5);
         let (max_w, max_h) = geometries.iter().fold(
@@ -154,6 +182,21 @@ impl Metrics {
         };
         let page_w = sizes.iter().map(|(w, _)| *w).fold(0.0, f32::max);
         let page_h = sizes.iter().map(|(_, h)| *h).fold(0.0, f32::max);
+        // Used heights arrive in points (what pagination measures); the canvas works in
+        // physical pixels, capped to the page they belong to.
+        let used: Vec<f32> = (0..pages.max(1))
+            .map(|page| {
+                let full = sizes.get(page).map_or(page_h, |(_, h)| *h);
+                if continuous {
+                    used_heights
+                        .get(page)
+                        .map(|points| (points * scale).ceil().clamp(0.0, full))
+                        .unwrap_or(full)
+                } else {
+                    full
+                }
+            })
+            .collect();
         Self {
             sf,
             scale,
@@ -169,6 +212,7 @@ impl Metrics {
             booklet,
             continuous,
             sizes,
+            used,
         }
     }
 
@@ -237,8 +281,21 @@ impl Metrics {
                 + (self.rows() - 1) as f32 * self.gap;
         }
         let pages = self.pages;
-        let heights: f32 = (0..pages).map(|page| self.size(page).1).sum();
+        let heights: f32 = (0..pages).map(|page| self.stack_height(page)).sum();
         2.0 * self.pad + heights + pages.saturating_sub(1) as f32 * self.gap
+    }
+
+    /// The height `page` adds to the stack: a continuous view uses only the part that has
+    /// content, so pages meet where the text does rather than at the paper edge.
+    fn stack_height(&self, page: usize) -> f32 {
+        if self.continuous {
+            self.used
+                .get(page)
+                .copied()
+                .unwrap_or_else(|| self.size(page).1)
+        } else {
+            self.size(page).1
+        }
     }
 
     pub fn content_width(&self, viewport_w: f32) -> f32 {
@@ -249,7 +306,7 @@ impl Metrics {
         if self.booklet {
             return self.pad + self.row_of(page) as f32 * self.pitch();
         }
-        let before: f32 = (0..page).map(|index| self.size(index).1).sum();
+        let before: f32 = (0..page).map(|index| self.stack_height(index)).sum();
         self.pad + before + page as f32 * self.gap
     }
 
@@ -369,6 +426,9 @@ pub struct CanvasProps {
     pub caret: Option<CaretRect>,
     /// Selection highlight rectangles in page coordinates.
     pub selection: Vec<SelectionRect>,
+    /// The text Find found last, in page coordinates: drawn in a stronger colour over the
+    /// selection so the match stands out exactly.
+    pub find: Vec<SelectionRect>,
     /// IME composition text, drawn inline at the caret until it is committed.
     pub preedit: Option<PreeditOverlay>,
     /// Keep requesting a redraw every frame (autoscroll test; `App` ticks on `window::frames`).
@@ -379,6 +439,9 @@ pub struct CanvasProps {
     pub continuous: bool,
     /// Per-page geometry, index-aligned with the page count.
     pub geometries: Vec<PageGeometry>,
+    /// How much of each page is used, in points (pageless pages are stacked by this, so a
+    /// paragraph or table that continues leaves no page-sized gap).
+    pub used_heights: Vec<f32>,
     /// The document has keyboard focus, so the OS input method (IME) must stay enabled.
     pub ime_enabled: bool,
     /// Where the IME candidate window should sit: the caret, unaffected by blinking.
@@ -399,7 +462,10 @@ pub struct PreeditOverlay {
 #[derive(Debug, Clone, Copy)]
 pub enum CanvasEvent {
     /// Wheel scrolling, in logical pixels (positive y scrolls down).
-    Wheel { dx: f32, dy: f32 },
+    /// Scroll by this many logical pixels. `stepped` is true for a mouse wheel's notches,
+    /// which the app glides to; a trackpad's fine deltas (and a drag past the edge) are
+    /// applied as they come, because the system already smooths them.
+    Wheel { dx: f32, dy: f32, stepped: bool },
     /// Scrollbar drag: absolute offsets in physical pixels (`None` leaves an axis alone).
     ScrollTo { x: Option<f32>, y: Option<f32> },
     /// The widget's size in logical pixels changed.
@@ -515,6 +581,7 @@ impl<Message> DocCanvas<'_, Message> {
             self.props.booklet,
             self.props.continuous,
             &self.props.geometries,
+            &self.props.used_heights,
         )
     }
 
@@ -803,6 +870,7 @@ where
                     shell.capture_event();
                     return;
                 }
+                let stepped = wheel_is_stepped(delta);
                 let (mut dx, mut dy) = match *delta {
                     mouse::ScrollDelta::Lines { x, y } => (-x * LINE_PX, -y * LINE_PX),
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
@@ -810,7 +878,7 @@ where
                 if state.shift && dx == 0.0 {
                     (dx, dy) = (dy, 0.0);
                 }
-                shell.publish((self.on_event)(CanvasEvent::Wheel { dx, dy }));
+                shell.publish((self.on_event)(CanvasEvent::Wheel { dx, dy, stepped }));
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
@@ -918,7 +986,11 @@ where
                     if over != 0.0 {
                         let dy =
                             over.signum() * (over.abs().min(DRAG_SCROLL_MAX) + DRAG_SCROLL_MIN);
-                        shell.publish((self.on_event)(CanvasEvent::Wheel { dx: 0.0, dy }));
+                        shell.publish((self.on_event)(CanvasEvent::Wheel {
+                            dx: 0.0,
+                            dy,
+                            stepped: false,
+                        }));
                     }
                     shell.capture_event();
                     return;
@@ -1069,6 +1141,24 @@ where
                 }
             }
 
+            // The current Find match: amber over the selection tint, so it reads as "found
+            // here" rather than as an ordinary selection, on white pages in both themes.
+            for s in &self.props.find {
+                if let Some(rect) = page_point_rect(
+                    &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
+                ) {
+                    if rect.intersects(&bounds) {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: rect,
+                                ..Quad::default()
+                            },
+                            FIND_MATCH_COLOUR,
+                        );
+                    }
+                }
+            }
+
             if let Some(caret) = self.props.caret {
                 if let Some(rect) = page_point_rect(
                     &m,
@@ -1197,6 +1287,7 @@ mod tests {
             true,
             false,
             &[],
+            &[],
         )
     }
 
@@ -1264,11 +1355,13 @@ mod tests {
             source: view.source.clone(),
             caret,
             selection: Vec::new(),
+            find: Vec::new(),
             preedit: None,
             animate: false,
             booklet: false,
             continuous: false,
             geometries: Vec::new(),
+            used_heights: Vec::new(),
             ime_enabled,
             ime_caret: caret,
         };
@@ -1356,6 +1449,89 @@ mod tests {
 mod variable_page_tests {
     use super::*;
 
+    /// A pageless column is one endless column: a page is followed by the next at the point
+    /// where its text ended, not at the paper edge, so a paragraph or table that continues
+    /// across the page boundary leaves no blank stretch.
+    #[test]
+    fn a_continuous_column_stacks_pages_by_the_text_they_use() {
+        let geometry = PageGeometry::a4();
+        let m0 = Metrics::new_with_layout(
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1000.0,
+            700.0,
+            3,
+            false,
+            true,
+            &[geometry; 3],
+            &[300.0, 500.0, 120.0],
+        );
+        let scale = m0.scale;
+        let full = (geometry.height_pt * scale).ceil();
+        let expect = [
+            (300.0 * scale).ceil(),
+            (500.0 * scale).ceil(),
+            (120.0 * scale).ceil(),
+        ];
+        let m = Metrics::new_with_layout(
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1000.0,
+            700.0,
+            3,
+            false,
+            true,
+            &[geometry; 3],
+            &[300.0, 500.0, 120.0],
+        );
+        assert!(
+            (m.used[0] - expect[0]).abs() < 1.0,
+            "used 0 = {}",
+            m.used[0]
+        );
+        assert!(
+            (m.used[1] - expect[1]).abs() < 1.0,
+            "used 1 = {}",
+            m.used[1]
+        );
+        assert!(
+            (m.page_top(1) - (m.page_top(0) + m.used[0])).abs() < 0.01,
+            "page 1 follows page 0's text, not its paper"
+        );
+        assert!(
+            (m.page_top(2) - (m.page_top(0) + m.used[0] + m.used[1])).abs() < 0.01,
+            "page 2 follows page 1's text"
+        );
+        // The scroll extent is the text's, not three whole sheets of paper.
+        assert!(
+            (m.content_height() - (2.0 * m.pad + expect.iter().sum::<f32>())).abs() < 2.0,
+            "content height {}",
+            m.content_height()
+        );
+        // Without a pageless view the same figures leave whole pages: a page has its full
+        // height even when little is on it.
+        let paged = Metrics::new_with_layout(
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1000.0,
+            700.0,
+            3,
+            false,
+            false,
+            &[geometry; 3],
+            &[300.0, 500.0, 120.0],
+        );
+        assert!(
+            (paged.used[0] - full).abs() < 1.01,
+            "paged uses whole pages"
+        );
+        assert!(paged.page_top(1) >= paged.page_top(0) + full - 1.0);
+        let _ = m0;
+    }
+
     #[test]
     fn pages_can_have_different_sizes_in_one_column() {
         let portrait = PageGeometry::a4();
@@ -1372,9 +1548,33 @@ mod variable_page_tests {
             false,
             false,
             &[portrait, landscape],
+            &[],
         );
         assert!(m.page_rect(1, 1000.0).width > m.page_rect(0, 1000.0).width);
         assert!((m.page_top(1) - (m.page_rect(0, 1000.0).height + m.gap + m.pad)).abs() < 0.01);
         assert_eq!(m.visible_pages(0.0, 2000.0), 0..2);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn whole_lines_are_wheel_notches_and_fine_deltas_are_a_trackpad() {
+        let lines = |x, y| mouse::ScrollDelta::Lines { x, y };
+        assert!(wheel_is_stepped(&lines(0.0, 1.0)));
+        assert!(wheel_is_stepped(&lines(0.0, -3.0)));
+        assert!(wheel_is_stepped(&lines(1.0, 0.0)));
+        assert!(
+            !wheel_is_stepped(&lines(0.0, 0.25)),
+            "a precision trackpad on Windows"
+        );
+        assert!(!wheel_is_stepped(&lines(0.0, -1.5)));
+        assert!(!wheel_is_stepped(&lines(0.0, 0.0)));
+        assert!(!wheel_is_stepped(&mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: 40.0
+        }));
     }
 }

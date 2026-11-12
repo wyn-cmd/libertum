@@ -974,6 +974,7 @@ fn style_docx_id(id: StyleId) -> String {
         StyleId::HEADING_1 => "Heading1".to_owned(),
         StyleId::HEADING_2 => "Heading2".to_owned(),
         StyleId::HEADING_3 => "Heading3".to_owned(),
+        StyleId::HEADING_4 => "Heading4".to_owned(),
         StyleId::QUOTE => "Quote".to_owned(),
         StyleId(other) => format!("Libertum{other}"),
     }
@@ -1514,6 +1515,7 @@ fn styles_xml(styles: &StyleSheet, table_styles: &TableStyles) -> String {
             StyleId::HEADING_1 => ("heading 1".to_owned(), ""),
             StyleId::HEADING_2 => ("heading 2".to_owned(), ""),
             StyleId::HEADING_3 => ("heading 3".to_owned(), ""),
+            StyleId::HEADING_4 => ("heading 4".to_owned(), ""),
             StyleId::QUOTE => ("Quote".to_owned(), ""),
             _ => (style.name.clone(), ""),
         };

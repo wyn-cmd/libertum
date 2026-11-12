@@ -1,6 +1,6 @@
 # Third-party licences
 
-Dependencies are MIT, Apache-2.0, ISC, BSD or Zlib (CONTRIBUTING.md rule 4). This file records the cases that need more than that: embedded data with its own licence, and notices that must ship with the binary.
+Dependencies are MIT, Apache-2.0, ISC, BSD or Zlib (AGENTS.md rule 4). This file records the cases that need more than that: embedded data with its own licence, and notices that must ship with the binary.
 
 ## Hyphenation patterns (`hypher` 0.1.8)
 
@@ -25,6 +25,6 @@ Lucide icons (ISC), with the licence in `crates/libertum-app/assets/icons/`.
 ## Crates added for the native format (2026-11-11)
 
 `serde` (with the `rc` feature) and `serde_json` are MIT OR Apache-2.0, so the permissive-only rule in
-CONTRIBUTING.md is satisfied. They were added to the workspace for `libertum-native` and the serde derives on
+AGENTS.md is satisfied. They were added to the workspace for `libertum-native` and the serde derives on
 `libertum-model`. The ZIP reader and writer was already a dependency of the DOCX and ODT crates (`zip`, MIT).
 No embedded data files were added, so the notices this application must ship are unchanged.

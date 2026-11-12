@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use libertum_model::{
-    BlockId, ChangeSet, CrossRef, CrossRefKind, EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT,
-    Media, Operation, Paragraph, Run, Table, TableCell, TableStyle,
+    BlockId, ChangeSet, CrossRef, CrossRefKind, DateTimeField, DateTimeFormat, DateTimeSource,
+    EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media, Operation, Paragraph, Run, Table,
+    TableCell, TableStyle,
 };
 
 use super::{DocPosition, EditBuilder, Editor, EditorError, Selection};
@@ -748,4 +749,200 @@ fn equalise_widths(widths: &mut [f32]) -> bool {
     let changed = widths.iter().any(|width| (width - each).abs() > 0.01);
     widths.fill(each);
     changed
+}
+
+// ---------------------------------------------------------------- date and time fields
+
+/// Writes `seconds` (unix time, UTC) as a local date, time or both in `format`.
+///
+/// The clock and the time zone belong to the machine, not the document, so this lives here
+/// rather than in `libertum-model`; a timestamp out of range falls back to "now" instead of
+/// panicking.
+pub fn format_date_time(seconds: i64, format: DateTimeFormat) -> String {
+    use chrono::TimeZone as _;
+    let at = chrono::Local
+        .timestamp_opt(seconds, 0)
+        .single()
+        .unwrap_or_else(chrono::Local::now);
+    let pattern = match format {
+        DateTimeFormat::DateLong => "%-d %B %Y",
+        DateTimeFormat::DateMedium => "%-d %b %Y",
+        DateTimeFormat::DateShort => "%d/%m/%Y",
+        DateTimeFormat::DateIso => "%Y-%m-%d",
+        DateTimeFormat::DateTimeLong => "%-d %B %Y at %H:%M",
+        DateTimeFormat::DateTimeMedium => "%-d %b %Y, %H:%M",
+        DateTimeFormat::DateTimeIso => "%Y-%m-%d %H:%M",
+        DateTimeFormat::Time24 => "%H:%M",
+        DateTimeFormat::Time24Seconds => "%H:%M:%S",
+        DateTimeFormat::Time12 => "%-I:%M %P",
+        DateTimeFormat::Time12Seconds => "%-I:%M:%S %P",
+    };
+    at.format(pattern).to_string()
+}
+
+impl Editor {
+    /// Inserts a date and time at the caret, as one undo step.
+    ///
+    /// An [`Updated`](DateTimeSource::Updated) field shows the document's last save (or
+    /// `now_secs` when it has never been saved) and is rewritten on every save; an
+    /// [`Inserted`](DateTimeSource::Inserted) field keeps the moment it was inserted.
+    pub fn insert_date_time(
+        &mut self,
+        now_secs: i64,
+        source: DateTimeSource,
+        format: DateTimeFormat,
+    ) -> Result<ChangeSet, EditorError> {
+        let stamp = match source {
+            DateTimeSource::Inserted => now_secs,
+            DateTimeSource::Updated => self.doc.saved_at().unwrap_or(now_secs),
+        };
+        let text = format_date_time(stamp, format);
+        let caret = self.clamp(self.selection.head);
+        let Some(paragraph) = self.doc.paragraph(caret.block) else {
+            return Ok(ChangeSet::default());
+        };
+        if paragraph.props.toc_target.is_some() {
+            return Err(EditorError::ReadOnly);
+        }
+        // Inside an existing date field the new one would overlap it: put it after.
+        let offset = paragraph
+            .date_field_at(caret.offset)
+            .filter(|f| f.range.start < caret.offset)
+            .map_or(caret.offset, |f| f.range.end);
+        let mut b = EditBuilder::default();
+        b.apply(
+            &mut self.doc,
+            Operation::InsertText {
+                block: caret.block,
+                offset,
+                text: text.clone(),
+                format: None,
+            },
+        )?;
+        let mut fields = self
+            .doc
+            .paragraph(caret.block)
+            .map(|p| p.date_fields().to_vec())
+            .unwrap_or_default();
+        fields.push(DateTimeField::new(
+            offset..offset + text.len(),
+            source,
+            format,
+        ));
+        b.apply(
+            &mut self.doc,
+            Operation::SetDateTimeFields {
+                block: caret.block,
+                date_fields: fields,
+            },
+        )?;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        self.selection = Selection::caret(DocPosition {
+            block: caret.block,
+            offset: offset + text.len(),
+        });
+        self.preferred_x = None;
+        Ok(b.dirty)
+    }
+
+    /// Rewrites every "updated date and time" field to the document's last save (or
+    /// `now_secs` when it has none), as one undoable step. Called before a save. Returns an
+    /// empty change set when nothing was stale.
+    pub fn refresh_date_fields(&mut self, now_secs: i64) -> Result<ChangeSet, EditorError> {
+        let stamp = self.doc.saved_at().unwrap_or(now_secs);
+        // (paragraph, [(index, new text)]) for every stale field.
+        let mut stale: Vec<(BlockId, Vec<(usize, String)>)> = Vec::new();
+        for paragraph in self.doc.paragraphs() {
+            let mut changes = Vec::new();
+            for (index, field) in paragraph.date_fields().iter().enumerate() {
+                if !field.follows_save() {
+                    continue;
+                }
+                let wanted = format_date_time(stamp, field.format);
+                if paragraph.text().get(field.range.clone()) != Some(wanted.as_str()) {
+                    changes.push((index, wanted));
+                }
+            }
+            if !changes.is_empty() {
+                stale.push((paragraph.id, changes));
+            }
+        }
+        if stale.is_empty() {
+            return Ok(ChangeSet::default());
+        }
+        let mut b = EditBuilder::default();
+        let caret = self.selection;
+        for (block, changes) in stale {
+            let Some(paragraph) = self.doc.paragraph(block) else {
+                continue;
+            };
+            let old = paragraph.date_fields().to_vec();
+            // The new ranges, front to back, as the replaced texts shift what follows.
+            let mut new_fields = old.clone();
+            let mut shift = 0isize;
+            for (index, field) in old.iter().enumerate() {
+                let start = (field.range.start as isize + shift) as usize;
+                let len = match changes.iter().find(|(i, _)| *i == index) {
+                    Some((_, text)) => {
+                        shift += text.len() as isize - field.range.len() as isize;
+                        text.len()
+                    }
+                    None => field.range.len(),
+                };
+                new_fields[index].range = start..start + len;
+            }
+            // Setting the list to itself first makes the undo's last step restore the old
+            // fields over the restored text (the same trick cross-references use).
+            b.apply(
+                &mut self.doc,
+                Operation::SetDateTimeFields {
+                    block,
+                    date_fields: old.clone(),
+                },
+            )?;
+            for (index, text) in changes.iter().rev() {
+                let range = old[*index].range.clone();
+                let format = paragraph_format_at(self.doc.paragraph(block), range.start);
+                b.apply(
+                    &mut self.doc,
+                    Operation::DeleteRange {
+                        block,
+                        range: range.clone(),
+                    },
+                )?;
+                if !text.is_empty() {
+                    let runs = format
+                        .map(|format| {
+                            vec![Run {
+                                range: 0..text.len(),
+                                format,
+                            }]
+                        })
+                        .unwrap_or_default();
+                    b.apply(
+                        &mut self.doc,
+                        Operation::InsertText {
+                            block,
+                            offset: range.start,
+                            text: text.clone(),
+                            format: Some(runs),
+                        },
+                    )?;
+                }
+            }
+            b.apply(
+                &mut self.doc,
+                Operation::SetDateTimeFields {
+                    block,
+                    date_fields: new_fields,
+                },
+            )?;
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        self.selection = Selection {
+            anchor: self.clamp(caret.anchor),
+            head: self.clamp(caret.head),
+        };
+        Ok(b.dirty)
+    }
 }

@@ -252,6 +252,7 @@ impl<'a> Writer<'a> {
                 StyleId::HEADING_1 => "Heading_20_1".to_owned(),
                 StyleId::HEADING_2 => "Heading_20_2".to_owned(),
                 StyleId::HEADING_3 => "Heading_20_3".to_owned(),
+                StyleId::HEADING_4 => "Heading_20_4".to_owned(),
                 StyleId::QUOTE => "Quote".to_owned(),
                 _ => encode_name(&style.name, &format!("LibertumStyle{index}")),
             };

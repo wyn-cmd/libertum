@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
 use libertum_model::{
-    BlockId, Borders, Document, HfKind, HfVariant, Ligatures, Margins, Orientation, PageSetup,
-    PaperSize, Paragraph,
+    BlockId, Borders, DateTimeContent, DateTimeFormat, DateTimeSource, Document, HfKind, HfVariant,
+    Ligatures, Margins, Orientation, PageSetup, PaperSize, Paragraph,
 };
 
 use super::*;
+use crate::objects::format_date_time;
 use libertum_model::CrossRefKind;
 
 fn doc(texts: &[&str]) -> Document {
@@ -2020,5 +2021,359 @@ fn replace_all_is_one_undo_step_and_skips_generated_entries() {
         book.document().paragraph_at(0).expect("entry").text(),
         entry_text,
         "the generated entry is untouched"
+    );
+}
+
+#[test]
+fn search_handles_accents_overlaps_and_text_that_changes_length_when_lowercased() {
+    let insensitive = SearchOptions::default();
+    let starts = |text: &str, needle: &str| -> Vec<std::ops::Range<usize>> {
+        crate::matches_in(text, needle, insensitive)
+    };
+    // Accented text: offsets are the original bytes.
+    let text = "Un RÉSUMÉ, un résumé";
+    let hits = starts(text, "résumé");
+    assert_eq!(hits.len(), 2);
+    for range in &hits {
+        assert_eq!(text[range.clone()].to_lowercase(), "résumé");
+    }
+    // Overlapping occurrences are all found.
+    assert_eq!(starts("aaaa", "aa"), vec![0..2, 1..3, 2..4]);
+    // U+0130 lowercases to two characters: the text after it still maps back exactly.
+    let text = "İstanbul and Cat and İ cat";
+    let hits = starts(text, "cat");
+    assert_eq!(hits.len(), 2);
+    for range in &hits {
+        assert!(
+            text[range.clone()].eq_ignore_ascii_case("cat"),
+            "{:?}",
+            &text[range.clone()]
+        );
+    }
+    // A needle longer than the text, and an empty one, find nothing.
+    assert!(starts("ab", "abc").is_empty());
+    assert!(starts("ab", "").is_empty());
+    assert!(starts("", "a").is_empty());
+}
+
+#[test]
+fn the_match_list_follows_edits_undo_and_a_changed_query() {
+    let mut ed = editor(&["cat one", "two cat", "three"]);
+    let options = SearchOptions::default();
+    let start = pos(&ed, 0, 0);
+    assert_eq!(ed.match_position("cat", options, None).0, 2);
+    let second = ed
+        .find("cat", options, pos(&ed, 0, 3), true)
+        .expect("second");
+    assert_eq!(
+        ed.match_position("cat", options, Some(&second)),
+        (2, Some(2))
+    );
+    // Typing a third occurrence: the list is rebuilt, not reused.
+    ed.set_caret(pos(&ed, 2, 5), false);
+    ed.insert_text(" cat").expect("type");
+    assert_eq!(ed.match_position("cat", options, None).0, 3);
+    let third = ed
+        .find("cat", options, pos(&ed, 2, 0), true)
+        .expect("third");
+    assert_eq!(third.range, 6..9);
+    assert_eq!(
+        ed.match_position("cat", options, Some(&third)),
+        (3, Some(3))
+    );
+    // Undo takes it away again.
+    ed.undo().expect("undo");
+    assert_eq!(ed.match_position("cat", options, None).0, 2);
+    // Another query, and other options, never see the old list.
+    assert_eq!(ed.match_position("two", options, None).0, 1);
+    let cased = SearchOptions {
+        match_case: true,
+        whole_word: false,
+    };
+    assert_eq!(ed.match_position("Cat", cased, None).0, 0);
+    // Backwards from the very start wraps to the last match; forwards from the end wraps
+    // to the first.
+    let last = ed.find("cat", options, start, false).expect("wrap back");
+    assert_eq!(last.block, ed.document().paragraph_at(1).expect("p").id);
+    let first = ed
+        .find("cat", options, pos(&ed, 2, 5), true)
+        .expect("wrap on");
+    assert_eq!(first.block, ed.document().paragraph_at(0).expect("p").id);
+    // A match that is not in the list has no position.
+    let stray = SearchMatch {
+        block: first.block,
+        range: 1..4,
+    };
+    assert_eq!(ed.match_position("cat", options, Some(&stray)), (2, None));
+    // A new document is searched afresh even though its revision starts over.
+    ed.replace_document(doc(&["no felines here"]));
+    assert_eq!(ed.match_position("cat", options, None).0, 0);
+}
+
+#[test]
+fn a_query_typed_letter_by_letter_finds_what_a_fresh_search_finds() {
+    let texts = [
+        "Catalogue of cats",
+        "a dog",
+        "Concatenate the CATALOGUE",
+        "cat",
+        "",
+    ];
+    for options in [
+        SearchOptions::default(),
+        SearchOptions {
+            match_case: true,
+            whole_word: false,
+        },
+        SearchOptions {
+            match_case: false,
+            whole_word: true,
+        },
+    ] {
+        let typed = editor(&texts);
+        let query = "catalogue";
+        for end in 1..=query.len() {
+            let needle = &query[..end];
+            // The typed editor narrows from the shorter query; a fresh one reads everything.
+            let fresh = editor(&texts);
+            let mut from = pos(&typed, 0, 0);
+            let mut narrowed = Vec::new();
+            let mut whole = Vec::new();
+            let total = typed.match_position(needle, options, None).0;
+            for _ in 0..total {
+                let Some(found) = typed.find(needle, options, from, true) else {
+                    break;
+                };
+                from = DocPosition {
+                    block: found.block,
+                    offset: found.range.start + 1,
+                };
+                narrowed.push(found.range);
+            }
+            let mut from = pos(&fresh, 0, 0);
+            for _ in 0..fresh.match_position(needle, options, None).0 {
+                let Some(found) = fresh.find(needle, options, from, true) else {
+                    break;
+                };
+                from = DocPosition {
+                    block: found.block,
+                    offset: found.range.start + 1,
+                };
+                whole.push(found.range);
+            }
+            assert_eq!(narrowed, whole, "{needle:?} with {options:?}");
+            assert_eq!(total, fresh.match_position(needle, options, None).0);
+        }
+        // Deleting a letter widens the search again.
+        assert_eq!(
+            typed.match_position("cat", options, None).0,
+            editor(&texts).match_position("cat", options, None).0
+        );
+    }
+}
+
+#[test]
+fn a_watermark_goes_on_every_section_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let mut d = ed.document().clone();
+    d.sections.push(libertum_model::Section::default());
+    ed.replace_document(d);
+    assert!(ed.watermark().is_none());
+    let mark = libertum_model::Watermark::new("DRAFT", true);
+    ed.set_watermark(mark.clone()).expect("set");
+    assert!(ed.document().sections.iter().all(|s| s.watermark == mark));
+    assert_eq!(ed.watermark().map(|w| w.text.as_str()), Some("DRAFT"));
+    // The same again is not an undo step.
+    let steps = ed.history().undo_len();
+    assert!(ed.set_watermark(mark).expect("same").is_empty());
+    assert_eq!(ed.history().undo_len(), steps);
+    ed.undo().expect("undo");
+    assert!(ed.document().sections.iter().all(|s| s.watermark.is_none()));
+}
+
+// ---------------------------------------------------------------- date and time fields
+
+#[test]
+fn an_inserted_date_field_shows_its_format_and_undoes() {
+    let mut ed = editor(&["Updated "]);
+    ed.set_caret(pos(&ed, 0, 8), false);
+    let now = 1_760_000_000;
+    ed.insert_date_time(now, DateTimeSource::Inserted, DateTimeFormat::DateLong)
+        .expect("insert");
+    let expected = format_date_time(now, DateTimeFormat::DateLong);
+    assert_eq!(text_at(&ed, 0), format!("Updated {expected}"));
+    let paragraph = ed.document().paragraph_at(0).expect("paragraph");
+    assert_eq!(paragraph.date_fields().len(), 1);
+    let field = &paragraph.date_fields()[0];
+    assert_eq!(field.range, 8..8 + expected.len());
+    assert_eq!(field.source, DateTimeSource::Inserted);
+    assert_eq!(field.format, DateTimeFormat::DateLong);
+    ed.undo().expect("undo the insertion");
+    assert_eq!(text_at(&ed, 0), "Updated ");
+    assert!(
+        ed.document()
+            .paragraph_at(0)
+            .expect("paragraph")
+            .date_fields()
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_updated_date_field_follows_the_documents_save_time() {
+    let mut doc = doc(&["Saved on "]);
+    doc.set_saved_at(1_700_000_000);
+    let mut ed = Editor::new(doc);
+    ed.set_caret(pos(&ed, 0, 9), false);
+    ed.insert_date_time(
+        1_700_000_000,
+        DateTimeSource::Updated,
+        DateTimeFormat::DateLong,
+    )
+    .expect("insert");
+    let first = format_date_time(1_700_000_000, DateTimeFormat::DateLong);
+    assert_eq!(text_at(&ed, 0), format!("Saved on {first}"));
+
+    // The document is saved later: the new save time is recorded, then the field follows it.
+    ed.mark_saved_at(1_800_000_000);
+    ed.refresh_date_fields(1_800_000_000).expect("refresh");
+    let second = format_date_time(1_800_000_000, DateTimeFormat::DateLong);
+    assert_eq!(text_at(&ed, 0), format!("Saved on {second}"));
+    assert_eq!(
+        ed.document()
+            .paragraph_at(0)
+            .expect("paragraph")
+            .date_fields()[0]
+            .range,
+        9..9 + second.len()
+    );
+    // A second refresh changes nothing and is not an undo step.
+    assert!(
+        ed.refresh_date_fields(1_800_000_000)
+            .expect("refresh again")
+            .dirty
+            .is_empty(),
+        "a second refresh changes nothing"
+    );
+    // Undo puts the earlier text and its field back.
+    ed.undo().expect("undo the refresh");
+    assert_eq!(text_at(&ed, 0), format!("Saved on {first}"));
+    assert_eq!(
+        ed.document()
+            .paragraph_at(0)
+            .expect("paragraph")
+            .date_fields()[0]
+            .range,
+        9..9 + first.len()
+    );
+}
+
+#[test]
+fn date_and_time_formats_show_the_parts_they_name() {
+    let stamp = 1_760_000_000;
+    let date = format_date_time(stamp, DateTimeFormat::DateIso);
+    let time = format_date_time(stamp, DateTimeFormat::Time24);
+    let both = format_date_time(stamp, DateTimeFormat::DateTimeIso);
+    assert_eq!(date.len(), 10, "2026-11-12");
+    assert!(date.starts_with("20") && date.matches('-').count() == 2);
+    assert_eq!(time.len(), 5, "14:35");
+    assert_eq!(both, format!("{date} {time}"));
+    assert_eq!(DateTimeFormat::DateLong.content(), DateTimeContent::Date);
+    assert_eq!(DateTimeFormat::Time12.content(), DateTimeContent::Time);
+    assert_eq!(
+        DateTimeFormat::DateTimeLong.content(),
+        DateTimeContent::DateAndTime
+    );
+}
+
+#[test]
+fn the_toc_lists_every_heading_level_and_updates_with_the_document() {
+    let mut doc = doc(&[
+        "Contents", "", "Chapter", "", "Section", "", "Detail", "", "Note",
+    ]);
+    let ids: Vec<BlockId> = (0..9)
+        .map(|i| doc.paragraph_at(i).expect("paragraph").id)
+        .collect();
+    // Heading levels 1 to 4.
+    for (index, level) in [(2usize, 1u8), (4, 2), (6, 3), (8, 4)] {
+        let mut props = doc.paragraph(ids[index]).expect("paragraph").props;
+        props.outline_level = Some(level);
+        let mut b = EditBuilder::default();
+        b.apply(
+            &mut doc,
+            Operation::SetParaProps {
+                block: ids[index],
+                props,
+            },
+        )
+        .expect("heading");
+        b.record(&mut History::default(), EditKind::Other, Instant::now());
+    }
+    let mut ed = Editor::new(doc);
+    ed.set_caret(pos(&ed, 1, 0), false);
+    ed.insert_table_of_contents().expect("toc");
+    let entries: Vec<(String, Option<f32>)> = ed
+        .document()
+        .paragraphs()
+        .filter(|p| p.props.toc_target.is_some())
+        .map(|p| (p.text().to_owned(), p.props.format.indent_left_pt))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            ("Chapter".to_owned(), None),
+            ("Section".to_owned(), Some(18.0)),
+            ("Detail".to_owned(), Some(36.0)),
+            ("Note".to_owned(), Some(54.0)),
+        ],
+        "every level is listed, indented by depth"
+    );
+
+    // Renaming a heading updates its entry in the same undo step as the edit.
+    let section = ids[4];
+    let offset = ed
+        .document()
+        .paragraph(section)
+        .expect("section")
+        .text()
+        .len();
+    ed.set_caret(
+        DocPosition {
+            block: section,
+            offset,
+        },
+        false,
+    );
+    ed.insert_text(" Two").expect("rename");
+    let renamed = ed
+        .document()
+        .paragraphs()
+        .find(|p| p.props.toc_target == Some(section))
+        .expect("entry");
+    assert_eq!(renamed.text(), "Section Two");
+
+    // Promoting the section to Heading 1 removes its indent.
+    let mut props = ed.document().paragraph(section).expect("section").props;
+    props.outline_level = Some(1);
+    let mut b = EditBuilder::default();
+    b.apply(
+        &mut ed.doc,
+        Operation::SetParaProps {
+            block: section,
+            props,
+        },
+    )
+    .expect("level");
+    b.toc = true;
+    ed.commit(&mut b, EditKind::Other, Instant::now())
+        .expect("sync");
+    let promoted = ed
+        .document()
+        .paragraphs()
+        .find(|p| p.props.toc_target == Some(section))
+        .expect("entry");
+    assert_eq!(
+        promoted.props.format.indent_left_pt, None,
+        "level 1 has no indent"
     );
 }

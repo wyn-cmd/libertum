@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "UNLICENSED"
@@ -46,6 +46,9 @@ comrak = "0.59"
 # formats need; no rayon.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 encoding_rs = "0.8"
+
+# Dates for the date/time fields (MIT OR Apache-2.0). Local time only: no time-zone data.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # Data structures and infrastructure
 slotmap = "1.1"

@@ -508,6 +508,9 @@ impl StyleId {
     pub const HEADING_2: StyleId = StyleId(3);
     pub const HEADING_3: StyleId = StyleId(4);
     pub const QUOTE: StyleId = StyleId(5);
+    /// Added after the first six built-ins, so their ids (and every file written before it
+    /// existed) do not move.
+    pub const HEADING_4: StyleId = StyleId(6);
 }
 
 /// A named paragraph style. Its character formatting applies to every paragraph using it,
@@ -549,7 +552,7 @@ impl Default for StyleSheet {
 const MAX_STYLE_DEPTH: usize = 16;
 
 impl StyleSheet {
-    /// The built-in styles (Body, Title, Heading 1 to 3, Quote) over the given default font.
+    /// The built-in styles (Body, Title, Heading 1 to 4, Quote) over the given default font.
     pub fn with_defaults(family: &str, size_pt: f32) -> Self {
         let style = |name: &str, base: Option<StyleId>, char: CharFormat| ParagraphStyle {
             name: name.to_owned(),
@@ -622,6 +625,7 @@ impl StyleSheet {
                         },
                     )
                 },
+                heading("Heading 4", size_pt, 4, size_pt * 0.5),
             ],
         }
     }

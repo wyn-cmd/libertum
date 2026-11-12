@@ -1,15 +1,9 @@
-//! An opt-in frame-rate counter, built only when the `fps` feature is on.
+//! The frame-rate counter behind the performance overlay.
 //!
-//! Official builds leave the feature off, so neither the subscription that keeps redrawing nor
-//! the overlay itself is compiled into them. Build it locally with:
-//!
-//! ```sh
-//! cargo run --release -p libertum-app --features fps
-//! ```
-//!
-//! While the counter is showing, the window redraws continuously: that is what makes the
-//! measurement meaningful, and it also means the counter itself costs frames. Compare figures
-//! taken with the same zoom, window size and document.
+//! It is off by default and switched on in Settings ("Show performance overlay"). While it is
+//! showing, the window redraws continuously: that is what makes the measurement meaningful,
+//! and it also means the counter itself costs frames. Compare figures taken with the same
+//! zoom, window size and document.
 
 use std::time::{Duration, Instant};
 

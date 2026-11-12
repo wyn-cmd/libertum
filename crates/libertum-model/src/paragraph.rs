@@ -6,6 +6,7 @@
 use std::ops::Range;
 
 use crate::bookmark::Bookmark;
+use crate::field::DateTimeField;
 use crate::format::{CharFormat, ParaFormat, StyleId};
 use crate::lists::ListItem;
 use crate::media::{CrossRef, InlineImage};
@@ -131,6 +132,10 @@ pub struct Paragraph {
     /// Cross-references: ranges of this paragraph's text that show a bookmark's text or
     /// page number. Sorted by start, non-overlapping, never empty.
     cross_refs: Vec<CrossRef>,
+    /// Date and time fields: ranges of this paragraph's text that show a date, a time or
+    /// both. Sorted by start, non-overlapping, never empty.
+    #[serde(default)]
+    date_fields: Vec<DateTimeField>,
 }
 
 impl Paragraph {
@@ -145,6 +150,7 @@ impl Paragraph {
             bookmarks: Vec::new(),
             images: Vec::new(),
             cross_refs: Vec::new(),
+            date_fields: Vec::new(),
         }
     }
 
@@ -208,6 +214,18 @@ impl Paragraph {
         std::mem::replace(&mut self.images, images)
     }
 
+    /// Shifts this paragraph's id and the references that point at ids by `shift`, and its
+    /// list group by `list_shift`. Used when documents are stitched into one book.
+    pub fn restamp(&mut self, shift: u64, list_shift: u64) {
+        self.id = BlockId(self.id.0 + shift);
+        if let Some(target) = self.props.toc_target {
+            self.props.toc_target = Some(BlockId(target.0 + shift));
+        }
+        if let Some(list) = &mut self.props.list {
+            list.group = list.group.saturating_add(list_shift);
+        }
+    }
+
     /// Replaces the images without counting as an edit: used when a reader fills in image
     /// bytes, because opening a file must not change a paragraph's version.
     pub(crate) fn restore_images(&mut self, mut images: Vec<InlineImage>) -> Vec<InlineImage> {
@@ -237,6 +255,26 @@ impl Paragraph {
         self.cross_refs
             .iter()
             .find(|r| r.range.start <= offset && offset < r.range.end)
+    }
+
+    /// Date and time fields in this paragraph, sorted by start.
+    pub fn date_fields(&self) -> &[DateTimeField] {
+        &self.date_fields
+    }
+
+    /// Replaces the date fields and returns the old list. Ranges are clamped to the text and
+    /// snapped to character boundaries; empty and overlapping ones are dropped.
+    pub fn set_date_fields(&mut self, date_fields: Vec<DateTimeField>) -> Vec<DateTimeField> {
+        let date_fields = normalise_date_fields(&self.text, date_fields);
+        self.version += 1;
+        std::mem::replace(&mut self.date_fields, date_fields)
+    }
+
+    /// The date field whose text covers byte `offset`, if any.
+    pub fn date_field_at(&self, offset: usize) -> Option<&DateTimeField> {
+        self.date_fields
+            .iter()
+            .find(|f| f.range.start <= offset && offset < f.range.end)
     }
 
     /// The first bookmark with `name` (Word names are case-insensitive).
@@ -316,6 +354,7 @@ impl Paragraph {
             && self.bookmarks == other.bookmarks
             && self.images == other.images
             && self.cross_refs == other.cross_refs
+            && self.date_fields == other.date_fields
     }
 
     /// Inserts `text` at byte offset `at`, keeping runs consistent, and bumps the version.
@@ -369,6 +408,7 @@ impl Paragraph {
                 r.range.end += n;
             }
         }
+        grow_or_move_date_fields(&mut self.date_fields, at, n);
         self.version += 1;
     }
 
@@ -530,6 +570,10 @@ impl Paragraph {
             r.range = moved(r.range.start)..moved(r.range.end);
         }
         self.cross_refs.retain(|r| r.range.start < r.range.end);
+        for f in &mut self.date_fields {
+            f.range = moved(f.range.start)..moved(f.range.end);
+        }
+        self.date_fields.retain(|f| f.range.start < f.range.end);
         self.version += 1;
         (removed, removed_runs)
     }
@@ -621,6 +665,19 @@ impl Paragraph {
             }
         }
         self.cross_refs = head_refs;
+        // The same for a date field cut in two.
+        let mut head_fields = Vec::new();
+        let mut tail_fields = Vec::new();
+        for mut f in std::mem::take(&mut self.date_fields) {
+            if f.range.start >= at {
+                f.range = f.range.start - at..f.range.end - at;
+                tail_fields.push(f);
+            } else {
+                f.range.end = f.range.end.min(at);
+                head_fields.push(f);
+            }
+        }
+        self.date_fields = head_fields;
         Paragraph {
             id: new_id,
             version: 0,
@@ -631,6 +688,7 @@ impl Paragraph {
             bookmarks: tail_bookmarks,
             images: tail_images,
             cross_refs: tail_refs,
+            date_fields: tail_fields,
         }
     }
 
@@ -661,6 +719,10 @@ impl Paragraph {
             r.range = r.range.start + boundary..r.range.end + boundary;
         }
         self.cross_refs.extend(other.cross_refs);
+        for f in &mut other.date_fields {
+            f.range = f.range.start + boundary..f.range.end + boundary;
+        }
+        self.date_fields.extend(other.date_fields);
         self.runs.append(&mut other.runs);
         self.runs = normalise_runs(self.text.len(), std::mem::take(&mut self.runs));
         self.version += 1;
@@ -760,6 +822,41 @@ fn normalise_runs(len: usize, mut runs: Vec<Run>) -> Vec<Run> {
 
 /// Puts cross-references in normal form: clamped to the text, on character boundaries,
 /// sorted, non-empty and non-overlapping (an overlapping one is dropped).
+/// Keeps date fields inside the text, sorted and non-overlapping.
+fn normalise_date_fields(text: &str, mut fields: Vec<DateTimeField>) -> Vec<DateTimeField> {
+    let len = text.len();
+    for f in &mut fields {
+        let start = floor_char_boundary(text, f.range.start.min(len));
+        let end = ceil_char_boundary(text, f.range.end.min(len).max(start));
+        f.range = start..end;
+    }
+    fields.retain(|f| f.range.start < f.range.end);
+    fields.sort_by_key(|f| f.range.start);
+    let mut out: Vec<DateTimeField> = Vec::with_capacity(fields.len());
+    for f in fields {
+        if let Some(last) = out.last()
+            && f.range.start < last.range.end
+        {
+            continue;
+        }
+        out.push(f);
+    }
+    out
+}
+
+/// Text typed inside a date field grows it; text at either edge stays outside, as with
+/// cross-references.
+fn grow_or_move_date_fields(fields: &mut [DateTimeField], at: usize, n: usize) {
+    for f in fields {
+        if at <= f.range.start {
+            f.range.start += n;
+            f.range.end += n;
+        } else if at < f.range.end {
+            f.range.end += n;
+        }
+    }
+}
+
 fn normalise_cross_refs(text: &str, mut refs: Vec<CrossRef>) -> Vec<CrossRef> {
     for r in &mut refs {
         let start = floor_char_boundary(text, r.range.start);

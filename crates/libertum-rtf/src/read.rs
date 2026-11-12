@@ -689,7 +689,8 @@ impl<'a> Reader<'a> {
     fn assign_style_ids(&mut self) {
         let mut ids: HashMap<i32, StyleId> = HashMap::new();
         ids.insert(0, StyleId::BODY);
-        let mut next_custom = 6u32;
+        // Custom styles start after the built-ins; Heading 4 is the last of them.
+        let mut next_custom = StyleId::HEADING_4.0 + 1;
         for style in &self.styles {
             if style.index == 0 || is_normal_name(&style.name) {
                 ids.insert(style.index, StyleId::BODY);
@@ -3173,6 +3174,7 @@ fn builtin_style(name: &str) -> Option<StyleId> {
         "heading 1" | "heading1" => Some(StyleId::HEADING_1),
         "heading 2" | "heading2" => Some(StyleId::HEADING_2),
         "heading 3" | "heading3" => Some(StyleId::HEADING_3),
+        "heading 4" | "heading4" => Some(StyleId::HEADING_4),
         "quote" | "quotation" => Some(StyleId::QUOTE),
         _ => None,
     }

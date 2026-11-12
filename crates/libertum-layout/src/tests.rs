@@ -620,14 +620,15 @@ fn two_page_state() -> LayoutState {
 fn page_numbers_sit_where_the_section_says_and_mirror_on_facing_pages() {
     use libertum_model::{PageNumberHorizontal, PageNumberVertical};
     let mut s = two_page_state();
-    s.set_sections(vec![Section {
-        page_numbers: Some(PageNumberPos {
+    s.set_numbering(libertum_model::PageNumbering {
+        show: true,
+        position: PageNumberPos {
             vertical: PageNumberVertical::Top,
             horizontal: PageNumberHorizontal::Right,
             mirror: true,
-        }),
-        ..Section::default()
-    }]);
+        },
+        ..libertum_model::PageNumbering::default()
+    });
     s.paginate_all();
     let geo = *s.geometry();
     let (x0, y0) = number_at(&s, 0, 1).expect("page 1 number");
@@ -640,11 +641,11 @@ fn page_numbers_sit_where_the_section_says_and_mirror_on_facing_pages() {
 #[test]
 fn page_numbers_can_start_at_zero() {
     let mut s = two_page_state();
-    s.set_sections(vec![Section {
-        page_numbers: Some(PageNumberPos::BOTTOM_CENTRE),
-        first_page_number: Some(0),
-        ..Section::default()
-    }]);
+    s.set_numbering(libertum_model::PageNumbering {
+        show: true,
+        start_at: 0,
+        ..libertum_model::PageNumbering::default()
+    });
     s.paginate_all();
     let geo = *s.geometry();
     let (_, y0) = number_at(&s, 0, 0).expect("page 0");
@@ -655,11 +656,11 @@ fn page_numbers_can_start_at_zero() {
 #[test]
 fn hiding_the_first_page_keeps_numbering_after_it() {
     let mut s = two_page_state();
-    s.set_sections(vec![Section {
-        page_numbers: Some(PageNumberPos::BOTTOM_CENTRE),
+    s.set_numbering(libertum_model::PageNumbering {
+        show: true,
         hide_first_page: true,
-        ..Section::default()
-    }]);
+        ..libertum_model::PageNumbering::default()
+    });
     s.paginate_all();
     assert!(number_at(&s, 0, 1).is_none(), "first page number hidden");
     assert!(
@@ -708,14 +709,15 @@ fn book_state(chapters: usize, body_paras: usize) -> LayoutState {
     paras.extend(entries);
     paras.extend(body);
     let mut s = LayoutState::new(PageGeometry::a4(), paras, LayoutOptions::default());
-    s.set_sections(vec![
-        Section::default(),
-        Section {
-            page_numbers: Some(PageNumberPos::BOTTOM_CENTRE),
-            first_page_number: Some(1),
-            ..Section::default()
-        },
-    ]);
+    s.set_sections(vec![Section::default(), Section::default()]);
+    // Numbering belongs to the document: it starts at the first chapter (physical page 3),
+    // so the title and contents pages carry no number.
+    s.set_numbering(libertum_model::PageNumbering {
+        show: true,
+        start_page: 3,
+        start_at: 1,
+        ..libertum_model::PageNumbering::default()
+    });
     s
 }
 
@@ -732,7 +734,7 @@ fn page_and_section_breaks_start_new_pages() {
 }
 
 #[test]
-fn numbering_restarts_at_the_first_chapter_and_only_shows_there() {
+fn numbering_starts_at_the_first_chapter_and_only_shows_there() {
     let mut s = book_state(2, 1);
     s.paginate_all();
     let numbers: Vec<(usize, u32)> = s.pages().iter().map(|p| (p.section, p.number)).collect();
@@ -830,10 +832,11 @@ fn top_right_numbers_sit_in_the_header() {
         vec![para(1, "Manuscript")],
         LayoutOptions::default(),
     );
-    s.set_sections(vec![Section {
-        page_numbers: Some(PageNumberPos::TOP_RIGHT),
-        ..Section::default()
-    }]);
+    s.set_numbering(libertum_model::PageNumbering {
+        show: true,
+        position: PageNumberPos::TOP_RIGHT,
+        ..libertum_model::PageNumbering::default()
+    });
     s.paginate_all();
     let d = s.page_decorations(0);
     let Some(Decoration::Text { layout, x, y, .. }) = d.first() else {
@@ -2218,4 +2221,184 @@ fn a_pageless_view_draws_no_page_numbers_or_headers() {
             .iter()
             .any(|d| matches!(d, Decoration::Text { text, .. } if text == "Running head"))
     );
+}
+
+#[test]
+fn the_caret_is_as_tall_as_the_text_not_the_line() {
+    let mut s = LayoutState::new(
+        PageGeometry::a4(),
+        vec![para(1, "Caret height")],
+        LayoutOptions::default(),
+    );
+    s.paginate_all();
+    let caret = s.caret_rect(0, 0, 1.0).expect("a caret");
+    let layout = s.paragraph_layout(0).expect("layout");
+    let line = &layout.lines[0];
+    // 12 pt Cambria at the default line spacing: the line box is about 16-17 pt, the glyph
+    // box about 13-14 pt. The caret follows the text, or it looks oversized.
+    assert!(
+        (9.0..15.0).contains(&caret.height),
+        "caret height {} is not the text's",
+        caret.height
+    );
+    assert!(
+        caret.height < line.height,
+        "the caret ({} pt) should be shorter than the line box ({} pt)",
+        caret.height,
+        line.height
+    );
+}
+
+#[test]
+fn a_watermark_is_sized_to_the_page_and_centred_on_it() {
+    use libertum_model::{BlockId, Document, Paragraph, Watermark};
+    if !fcx_has_fonts() {
+        return;
+    }
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Body")]);
+    let geo = PageGeometry::a4();
+    let mut plain = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    plain.paginate_all();
+    assert!(plain.page_watermark(0).is_none(), "no watermark by default");
+    let plain_hash = plain.page_content_hash(0);
+
+    doc.sections[0].watermark = Watermark::new("DRAFT", true);
+    let mut s = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    s.paginate_all();
+    let w = s.page_watermark(0).expect("a watermark");
+    assert_eq!(w.text, "DRAFT");
+    assert!((w.centre_x - geo.width_pt / 2.0).abs() < 0.01);
+    assert!((w.centre_y - geo.height_pt / 2.0).abs() < 0.01);
+    assert!(
+        w.angle_deg < -45.0 && w.angle_deg > -60.0,
+        "rises along the diagonal: {}",
+        w.angle_deg
+    );
+    let diagonal = (geo.width_pt.powi(2) + geo.height_pt.powi(2)).sqrt();
+    let width = w.layout.layout.width();
+    assert!(
+        width > diagonal * 0.4 && width < diagonal * 0.8,
+        "spans most of it: {width}"
+    );
+    assert_ne!(s.page_content_hash(0), plain_hash, "the page repaints");
+    assert!(
+        s.page_items(0)
+            .iter()
+            .any(|i| i.top <= 0.0 && i.bottom >= geo.height_pt - 0.01)
+    );
+
+    doc.sections[0].watermark = Watermark::new("CONFIDENTIAL COPY", false);
+    let mut h = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    h.paginate_all();
+    let w = h.page_watermark(0).expect("a watermark");
+    assert_eq!(w.angle_deg, 0.0);
+    assert!(w.layout.layout.width() <= geo.width_pt * 0.85);
+    assert!(
+        Watermark::new("   ", true).is_none(),
+        "blank text is no watermark"
+    );
+    assert_eq!(
+        Watermark::new("a\nb", true).map(|w| w.text),
+        Some("a b".to_owned())
+    );
+}
+
+/// Only the lines that end in a hyphen reserve room for it. Reserving it for the whole
+/// paragraph left every other line short of the margin: in justified text that is a visible
+/// gap after the last word of the line.
+#[test]
+fn only_hyphenated_lines_reserve_room_for_the_hyphen() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    let text = "Café extraordinarily incomprehensible responsibilities characterisation                 internationalisation demonstrations consideration hyphenation algorithmically                 uncharacteristically representations ordinary text follows here and continues                 for a while so that the paragraph has several lines in total."
+        .to_owned();
+    let mut p = para(1, &text);
+    p.base = Some(SpanStyle::new(11.0));
+    p.hyphenate = true;
+    p.align = libertum_model::Align::Justify;
+    p.indent_right_pt = 300.0;
+    let geometry = PageGeometry::a4();
+    let break_width = geometry.content_width() - 300.0;
+    let reserve = 11.0 * 0.35;
+    let s = LayoutState::new(geometry, vec![p], LayoutOptions::default());
+    let pl = s.paragraph_layout(0).expect("layout");
+    assert!(!pl.hyphen_lines.is_empty(), "the text hyphenates");
+    let lines = pl.layout.len();
+    for li in 0..lines - 1 {
+        let line = pl.layout.get(li).expect("line");
+        // Trailing whitespace hangs past the line end; the visible text ends before it.
+        let ink_end = line
+            .items()
+            .filter_map(|item| match item {
+                parley::PositionedLayoutItem::GlyphRun(run) => run
+                    .positioned_glyphs()
+                    .map(|g| g.x + g.advance)
+                    .reduce(f32::max),
+                _ => None,
+            })
+            .fold(0.0f32, f32::max)
+            - line.metrics().hanging_advance;
+        if pl.hyphen_lines.contains(&li) {
+            // A hyphenated line leaves the hyphen's room when it has slack to justify into;
+            // a line whose fragment fills the width cannot shrink, so its hyphen sits at the
+            // margin (and may overhang it by less than the reserve).
+            assert!(
+                ink_end <= break_width + 0.2 && ink_end >= break_width - reserve - 0.6,
+                "hyphenated line {li} ends at {ink_end} pt, expected between {} and {break_width} pt",
+                break_width - reserve
+            );
+        } else {
+            assert!(
+                (ink_end - break_width).abs() < 0.6,
+                "line {li} ends at {ink_end} pt, not at the margin's {break_width} pt"
+            );
+        }
+    }
+}
+
+/// Hyphenation must not change the distance between baselines: a hyphenated line gets the
+/// same line box as any other line of its paragraph.
+#[test]
+fn hyphenated_lines_keep_the_same_line_spacing() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    let text = "Café extraordinarily incomprehensible responsibilities characterisation                 internationalisation demonstrations consideration hyphenation algorithmically                 uncharacteristically representations ordinary text follows here and continues                 for a while so that the paragraph has several lines in total and the spacing                 between every one of them can be compared."
+        .to_owned();
+    let mut p = para(1, &text);
+    p.hyphenate = true;
+    p.indent_right_pt = 300.0; // a narrow column forces breaks
+    for spacing in [
+        None,
+        Some(libertum_model::LineSpacing::Multiple(1.15)),
+        Some(libertum_model::LineSpacing::Exactly(16.0)),
+        Some(libertum_model::LineSpacing::AtLeast(16.0)),
+        Some(libertum_model::LineSpacing::Leading(2.0)),
+    ] {
+        let mut q = p.clone();
+        q.line_spacing = spacing;
+        let s = LayoutState::new(PageGeometry::a4(), vec![q], LayoutOptions::default());
+        let pl = s.paragraph_layout(0).expect("layout");
+        assert!(
+            pl.hyphen_lines.len() >= 2,
+            "the text hyphenates ({spacing:?})"
+        );
+        let first = pl.lines[0].height;
+        for (i, line) in pl.lines.iter().enumerate() {
+            assert!(
+                (line.height - first).abs() < 0.01,
+                "line {i} is {} pt tall, line 0 is {first} pt ({spacing:?})",
+                line.height
+            );
+            if i > 0 {
+                let step = line.top - pl.lines[i - 1].top;
+                assert!(
+                    (step - first).abs() < 0.01,
+                    "the step from line {} to {i} is {step} pt, not {first} pt ({spacing:?})",
+                    i - 1
+                );
+            }
+        }
+    }
 }

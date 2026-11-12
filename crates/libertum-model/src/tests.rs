@@ -345,7 +345,7 @@ impl Rng {
 proptest! {
     /// Applying random operations and then their inverses in reverse restores the document.
     #[test]
-    fn apply_then_invert_restores(ops in prop::collection::vec(0u8..14, 1..60), seed in 1u64..10_000) {
+    fn apply_then_invert_restores(ops in prop::collection::vec(0u8..15, 1..60), seed in 1u64..10_000) {
         let mut doc = doc_with(&["The quick brown fox", "jumps over", "", "the lazy dog"]);
         // Non-default props, so a merge followed by its inverse must restore them exactly.
         let heading = doc.paragraph_at(1).map(|p| p.id).expect("paragraph 1");
@@ -476,6 +476,36 @@ proptest! {
                     Operation::SetCrossRefs {
                         block: id,
                         cross_refs: vec![CrossRef { range: a..b, target: "mark0".into(), kind: CrossRefKind::Page }],
+                    }
+                }
+                14 => Operation::SetPageNumbering {
+                    numbering: Some(PageNumbering {
+                        show: rng.below(2) == 0,
+                        position: PageNumberPos::TOP_RIGHT,
+                        hide_first_page: rng.below(2) == 0,
+                        start_page: 1 + rng.below(4) as u32,
+                        start_at: rng.below(10) as u32,
+                    }),
+                },
+                13 => {
+                    let a = rng.below(len + 1);
+                    let b = rng.below(len + 1).max(a);
+                    let mut fields = doc
+                        .paragraph(id)
+                        .map(|p| p.date_fields().to_vec())
+                        .unwrap_or_default();
+                    if fields.is_empty() {
+                        fields.push(DateTimeField::new(
+                            a..b,
+                            DateTimeSource::Updated,
+                            DateTimeFormat::DateLong,
+                        ));
+                    } else {
+                        fields.clear();
+                    }
+                    Operation::SetDateTimeFields {
+                        block: id,
+                        date_fields: fields,
                     }
                 }
                 _ if index + 1 < n => Operation::MergeBlocks { first: id },
@@ -1200,4 +1230,93 @@ fn a_table_style_fills_header_and_banded_rows_under_cell_fills() {
     let mut other = table.clone();
     other.style = None;
     assert!(!table.content_eq(&other));
+}
+
+// ---------------------------------------------------------------- date and time fields
+
+#[test]
+fn date_fields_follow_edits_and_splits() {
+    let text = "Saved on 12 November 2026.";
+    let start = "Saved on ".len();
+    let end = start + "12 November 2026".len();
+    let mut p = Paragraph::new(BlockId(1), text);
+    p.set_date_fields(vec![DateTimeField::new(
+        start..end,
+        DateTimeSource::Updated,
+        DateTimeFormat::DateLong,
+    )]);
+
+    // Typing inside the field grows it; typing before it moves it; typing after it leaves
+    // it alone (as with a cross-reference).
+    p.insert_text(start + 3, "x");
+    assert_eq!(p.date_fields()[0].range, start..end + 1);
+    p.insert_text(0, "> ");
+    assert_eq!(p.date_fields()[0].range, start + 2..end + 3);
+    p.insert_text(p.text().len(), "!");
+    assert_eq!(p.date_fields()[0].range, start + 2..end + 3);
+
+    // Deleting part of the field shortens it, and deleting all of it drops it.
+    p.delete_range(start + 2..start + 4);
+    assert_eq!(p.date_fields()[0].range, start + 2..end + 1);
+    let (field_start, field_end) = {
+        let f = &p.date_fields()[0];
+        (f.range.start, f.range.end)
+    };
+    p.delete_range(field_start..field_end);
+    assert!(p.date_fields().is_empty(), "an empty field is not a field");
+
+    // A split keeps the part before the cut on the left and moves the rest right.
+    let mut p = Paragraph::new(BlockId(1), text);
+    p.set_date_fields(vec![DateTimeField::new(
+        start..end,
+        DateTimeSource::Inserted,
+        DateTimeFormat::Time24,
+    )]);
+    let tail = p.split_off(start + 6, BlockId(2), None);
+    assert_eq!(p.date_fields()[0].range, start..start + 6);
+    assert!(
+        tail.date_fields().is_empty(),
+        "a field cut by a split keeps its first part; the rest is plain text (as a reference does)"
+    );
+    // Merging the halves again brings the first part back where it was.
+    p.append(tail);
+    assert_eq!(p.date_fields()[0].range, start..start + 6);
+}
+
+#[test]
+fn a_documents_save_time_is_bookkeeping_not_content() {
+    let mut doc = doc_with(&["Text"]);
+    let before = doc.clone();
+    assert_eq!(doc.saved_at(), None);
+    doc.set_saved_at(1_760_000_000);
+    assert_eq!(doc.saved_at(), Some(1_760_000_000));
+    assert!(doc.content_eq(&before), "the save time is not content");
+    assert_eq!(doc, before, "and it does not make documents unequal");
+}
+
+#[test]
+fn page_numbering_counts_from_the_chosen_page() {
+    let numbering = PageNumbering {
+        show: true,
+        start_page: 5,
+        start_at: 3,
+        ..PageNumbering::default()
+    };
+    assert_eq!(numbering.number_on(4), (4, false), "before the start page");
+    assert_eq!(numbering.number_on(5), (3, true), "the start page");
+    assert_eq!(numbering.number_on(6), (4, true), "counts up");
+    assert_eq!(
+        PageNumbering::default().number_on(1),
+        (1, true),
+        "by default numbering begins on page 1"
+    );
+    assert_eq!(
+        PageNumbering {
+            start_page: 0,
+            ..numbering
+        }
+        .clamped()
+        .start_page,
+        1
+    );
 }

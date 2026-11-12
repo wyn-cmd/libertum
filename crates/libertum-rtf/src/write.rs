@@ -327,6 +327,7 @@ fn style_name(id: StyleId, fallback: &str) -> String {
         StyleId::HEADING_1 => "heading 1".to_owned(),
         StyleId::HEADING_2 => "heading 2".to_owned(),
         StyleId::HEADING_3 => "heading 3".to_owned(),
+        StyleId::HEADING_4 => "heading 4".to_owned(),
         StyleId::QUOTE => "Quote".to_owned(),
         _ => fallback.replace(';', " "),
     }

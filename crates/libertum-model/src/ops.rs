@@ -92,10 +92,19 @@ pub enum Operation {
         block: BlockId,
         cross_refs: Vec<crate::CrossRef>,
     },
-    /// Replaces section `index` (page numbering and the like).
+    /// Replaces every date and time field in a paragraph (insert, refresh, undo).
+    SetDateTimeFields {
+        block: BlockId,
+        date_fields: Vec<crate::DateTimeField>,
+    },
+    /// Replaces section `index` (page setup, headers and footers).
     SetSection {
         index: usize,
         section: Section,
+    },
+    /// Replaces the whole-document page numbering (show, position, start page and number).
+    SetPageNumbering {
+        numbering: Option<crate::PageNumbering>,
     },
     /// Replaces the document's default paragraph formatting (document-wide settings such as
     /// hyphenation).
@@ -129,11 +138,13 @@ impl Operation {
             | Operation::SetNotes { block, .. }
             | Operation::SetBookmarks { block, .. }
             | Operation::SetImages { block, .. }
-            | Operation::SetCrossRefs { block, .. } => *block,
+            | Operation::SetCrossRefs { block, .. }
+            | Operation::SetDateTimeFields { block, .. } => *block,
             Operation::InsertBlock { block, .. } => block.id(),
             Operation::InsertTable { table, .. } => table.id,
             Operation::RemoveTable { table } | Operation::ReplaceTable { table, .. } => *table,
             Operation::SetSection { .. }
+            | Operation::SetPageNumbering { .. }
             | Operation::SetStyle { .. }
             | Operation::SetParaDefaults { .. }
             | Operation::SetCharDefaults { .. } => BlockId(0),

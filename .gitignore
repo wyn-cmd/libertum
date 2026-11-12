@@ -1,5 +1,10 @@
 # Build output
 /target
+/target-rtf
+/build-verify
+
+# Release output (installer and zipped builds)
+/dist
 
 # Leftovers from editors and backups
 **/*.rs.bk

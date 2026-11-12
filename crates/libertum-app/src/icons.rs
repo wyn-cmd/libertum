@@ -26,13 +26,12 @@ macro_rules! icons {
 
 icons! {
     PanelRight => "panel-right.svg",
-    FilePlus => "file-plus.svg",
+    Maximize => "maximize.svg",
+    Minimize => "minimize.svg",
     CirclePlus => "circle-plus.svg",
     Table => "table.svg",
     Image => "image.svg",
     Asterisk => "asterisk.svg",
-    TextBox => "text-cursor-input.svg",
-    Comment => "message-square.svg",
     Paintbrush => "paintbrush.svg",
     Document => "file-text.svg",
     List => "list.svg",

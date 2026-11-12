@@ -14,13 +14,14 @@ use libertum_model::{
     Align, BOLD, Block, BlockId, Bookmark, Borders, ChangeSet, CharFormat, Document, EditKind,
     HeaderFooter, HfKind, HfVariant, History, HistoryEntry, Ligatures, LineSpacing, ListItem,
     ListStyle, MAX_LIST_LEVEL, MIN_TABLE_COLUMN_PT, ModelError, Note, NoteKind, Operation,
-    PageSetup, ParaFormat, ParaProps, Paragraph, REGULAR, ResolvedChar, ResolvedPara, Run, Section,
-    StyleId, Table, TableCell, TableCellLocation, TableRow, VerticalAlign, floor_char_boundary,
+    PageNumbering, PageSetup, ParaFormat, ParaProps, Paragraph, REGULAR, ResolvedChar,
+    ResolvedPara, Run, Section, StyleId, Table, TableCell, TableCellLocation, TableRow,
+    VerticalAlign, floor_char_boundary,
 };
 use thiserror::Error;
 
 mod objects;
-pub use objects::UNKNOWN_PAGE;
+pub use objects::{UNKNOWN_PAGE, format_date_time};
 mod search;
 pub use search::{SearchMatch, SearchOptions, matches_in};
 use unicode_segmentation::UnicodeSegmentation;
@@ -216,6 +217,9 @@ pub struct Editor {
     /// Formatting chosen with a caret (no selection), for the next text typed *at that
     /// position*; moving the caret drops it, as in Word and Pages.
     pending: Option<(DocPosition, CharFormat)>,
+    /// Every match of the query searched last, for the document revision it was built
+    /// from (see `search.rs`). Behind a mutex so searching stays a `&self` operation.
+    search_cache: std::sync::Mutex<Option<search::MatchCache>>,
 }
 
 impl Editor {
@@ -230,7 +234,14 @@ impl Editor {
             history: History::default(),
             preferred_x: None,
             pending: None,
+            search_cache: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Records the document's last save time (unix seconds), which is what an "updated date
+    /// and time" field shows. Bookkeeping: it is not an edit and does not enter undo.
+    pub fn mark_saved_at(&mut self, seconds: i64) {
+        self.doc.set_saved_at(seconds);
     }
 
     pub fn document(&self) -> &Document {
@@ -241,6 +252,8 @@ impl Editor {
     /// caret to the first block.
     pub fn replace_document(&mut self, doc: Document) {
         self.doc = doc;
+        // Another document may carry the same revision number: the match list is not its.
+        *self.search_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.history = History::default();
         self.preferred_x = None;
         let at = first_position(&self.doc).unwrap_or(DocPosition {
@@ -1401,6 +1414,43 @@ impl Editor {
     /// Sets paper, orientation and margins for the whole document as one undoable step. The
     /// app draws every page from section 0's setup, so applying it to every section keeps the
     /// document consistent (and round-trippable once the format crates land).
+    /// Replaces the whole-document page numbering as one undo step.
+    pub fn set_page_numbering(
+        &mut self,
+        numbering: PageNumbering,
+    ) -> Result<ChangeSet, EditorError> {
+        if self.doc.has_page_numbering() && self.doc.page_numbering() == numbering {
+            return Ok(ChangeSet::default());
+        }
+        let numbering = numbering.clamped();
+        let mut b = EditBuilder::default();
+        b.apply(
+            &mut self.doc,
+            Operation::SetPageNumbering {
+                numbering: Some(numbering),
+            },
+        )?;
+        // The format exporters carry page numbers on sections; mirror the document-wide
+        // setting into every section in the same undo step, so a save keeps it.
+        for (index, section) in self.doc.sections.clone().iter().enumerate() {
+            let mut updated = section.clone();
+            updated.page_numbers = numbering.show.then_some(numbering.position);
+            updated.hide_first_page = numbering.hide_first_page;
+            updated.first_page_number = Some(numbering.start_at);
+            if updated != *section {
+                b.apply(
+                    &mut self.doc,
+                    Operation::SetSection {
+                        index,
+                        section: updated,
+                    },
+                )?;
+            }
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
     pub fn set_page_setup(&mut self, setup: PageSetup) -> Result<ChangeSet, EditorError> {
         if self.doc.sections.iter().all(|s| s.page == setup) {
             return Ok(ChangeSet::default());
@@ -1412,6 +1462,37 @@ impl Editor {
             .cloned()
             .map(|mut section| {
                 section.page = setup;
+                section
+            })
+            .collect();
+        let mut b = EditBuilder::default();
+        for (index, section) in sections.into_iter().enumerate() {
+            b.apply(&mut self.doc, Operation::SetSection { index, section })?;
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
+    /// The document's watermark (the first section's; the app sets them all together).
+    pub fn watermark(&self) -> Option<&libertum_model::Watermark> {
+        self.doc.sections.first().and_then(|s| s.watermark.as_ref())
+    }
+
+    /// Sets (or, with `None`, removes) the watermark on every section, as one undoable step.
+    pub fn set_watermark(
+        &mut self,
+        watermark: Option<libertum_model::Watermark>,
+    ) -> Result<ChangeSet, EditorError> {
+        if self.doc.sections.iter().all(|s| s.watermark == watermark) {
+            return Ok(ChangeSet::default());
+        }
+        let sections: Vec<Section> = self
+            .doc
+            .sections
+            .iter()
+            .cloned()
+            .map(|mut section| {
+                section.watermark = watermark.clone();
                 section
             })
             .collect();
@@ -1813,36 +1894,57 @@ impl Editor {
         let (Some(start), Some(template)) = (start, entries.first().map(|e| e.3)) else {
             return Ok(());
         };
-        let mut desired: Vec<(BlockId, String)> = self
+        // Every heading level the document styles produce (Heading 1 to 4 and imported
+        // deeper levels) is listed; the entry's own left indent shows its depth.
+        // The "Contents" title sits just above the first entry and may use a heading style
+        // for its look; it is the list's title, not an entry in it.
+        let title_block = start
+            .checked_sub(1)
+            .and_then(|index| self.doc.body().at(index))
+            .and_then(Block::as_paragraph)
+            .map(|p| p.id);
+        let indent_for = |level: u8| -> Option<f32> {
+            (level > 1).then_some(f32::from(level.saturating_sub(1)) * 18.0)
+        };
+        let mut desired: Vec<(BlockId, String, u8)> = self
             .doc
             .body()
             .iter()
             .filter_map(Block::as_paragraph)
-            .filter(|p| p.props.outline_level == Some(1) && p.props.toc_target.is_none())
-            .map(|p| (p.id, p.text().to_owned()))
+            .filter(|p| p.props.toc_target.is_none() && Some(p.id) != title_block)
+            .filter_map(|p| {
+                p.props
+                    .outline_level
+                    .filter(|level| (1..=9).contains(level))
+                    .map(|level| (p.id, p.text().to_owned(), level))
+            })
             .collect();
         if desired.is_empty() {
-            desired.push((BlockId(0), String::new()));
+            desired.push((BlockId(0), String::new(), 1));
         }
         let unchanged = entries.len() == desired.len()
-            && entries
-                .iter()
-                .zip(&desired)
-                .all(|(e, d)| e.1 == d.0 && e.2 == d.1);
+            && entries.iter().zip(&desired).all(|(e, d)| {
+                e.1 == d.0 && e.2 == d.1 && e.3.format.indent_left_pt == indent_for(d.2)
+            });
         if unchanged {
             return Ok(());
         }
         if entries.len() == desired.len() {
-            for ((id, target, text, props), (want_target, want_text)) in
+            for ((id, target, text, props), (want_target, want_text, level)) in
                 entries.iter().zip(&desired)
             {
-                if target != want_target {
+                let indent = indent_for(*level);
+                if target != want_target || props.format.indent_left_pt != indent {
                     b.apply(
                         &mut self.doc,
                         Operation::SetParaProps {
                             block: *id,
                             props: ParaProps {
                                 toc_target: Some(*want_target),
+                                format: ParaFormat {
+                                    indent_left_pt: indent,
+                                    ..props.format
+                                },
                                 ..*props
                             },
                         },
@@ -1876,12 +1978,13 @@ impl Editor {
         for (id, ..) in entries.iter().rev() {
             b.apply(&mut self.doc, Operation::RemoveBlock { block: *id })?;
         }
-        for (k, (target, text)) in desired.into_iter().enumerate() {
+        for (k, (target, text, level)) in desired.into_iter().enumerate() {
             let id = self.doc.alloc_id();
-            let entry = Paragraph::new(id, text).with_props(ParaProps {
-                toc_target: Some(target),
-                ..template
-            });
+            let mut props = template;
+            props.toc_target = Some(target);
+            props.outline_level = None;
+            props.format.indent_left_pt = indent_for(level);
+            let entry = Paragraph::new(id, text).with_props(props);
             b.apply(
                 &mut self.doc,
                 Operation::InsertBlock {

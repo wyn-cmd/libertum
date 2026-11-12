@@ -160,6 +160,7 @@ fn builtin_by_name(name: &str) -> Option<StyleId> {
         "heading 1" | "heading1" => Some(StyleId::HEADING_1),
         "heading 2" | "heading2" => Some(StyleId::HEADING_2),
         "heading 3" | "heading3" => Some(StyleId::HEADING_3),
+        "heading 4" | "heading4" => Some(StyleId::HEADING_4),
         "quote" => Some(StyleId::QUOTE),
         _ => None,
     }
@@ -176,6 +177,8 @@ fn builtin_ids() -> HashMap<String, StyleId> {
         ("Heading 2", StyleId::HEADING_2),
         ("Heading3", StyleId::HEADING_3),
         ("Heading 3", StyleId::HEADING_3),
+        ("Heading4", StyleId::HEADING_4),
+        ("Heading 4", StyleId::HEADING_4),
         ("Quote", StyleId::QUOTE),
     ]
     .into_iter()
@@ -253,6 +256,7 @@ fn parse_styles(xml_text: Option<&str>, warnings: &mut Vec<String>) -> Result<St
             "Heading1" => Some(StyleId::HEADING_1),
             "Heading2" => Some(StyleId::HEADING_2),
             "Heading3" => Some(StyleId::HEADING_3),
+            "Heading4" => Some(StyleId::HEADING_4),
             "Quote" => Some(StyleId::QUOTE),
             _ => None,
         });

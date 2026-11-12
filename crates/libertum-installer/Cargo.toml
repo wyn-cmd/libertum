@@ -1,0 +1,14 @@
+[package]
+name = "libertum-installer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Self-contained Windows installer for Libertum: one .exe that carries the program and its install script."
+
+[[bin]]
+name = "libertum-installer"
+path = "src/main.rs"
+
+# No dependencies: the installer talks to Windows through two system calls (a message box)
+# and runs the install script that ships beside the program.

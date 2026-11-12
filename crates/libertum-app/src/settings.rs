@@ -68,6 +68,9 @@ pub struct Settings {
     pub inspector: Inspector,
     /// The floating page and word count pill over the canvas.
     pub show_word_count: bool,
+    /// The frame-rate and frame-time overlay in the top-right of the canvas. Off by default:
+    /// it keeps the window redrawing while it is shown, so it costs frames itself.
+    pub show_performance: bool,
     pub autosave_secs: u32,
     pub recent_files: Vec<PathBuf>,
     /// Measurement units in the inspector (Auto follows the locale).
@@ -102,6 +105,7 @@ impl Default for Settings {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             inspector: Inspector::Format,
             show_word_count: true,
+            show_performance: false,
             autosave_secs: 60,
             recent_files: Vec::new(),
             units: UnitsPreference::Auto,
@@ -180,6 +184,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.default_format, DefaultFormat::Odt);
         assert!(!s.graphics_acceleration);
+        assert!(!s.show_performance, "the overlay is off until asked for");
         assert_eq!(s.theme, ThemePreference::System);
     }
 
@@ -193,6 +198,7 @@ mod tests {
             sidebar_width: 320.0,
             inspector: Inspector::Document,
             show_word_count: false,
+            show_performance: true,
             autosave_secs: 30,
             recent_files: vec![PathBuf::from("a.odt"), PathBuf::from("b.docx")],
             units: UnitsPreference::Inches,

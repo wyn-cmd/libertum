@@ -67,7 +67,10 @@ fn backend_trait_works_for_both() {
         Some(PageOutput::Bitmap(_))
     ));
     assert!(cpu.render(&state, 9999, 1.0).is_none());
-    let Ok(gpu) = HeadlessGpu::new() else {
+    // Hardware only: on a software rasteriser (WARP on a CI runner without a GPU) vello
+    // crashes inside the driver, which takes the whole test process down.
+    let Some(gpu) = HeadlessGpu::for_tests() else {
+        eprintln!("no hardware GPU adapter; skipping the GPU half");
         return;
     };
     let Ok(mut vello) = VelloPageRenderer::new(gpu.device.clone(), gpu.queue.clone()) else {

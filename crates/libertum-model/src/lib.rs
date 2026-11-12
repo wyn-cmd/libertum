@@ -5,6 +5,7 @@
 
 mod bookmark;
 mod document;
+mod field;
 mod format;
 mod header_footer;
 mod history;
@@ -19,9 +20,10 @@ mod table;
 pub use bookmark::Bookmark;
 pub use document::{
     BlockList, ChangeSet, DEFAULT_COLUMN_GUTTER_PT, DEFAULT_HEADER_FOOTER_DISTANCE_PT, Document,
-    MAX_COLUMNS, ModelError, PageNumberHorizontal, PageNumberPos, PageNumberVertical, ParaLocation,
-    Section, TableCellLocation,
+    MAX_COLUMNS, ModelError, PageNumberHorizontal, PageNumberPos, PageNumberVertical,
+    PageNumbering, ParaLocation, Section, TableCellLocation, Watermark,
 };
+pub use field::{DateTimeContent, DateTimeField, DateTimeFormat, DateTimeSource};
 pub use format::{
     BOLD, BorderSides, Borders, CharFormat, Ligatures, LineSpacing, MAX_TAB_STOPS, ParaFormat,
     ParagraphStyle, REGULAR, ResolvedChar, ResolvedPara, StyleId, StyleSheet, TabStop, TabStopKind,

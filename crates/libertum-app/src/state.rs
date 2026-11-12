@@ -123,6 +123,7 @@ choice_enum!(ParagraphStyle {
     Heading1 => s::STYLE_H1,
     Heading2 => s::STYLE_H2,
     Heading3 => s::STYLE_H3,
+    Heading4 => s::STYLE_H4,
     Body => s::STYLE_BODY,
     Quote => s::STYLE_QUOTE,
 });
@@ -135,6 +136,7 @@ impl ParagraphStyle {
             Self::Heading1 => StyleId::HEADING_1,
             Self::Heading2 => StyleId::HEADING_2,
             Self::Heading3 => StyleId::HEADING_3,
+            Self::Heading4 => StyleId::HEADING_4,
             Self::Body => StyleId::BODY,
             Self::Quote => StyleId::QUOTE,
         }
@@ -681,9 +683,16 @@ pub struct DocumentState {
     pub different_even_odd: Mixed<bool>,
     pub hyphenation: Mixed<bool>,
     pub ligatures: Mixed<bool>,
-    // Section pane.
-    /// `None` continues from the previous section.
+    /// The watermark text as typed in the Document pane (applied on Return or Apply).
+    pub watermark_text: String,
+    pub watermark_diagonal: bool,
+    /// The document has a watermark.
+    pub watermark_on: bool,
+    // Section pane (page numbering, which applies to the whole document).
+    /// The number written on the start page.
     pub numbering_start: Option<u16>,
+    /// The physical page where numbering starts (1-based).
+    pub numbering_start_page: Option<u16>,
     pub numbering_on: Mixed<bool>,
     pub numbering_vertical: Mixed<NumberingVertical>,
     pub numbering_horizontal: Mixed<NumberingHorizontal>,
@@ -721,7 +730,11 @@ impl Default for DocumentState {
             different_even_odd: Mixed::Value(false),
             hyphenation: Mixed::Value(false),
             ligatures: Mixed::Value(true),
+            watermark_text: String::new(),
+            watermark_diagonal: true,
+            watermark_on: false,
             numbering_start: None,
+            numbering_start_page: None,
             numbering_on: Mixed::Value(false),
             numbering_vertical: Mixed::Value(NumberingVertical::Bottom),
             numbering_horizontal: Mixed::Value(NumberingHorizontal::Centre),
@@ -808,6 +821,7 @@ pub enum Field {
     HeaderDistance,
     FooterDistance,
     NumberingStart,
+    NumberingStartPage,
 }
 
 impl Field {
@@ -833,6 +847,7 @@ impl Field {
             Self::HeaderDistance | Self::FooterDistance => length(0.0, 5.0),
             Self::Columns => StepSpec::new(1.0, 12.0, 1.0, 0),
             Self::NumberingStart => StepSpec::new(0.0, 9999.0, 1.0, 0),
+            Self::NumberingStartPage => StepSpec::new(1.0, 9999.0, 1.0, 0),
         }
     }
 
@@ -844,7 +859,7 @@ impl Field {
             | Self::CharSpacing
             | Self::LineSpacingPoints => s::UNIT_PT,
             Self::LineSpacing => "",
-            Self::Columns | Self::NumberingStart => "",
+            Self::Columns | Self::NumberingStart | Self::NumberingStartPage => "",
             _ => units.label(),
         }
     }
@@ -872,6 +887,7 @@ impl Field {
             Self::HeaderDistance => hundredths(d.header_distance),
             Self::FooterDistance => hundredths(d.footer_distance),
             Self::NumberingStart => Some(f32::from(d.numbering_start.unwrap_or(1))),
+            Self::NumberingStartPage => Some(f32::from(d.numbering_start_page.unwrap_or(1))),
         }
     }
 
@@ -903,6 +919,9 @@ impl Field {
             Self::HeaderDistance => d.header_distance = Mixed::Value(hundredths(value)),
             Self::FooterDistance => d.footer_distance = Mixed::Value(hundredths(value)),
             Self::NumberingStart => d.numbering_start = Some(value.round() as u16),
+            Self::NumberingStartPage => {
+                d.numbering_start_page = Some(value.round().max(1.0) as u16)
+            }
         }
     }
 
@@ -971,6 +990,9 @@ pub struct FindState {
     pub whole_word: bool,
     /// The match found last; Replace replaces it.
     pub last: Option<libertum_editor::SearchMatch>,
+    /// How many times the query occurs in the document and which occurrence `last` is
+    /// (1-based), shown in the bar as "3 of 17".
+    pub count: Option<(Option<usize>, usize)>,
     /// Short feedback in the bar: "No matches", "Replaced 3 places".
     pub notice: Option<String>,
 }
@@ -1005,6 +1027,10 @@ pub struct AppState {
     pub open_swatch: Option<SwatchTarget>,
     /// The caret is in a table cell (the Table menu's row/column commands apply).
     pub in_table: bool,
+    /// The window fills the screen.
+    pub fullscreen: bool,
+    /// The page thumbnails column is shown left of the pages.
+    pub thumbnails: bool,
     /// What the Table menu's merge and split commands can do at the caret.
     pub can_merge_right: bool,
     pub can_merge_below: bool,
@@ -1056,6 +1082,8 @@ impl Default for AppState {
             open_menu: None,
             open_swatch: None,
             in_table: false,
+            fullscreen: false,
+            thumbnails: false,
             can_merge_right: false,
             can_merge_below: false,
             can_split_cell: false,

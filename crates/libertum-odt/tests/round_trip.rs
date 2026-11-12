@@ -64,6 +64,8 @@ fn rich_document() -> Document {
         next: Some(StyleId::BODY),
         outline_level: None,
     });
+    // The id of the custom style just appended (the built-ins before it can grow).
+    let aside_style = StyleId(styles.paragraph.len() as u32 - 1);
     styles.paragraph[2].char.size_pt = Some(18.0);
 
     let bold = CharFormat {
@@ -153,7 +155,7 @@ fn rich_document() -> Document {
     blocks.push(Block::Paragraph(paragraph(
         "Aside text",
         ParaProps {
-            style: StyleId(6),
+            style: aside_style,
             ..ParaProps::default()
         },
         Vec::new(),
