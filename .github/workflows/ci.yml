@@ -129,7 +129,9 @@ jobs:
           # so --nodeps only skips dependency resolution; the file list and the
           # scriptlets are still unpacked and run.
           sudo rpm -i --nodeps dist/libertum-*.rpm
-          rpm -q libertum
+          # rpm keeps one database per user (root writes /var/lib/rpm, a normal user
+          # ~/.rpmdb), so the query and the removal must run as root too.
+          sudo rpm -q libertum
           test -x /usr/bin/libertum
           sudo rpm -e libertum
       # Downloadable from the run's summary page for 30 days.
