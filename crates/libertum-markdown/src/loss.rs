@@ -31,13 +31,16 @@ pub enum LossKind {
     FontSize,
     /// Weights other than regular and bold (600 and over is written as bold). Per run.
     FontWeight,
-    /// Text colour. Per run.
+    /// Text colour. Per run: written as an inline `span`, so only an alpha channel (or a run
+    /// inside a code block or raw HTML) is a loss.
     TextColour,
     /// Highlighting. Per run.
     Highlight,
-    /// Underlining. Per run.
+    /// Underlining. Per run: written as `<u>`, so only a run inside a code block or raw HTML
+    /// is a loss.
     Underline,
-    /// Superscript and subscript. Per run.
+    /// Superscript and subscript. Per run: written as `<sup>`/`<sub>`, so only a run inside a
+    /// code block or raw HTML is a loss.
     SuperSubscript,
     /// Letter spacing. Per run.
     LetterSpacing,
@@ -405,19 +408,27 @@ fn scan_char(format: &CharFormat, plain: bool, add: &mut impl FnMut(LossKind, us
     if format.size_pt.is_some() {
         add(LossKind::FontSize, 1);
     }
-    if format.underline == Some(true) {
+    // Underline, superscript/subscript and colour are written as inline HTML in an edited
+    // block, so they survive a save from the editor. Only a block written as it is (a code
+    // block or raw HTML) loses them, and only an alpha channel has no CSS colour to carry it.
+    if format.underline == Some(true) && plain {
         add(LossKind::Underline, 1);
     }
-    if format.colour.is_some() {
+    if format
+        .colour
+        .is_some_and(|colour| plain || colour[3] != 255)
+    {
         add(LossKind::TextColour, 1);
     }
     if matches!(format.highlight, Some(Some(_))) {
         add(LossKind::Highlight, 1);
     }
-    if matches!(
-        format.vertical,
-        Some(VerticalAlign::Superscript | VerticalAlign::Subscript)
-    ) {
+    if plain
+        && matches!(
+            format.vertical,
+            Some(VerticalAlign::Superscript | VerticalAlign::Subscript)
+        )
+    {
         add(LossKind::SuperSubscript, 1);
     }
     if format

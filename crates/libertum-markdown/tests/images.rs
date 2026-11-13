@@ -210,8 +210,9 @@ fn an_edited_block_writes_its_image_link_back() {
     append_text(&mut markdown, "Before", " More.");
     let saved = String::from_utf8(markdown.to_bytes().expect("save")).expect("utf-8");
     assert_eq!(
-        saved, "# Title\n\nBefore ![A\\_cat](pics/cat.png) after. More.\n\nUntouched **bold**.\n",
-        "the image sits at its offset; the unedited blocks are verbatim"
+        saved,
+        "# Title\n\nBefore ![A\\_cat](pics/cat.png \"Title\") after. More.\n\nUntouched **bold**.\n",
+        "the image sits at its offset and keeps its title; the unedited blocks are verbatim"
     );
 
     // And it reads back to the same image.
@@ -355,5 +356,71 @@ fn an_unnamed_image_without_a_path_writes_alt_text_and_warns() {
     assert_eq!(
         markdown.to_bytes().expect("plain to_bytes agrees"),
         b"Picture Insertedhere.\n"
+    );
+}
+
+/// Puts `text` at the start of the paragraph that holds the image.
+fn edit_image_paragraph(markdown: &mut Markdown, text: &str) {
+    let mut document = markdown.document().clone();
+    let paragraph = paragraphs_with_images(&document)
+        .into_iter()
+        .next()
+        .expect("a paragraph with an image")
+        .clone();
+    let id = paragraph.id;
+    document
+        .apply(Operation::InsertText {
+            block: id,
+            offset: 0,
+            text: text.to_owned(),
+            format: None,
+        })
+        .expect("edit");
+    markdown.set_document(document);
+}
+
+#[test]
+fn an_edited_block_keeps_an_images_title_and_the_link_around_it() {
+    let dir = scratch("image-title-link");
+    write_png(&dir.join("pic.png"), 20, 20);
+    let path = dir.join("doc.md");
+    std::fs::write(
+        &path,
+        "Words.
+
+[![a picture](pic.png \"The castle\")](https://example.com/castle)
+
+More.
+",
+    )
+    .expect("write");
+    let mut markdown = Markdown::open(&path).expect("open");
+    edit_image_paragraph(&mut markdown, "Look. ");
+    let saved =
+        String::from_utf8(markdown.to_bytes_for(Some(&path)).expect("save").bytes).expect("utf-8");
+    assert!(
+        saved.contains("Look. [![a picture](pic.png \"The castle\")](https://example.com/castle)"),
+        "{saved}"
+    );
+}
+
+#[test]
+fn an_untitled_image_inside_a_link_keeps_the_link() {
+    let dir = scratch("image-link");
+    write_png(&dir.join("pic.png"), 20, 20);
+    let path = dir.join("doc.md");
+    std::fs::write(
+        &path,
+        "[![alt](pic.png)](https://example.com)
+",
+    )
+    .expect("write");
+    let mut markdown = Markdown::open(&path).expect("open");
+    edit_image_paragraph(&mut markdown, "X ");
+    let saved =
+        String::from_utf8(markdown.to_bytes_for(Some(&path)).expect("save").bytes).expect("utf-8");
+    assert!(
+        saved.contains("X [![alt](pic.png)](https://example.com)"),
+        "{saved}"
     );
 }

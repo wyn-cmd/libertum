@@ -6,10 +6,10 @@
 //! by the app as a layer above everything else; [`menu_x`] tells it where to anchor them from
 //! the same fixed widths the toolbar lays out with.
 
-use iced::widget::{button, column, container, row, space, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Border, Center, Color, Element, Length, Padding, Shadow, Vector};
 
-use crate::app::Message;
+use crate::app::{ExportFormat, Message};
 use crate::icons::{Icon, icon};
 use crate::shortcuts::{self, Shortcut};
 use crate::state::{AppState, InsertAction, Inspector, Menu, TableAction, ViewAction, Zoom};
@@ -83,7 +83,15 @@ pub fn menu_x(menu: Menu, window_width: f32) -> f32 {
         Menu::View => view_x(),
         Menu::Zoom => zoom_x(),
         Menu::Insert => centre_x(window_width),
-        Menu::Table => centre_x(window_width) + CENTRE_WIDTHS[0] + BUTTON_SPACING,
+        Menu::Export => {
+            centre_x(window_width)
+                + CENTRE_WIDTHS[0]
+                + BUTTON_SPACING
+                + CENTRE_WIDTHS[1]
+                + BUTTON_SPACING
+                + CENTRE_WIDTHS[2]
+                + BUTTON_SPACING
+        }
     }
 }
 
@@ -347,14 +355,14 @@ pub fn view<'a>(state: &'a AppState, zoom_percent: u16, t: Tokens) -> Element<'a
             .chevron()
             .active(state.open_menu == Some(Menu::Insert))
             .on_press(Message::ToggleMenu(Menu::Insert)),
-        Btn::icon(Icon::Table, s::TB_TABLE, CENTRE_WIDTHS[1])
-            .chevron()
-            .active(state.open_menu == Some(Menu::Table))
-            .on_press(Message::ToggleMenu(Menu::Table)),
-        Btn::icon(Icon::Image, s::TB_IMAGE, CENTRE_WIDTHS[2])
+        Btn::icon(Icon::Image, s::TB_IMAGE, CENTRE_WIDTHS[1])
             .on_press(Message::Insert(InsertAction::Image)),
-        Btn::icon(Icon::Asterisk, s::TB_FOOTNOTE, CENTRE_WIDTHS[3])
+        Btn::icon(Icon::Asterisk, s::TB_FOOTNOTE, CENTRE_WIDTHS[2])
             .on_press(Message::Insert(InsertAction::Footnote)),
+        Btn::icon(Icon::Upload, s::TB_EXPORT, CENTRE_WIDTHS[3])
+            .chevron()
+            .active(state.open_menu == Some(Menu::Export))
+            .on_press(Message::ToggleMenu(Menu::Export)),
     ]
     .into_iter()
     .map(|b: Btn| b.view(t)))
@@ -494,8 +502,6 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             Entry::item(s::VIEW_WORD_COUNT, Message::View(ViewAction::WordCount))
                 .checked(state.show_word_count),
             Entry::Separator,
-            Entry::item(s::VIEW_INVISIBLES, Message::View(ViewAction::Invisibles))
-                .checked(state.show_invisibles),
             Entry::item(s::VIEW_BOOKLET, Message::View(ViewAction::Booklet)).checked(state.booklet),
             Entry::item(s::VIEW_PAGELESS, Message::View(ViewAction::Pageless))
                 .checked(state.pageless),
@@ -533,64 +539,22 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             );
             list
         }
-        Menu::Table => {
-            let enabled = state.in_table;
-            let item = |action: TableAction| {
-                if enabled {
-                    Entry::item(action.to_string(), Message::Table(action))
-                } else {
-                    Entry::disabled(action.to_string())
-                }
-            };
-            let when = |possible: bool, action: TableAction| {
-                if possible {
-                    Entry::item(action.to_string(), Message::Table(action))
-                } else {
-                    Entry::disabled(action.to_string())
-                }
-            };
-            let mut list = vec![
-                Entry::item(s::TABLE_INSERT, Message::Table(TableAction::InsertTable)),
-                Entry::Separator,
-                item(TableAction::InsertRowAbove),
-                item(TableAction::InsertRowBelow),
-                Entry::Separator,
-                item(TableAction::InsertColumnLeft),
-                item(TableAction::InsertColumnRight),
-                Entry::Separator,
-                when(state.can_merge_right, TableAction::MergeRight),
-                when(state.can_merge_below, TableAction::MergeBelow),
-                when(state.can_split_cell, TableAction::SplitCell),
-                Entry::Separator,
-                item(TableAction::DeleteRow),
-                item(TableAction::DeleteColumn),
-                item(TableAction::DeleteTable),
-            ];
-            // Table styles apply to the caret's table; the current one is ticked.
-            if enabled {
-                list.push(Entry::Separator);
-                list.push(
-                    Entry::item(s::TABLE_STYLE_NONE, Message::TableStyle(None))
-                        .checked(state.table_style.is_none()),
-                );
-                for (index, (style, _)) in libertum_model::TableStyle::builtins()
-                    .into_iter()
-                    .enumerate()
-                {
-                    let current = state
-                        .table_style
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&style.name));
-                    list.push(
-                        Entry::item(style.name, Message::TableStyle(Some(index))).checked(current),
-                    );
-                }
-            }
-            list
-        }
+        Menu::Export => vec![
+            Entry::item(s::EXPORT_PDF, Message::Export(ExportFormat::Pdf)),
+            Entry::item(
+                s::EXPORT_PDF_ARCHIVAL,
+                Message::Export(ExportFormat::PdfArchive),
+            ),
+            Entry::item(s::EXPORT_EPUB, Message::Export(ExportFormat::Epub)),
+            Entry::item(s::EXPORT_RTF, Message::Export(ExportFormat::Rtf)),
+            Entry::item(s::EXPORT_TEXT, Message::Export(ExportFormat::Text)),
+            Entry::item(s::EXPORT_MARKDOWN, Message::Export(ExportFormat::Markdown)),
+            Entry::Separator,
+            Entry::item(s::EXPORT_AO3, Message::OpenAo3Chapters),
+        ],
         Menu::Insert => {
             let item = |a: InsertAction| Entry::item(a.to_string(), Message::Insert(a));
-            vec![
+            let mut list = vec![
                 item(InsertAction::PageBreak),
                 item(InsertAction::SectionBreak),
                 Entry::Separator,
@@ -603,12 +567,65 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 item(InsertAction::PageNumber),
                 Entry::Separator,
                 Entry::item(s::INSERT_DATE_TIME, Message::OpenDateTime),
-            ]
+            ];
+            // The Table button is gone from the toolbar; the caret's table commands live
+            // here while the caret is in one.
+            if state.in_table {
+                list.push(Entry::Separator);
+                list.extend(table_entries(state));
+            }
+            list
         }
     }
 }
 
+/// The Table menu's caret commands, shown at the end of the Insert menu while the caret
+/// is inside a table (the toolbar Table button was replaced by Export).
+fn table_entries(state: &AppState) -> Vec<Entry> {
+    let item = |action: TableAction| Entry::item(action.to_string(), Message::Table(action));
+    let when = |possible: bool, action: TableAction| {
+        if possible {
+            Entry::item(action.to_string(), Message::Table(action))
+        } else {
+            Entry::disabled(action.to_string())
+        }
+    };
+    let mut list = vec![
+        item(TableAction::InsertRowAbove),
+        item(TableAction::InsertRowBelow),
+        Entry::Separator,
+        item(TableAction::InsertColumnLeft),
+        item(TableAction::InsertColumnRight),
+        Entry::Separator,
+        when(state.can_merge_right, TableAction::MergeRight),
+        when(state.can_merge_below, TableAction::MergeBelow),
+        when(state.can_split_cell, TableAction::SplitCell),
+        Entry::Separator,
+        item(TableAction::DeleteRow),
+        item(TableAction::DeleteColumn),
+        item(TableAction::DeleteTable),
+        Entry::Separator,
+    ];
+    list.push(
+        Entry::item(s::TABLE_STYLE_NONE, Message::TableStyle(None))
+            .checked(state.table_style.is_none()),
+    );
+    for (index, (style, _)) in libertum_model::TableStyle::builtins()
+        .into_iter()
+        .enumerate()
+    {
+        let current = state
+            .table_style
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&style.name));
+        list.push(Entry::item(style.name, Message::TableStyle(Some(index))).checked(current));
+    }
+    list
+}
+
 const MENU_WIDTH: f32 = 232.0;
+/// A menu taller than this scrolls (the Insert menu grows when the caret is in a table).
+const MENU_MAX_HEIGHT: f32 = 420.0;
 
 /// The open dropdown, positioned under its toolbar button. Fills the window so the caller can
 /// stack it directly.
@@ -621,6 +638,83 @@ pub fn menu_layer<'a>(
     let panel = panel(entries(menu, state), t);
     let x = menu_x(menu, window_width).min((window_width - MENU_WIDTH - 8.0).max(0.0));
     container(panel)
+        .padding(Padding {
+            top: HEIGHT - 4.0,
+            left: x,
+            right: 0.0,
+            bottom: 0.0,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Width of the chapter list beside the Export menu.
+const AO3_WIDTH: f32 = 260.0;
+
+/// The AO3 chapter list, shown beside the Export menu. Each row opens that chapter's HTML.
+pub fn ao3_layer<'a>(state: &AppState, window_width: f32, t: Tokens) -> Element<'a, Message> {
+    let x = (menu_x(Menu::Export, window_width) + MENU_WIDTH + 8.0)
+        .min((window_width - AO3_WIDTH - 8.0).max(0.0));
+    let rows: Vec<Element<'a, Message>> = if state.ao3_chapters.is_empty() {
+        vec![
+            container(text(s::AO3_EMPTY).size(12).color(t.text_secondary))
+                .padding(6)
+                .into(),
+        ]
+    } else {
+        state
+            .ao3_chapters
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| {
+                button(text(chapter.title.clone()).size(12))
+                    .width(Length::Fill)
+                    .padding([5, 8])
+                    .style(move |_, status| {
+                        let hot =
+                            matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: hot.then(|| t.menu_hover.into()),
+                            text_color: if hot { t.on_accent } else { t.text },
+                            border: Border {
+                                radius: 4.0.into(),
+                                ..Border::default()
+                            },
+                            ..button::Style::default()
+                        }
+                    })
+                    .on_press(Message::Ao3Chapter(index))
+                    .into()
+            })
+            .collect()
+    };
+    let list = scrollable(column(rows).spacing(2).padding(2)).height(Length::Fixed(320.0));
+    let card = container(
+        column![
+            text(s::AO3_TITLE).size(13).color(t.text),
+            text(s::AO3_HINT).size(11).color(t.text_secondary),
+            list,
+        ]
+        .spacing(6),
+    )
+    .padding(8)
+    .width(Length::Fixed(AO3_WIDTH))
+    .style(move |_| container::Style {
+        background: Some(t.menu.into()),
+        border: Border {
+            color: t.menu_border,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: Shadow {
+            color: t.shadow,
+            offset: Vector::new(0.0, 6.0),
+            blur_radius: 18.0,
+        },
+        ..container::Style::default()
+    });
+    container(card)
         .padding(Padding {
             top: HEIGHT - 4.0,
             left: x,
@@ -781,7 +875,16 @@ fn panel<'a>(entries: Vec<Entry>, t: Tokens) -> Element<'a, Message> {
             }
         })
         .collect();
-    container(column(rows).spacing(0).padding(5))
+    // A table adds about fifteen rows to the Insert menu; keep it inside the window.
+    let natural = rows.len() as f32 * 30.0 + 10.0;
+    let list: Element<'a, Message> = if natural > MENU_MAX_HEIGHT {
+        scrollable(column(rows).spacing(0).padding(5))
+            .height(Length::Fixed(MENU_MAX_HEIGHT))
+            .into()
+    } else {
+        column(rows).spacing(0).padding(5).into()
+    };
+    container(list)
         .width(Length::Fixed(MENU_WIDTH))
         .style(move |_| container::Style {
             background: Some(t.menu.into()),
@@ -887,6 +990,74 @@ mod tests {
         assert_eq!(
             group_width(&RIGHT_WIDTHS),
             first * RIGHT_WIDTHS.len() as f32 + BUTTON_SPACING * (RIGHT_WIDTHS.len() - 1) as f32
+        );
+    }
+
+    #[test]
+    fn export_menu_offers_the_formats_then_the_ao3_chapter() {
+        let state = AppState::default();
+        let labels: Vec<String> = entries(Menu::Export, &state)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Item { label, .. } => Some(label),
+                Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                s::EXPORT_PDF.to_owned(),
+                s::EXPORT_PDF_ARCHIVAL.to_owned(),
+                s::EXPORT_EPUB.to_owned(),
+                s::EXPORT_RTF.to_owned(),
+                s::EXPORT_TEXT.to_owned(),
+                s::EXPORT_MARKDOWN.to_owned(),
+                s::EXPORT_AO3.to_owned(),
+            ]
+        );
+        assert!(matches!(
+            entries(Menu::Export, &state)
+                .into_iter()
+                .find(|entry| matches!(entry, Entry::Item { label, .. } if label == s::EXPORT_AO3)),
+            Some(Entry::Item {
+                on_press: Some(Message::OpenAo3Chapters),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_export_button_is_right_of_every_other_centre_button() {
+        assert!(menu_x(Menu::Export, 1200.0) > menu_x(Menu::Insert, 1200.0));
+    }
+
+    #[test]
+    fn table_commands_live_in_the_insert_menu_when_the_caret_is_in_a_table() {
+        let state = AppState {
+            in_table: true,
+            ..AppState::default()
+        };
+        let labels: Vec<String> = entries(Menu::Insert, &state)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Item { label, .. } => Some(label),
+                Entry::Separator => None,
+            })
+            .collect();
+        assert!(
+            labels.contains(&s::TABLE_ROW_ABOVE.to_owned()),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&s::TABLE_STYLE_NONE.to_owned()),
+            "{labels:?}"
+        );
+        let outside = AppState::default();
+        assert!(
+            !entries(Menu::Insert, &outside).iter().any(
+                |entry| matches!(entry, Entry::Item { label, .. } if label == s::TABLE_ROW_ABOVE)
+            ),
+            "no table commands without a table"
         );
     }
 

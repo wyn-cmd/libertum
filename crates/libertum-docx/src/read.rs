@@ -73,6 +73,12 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Parsed, DocxError> {
     let mut document = Document::from_blocks(blocks);
     document.styles = styles.sheet;
     document.sections = sections;
+    // A watermark in the headers belongs to the whole document.
+    if let Some(watermark) = crate::watermark::read(&package, &body.extras) {
+        for section in &mut document.sections {
+            section.watermark = Some(watermark.clone());
+        }
+    }
 
     Ok(Parsed {
         document,

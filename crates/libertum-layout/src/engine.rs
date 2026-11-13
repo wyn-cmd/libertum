@@ -362,6 +362,9 @@ pub struct LineBox {
 /// runs) used for rendering and hit-testing.
 pub struct ParagraphLayout {
     pub layout: Layout<Brush>,
+    /// The paragraph's source text: cluster byte ranges index into this. The PDF exporter
+    /// needs it to map shaped glyph ids back to Unicode for copying and searching.
+    pub text: String,
     /// Left indent: the layout's x origin relative to the content area's left edge.
     pub x_offset: f32,
     /// Lines broken inside a word by hyphenation: a hyphen is drawn at their end.
@@ -831,6 +834,7 @@ impl Engine {
         }
         ParagraphLayout {
             layout,
+            text: text.to_owned(),
             hyphen_lines,
             images,
             x_offset: left,

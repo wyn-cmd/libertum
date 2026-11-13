@@ -40,6 +40,7 @@ shortcut tests, unless the row says otherwise.
 | Page thumbnails (View > Page Thumbnails) | Pointer-only; from the keyboard, Page Up/Down move the caret ten paragraphs and Cmd/Ctrl+Home/End go to the start or end. |
 | Watermark (Document pane) | The text field takes typing and Return applies it; Diagonal, Apply and Remove are pointer-only. |
 | Modal prompt buttons | Pointer-only. Escape now takes the safe choice (Cancel, or Discard for the recovery offer) so a prompt never traps a keyboard user. |
+| AO3 tag suggestions (chapter window) | The tag checkboxes, Copy tags and Edit vocabulary are pointer-only; Escape closes the vocabulary window and then the chapter window. The vocabulary window's name field takes typing and Return adds the tag, so a tag can be written without the mouse, but its category popup and every Remove button are pointer-only. |
 
 ## What Iced 0.14 cannot do
 

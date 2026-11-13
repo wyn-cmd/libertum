@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use libertum_model::{
     Align, Block, CharFormat, Document, InlineImage, ListStyle, Media, Paragraph, Table, TableCell,
+    VerticalAlign,
 };
 
 use crate::MarkdownAsset;
@@ -325,7 +326,7 @@ impl Writer<'_> {
                 open = None;
             }
             while next_image < images.len() && images[next_image].offset.min(length) <= position {
-                out.push_str(&self.image(&images[next_image]));
+                out.push_str(&self.image(&images[next_image], open.is_none()));
                 next_image += 1;
             }
             if open.is_none()
@@ -366,7 +367,9 @@ impl Writer<'_> {
         out
     }
 
-    fn image(&mut self, image: &InlineImage) -> String {
+    /// `wrap_link` is false while a link's own brackets are open around this position (an
+    /// image inside a link is not given a second link).
+    fn image(&mut self, image: &InlineImage, wrap_link: bool) -> String {
         let name = if image.name.trim().is_empty() {
             match self.sink.image_file(&image.media) {
                 Some(name) => name,
@@ -380,7 +383,15 @@ impl Writer<'_> {
         } else {
             image.name.clone()
         };
-        format!("![{}]({})", escape_alt(&image.alt), destination(&name))
+        let mut out = format!("![{}]({}", escape_alt(&image.alt), destination(&name));
+        if let Some(title) = self.hints.image_titles.get(&image.name) {
+            out.push_str(&format!(" \"{}\"", escape_title(title)));
+        }
+        out.push(')');
+        if wrap_link && let Some(url) = self.hints.image_links.get(&image.name) {
+            out = format!("[{}]({})", out, destination(url));
+        }
+        out
     }
 
     fn list(&mut self, paragraphs: &[&Paragraph]) -> String {
@@ -698,6 +709,19 @@ fn mark_text(text: &str, format: &CharFormat, conventions: Conventions) -> Strin
     if format.weight.is_some_and(|weight| weight >= 600) {
         out = format!("**{out}**");
     }
+    // Markdown has no syntax for these three, so they are written as inline HTML, which the
+    // reader turns back into formatting (parse.rs `html_tag`).
+    if format.underline == Some(true) {
+        out = format!("<u>{out}</u>");
+    }
+    match format.vertical {
+        Some(VerticalAlign::Superscript) => out = format!("<sup>{out}</sup>"),
+        Some(VerticalAlign::Subscript) => out = format!("<sub>{out}</sub>"),
+        _ => {}
+    }
+    if let Some([red, green, blue, _alpha]) = format.colour {
+        out = format!(r#"<span style="color:#{red:02x}{green:02x}{blue:02x}">{out}</span>"#);
+    }
     out
 }
 
@@ -722,6 +746,22 @@ fn escape_text(text: &str) -> String {
             }
         }
         at_start = false;
+    }
+    out
+}
+
+/// An image title goes inside the link's double quotes.
+fn escape_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for character in title.chars() {
+        match character {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(character);
+            }
+            '\n' | '\r' => out.push(' '),
+            other => out.push(other),
+        }
     }
     out
 }

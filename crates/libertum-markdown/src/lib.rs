@@ -21,11 +21,18 @@
 //! text and noted in [`Markdown::warnings`]; the network is never used. [`Markdown::parse`]
 //! has no folder to look in, so it loads no image.
 //!
-//! An edited block writes `![alt](name)` at each image's position. An image with no `name`
+//! An edited block writes `![alt](name "title")` at each image's position, and
+//! `[![alt](name)](target)` when the image was wrapped in a link. An image with no `name`
 //! (inserted in the app) is written beside the document as `<document-stem>-image-<n>.<ext>`
 //! when the save has a path ([`Markdown::to_bytes_for`], [`Markdown::save_with_report`]);
-//! otherwise its alt text is written and a warning is returned. The title of an image is not
-//! kept, and neither is its displayed size.
+//! otherwise its alt text is written and a warning is returned. An image's displayed size is
+//! not kept.
+//!
+//! ## Formatting Markdown has no syntax for
+//!
+//! Underline, superscript, subscript and text colour are written as inline HTML
+//! (`<u>`, `<sup>`, `<sub>`, `<span style="color:#rrggbb">`), and those tags are read back as
+//! formatting on open. Other inline HTML is still shown as text.
 //!
 //! ## What a Markdown save drops
 //!

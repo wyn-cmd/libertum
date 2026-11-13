@@ -13,7 +13,7 @@ This is the working plan for the application, phase by phase. Read the whole doc
 | Language | Rust (stable toolchain, edition 2021 or later) |
 | GUI toolkit | **Iced** (latest stable release at the time of implementation) |
 | Text shaping and layout | **parley** (Linebender), with **swash** for glyph rasterisation |
-| Rendering of page content | CPU rasterisation per page (tiny-skia + swash) into cached bitmaps shown inside Iced, as the default. A user setting, **Graphics acceleration**, switches to GPU rendering (§4.5) |
+| Rendering of page content | CPU rasterisation per page (tiny-skia + swash) into cached bitmaps shown inside Iced. The window compositor is always wgpu; a GPU page renderer (vello) exists as an experimental backend but is not offered in the UI (§4.5) |
 | Default format for new documents | **ODT**. The user can change the default to DOCX in Settings |
 | DOCX/ODT support (v1) | Core text, page layout, and book features (§6). Comments and tracked changes are out of scope for v1 but must be **preserved** on save |
 | Markdown mode | WYSIWYG, using the same editor as DOCX. Unedited blocks keep their original source text on save (§7) |
@@ -157,20 +157,14 @@ This crate is UI-agnostic and testable without a window.
 - Hi-DPI: rasterise at the window scale factor.
 - Why CPU rasterisation: it behaves the same under Iced's wgpu and tiny-skia backends, sidesteps weak or buggy old iGPU drivers, and decouples us from Iced's internal text pipeline (which uses cosmic-text, not parley). **Phase 0 must validate this approach with a spike.** The fallback, if the spike fails the budgets, is to render with Iced's own text primitives via cosmic-text and to record the trade-offs.
 
-### 4.5 Graphics acceleration (user setting)
+### 4.5 Rendering layers (GPU page rendering not offered)
 
-Rendering has two layers (decided after the Phase 0 measurements in docs/spikes.md):
+Decided after the Phase 0 measurements in docs/spikes.md, and revised on 2026-11-13:
 
 - **Window compositor: always the GPU when one exists.** Iced's wgpu compositor held 60 fps while scrolling 506 pages. Its tiny-skia CPU compositor measured about 15 fps, because of Iced's own CPU cost of roughly 25 ms per frame, before any pages are drawn. tiny-skia is used only as an automatic last-resort fallback when wgpu cannot start, and it is documented as degraded.
-- **Page renderer: the Graphics acceleration toggle** in Settings → General. It is off by default, because the minimum-spec machines have weak or unreliable older GPUs.
-  - **Off (CPU):** pages are rasterised with tiny-skia + swash on a worker thread (§4.4) and uploaded as image textures.
-  - **On (GPU):** pages are drawn with vello from the same parley glyph runs, inside an Iced `shader` widget that shares Iced's wgpu device (see docs/spikes.md, Spike D). Pages are redrawn from cached vello scenes per page, and only visible pages are encoded.
-- Put both page renderers behind one `PageRenderer` trait in `libertum-render`, so layout and editor code never know which one is active.
-- Iced picks its renderer at startup, so changing the toggle says "takes effect after restart". If the page renderer can be switched live, do it, but the shell may still need the restart. Check Iced's current mechanism for choosing a renderer (feature flags, environment variable or settings) on docs.rs rather than assuming one.
-- **Safe fallback:** if GPU initialisation fails, or the first frame errors, fall back to CPU automatically. Save the setting as off and show a one-time notice. Write a "GPU start in progress" flag before initialising the GPU and clear it after the first successful frame. If the flag is still set on the next launch (a crash), start in CPU mode and say why.
-- vello and Iced must use compatible `wgpu` versions. If they can't be aligned, vello can render to an offscreen texture that is then copied into an Iced image, at some cost. Record which approach was used in `docs/decisions.md`.
-- Both renderers must produce visually matching pages. Add a test that renders the same fixture pages through both and compares them within a small pixel tolerance.
-- The performance budgets in §2 apply to both modes. GPU mode should make zoom and scroll smoother on capable machines, but must never be required.
+- **Page renderer: CPU only.** Pages are rasterised with tiny-skia + swash on a worker thread (§4.4) and uploaded as image textures. There is no Graphics acceleration setting: it existed from Phase 0 until 2026-11-13 and never selected anything, because nothing in the app read it. It was removed rather than wired up: vello measured 7–12 ms per page against 2.5–8 ms for the CPU renderer on the development machine (docs/spikes.md, Spike D), so a GPU page path would not have made pages faster, and the window is already composited on the GPU.
+- A GPU page renderer still exists behind `libertum-render`'s `gpu` feature (`PageBackend`, `gpu::VelloPageRenderer`, capability checks, background initialisation and its tests). It is an experiment and a starting point if a future machine needs it; the app does not link it and must not offer a switch that does not do anything.
+- If it is ever wired in: keep both renderers behind `PageBackend`, initialise only after `gpu::caps::check_caps`, fall back to CPU on any failure, and compare both renderers against the same fixture pages within a small pixel tolerance.
 
 ---
 
@@ -220,7 +214,7 @@ Visual reference: Apple Pages. It should be clean, roomy, and use neutral greys.
 
 **Keyboard shortcuts:** platform-standard. Use `Cmd` on macOS and `Ctrl` elsewhere, through a single shortcut map.
 
-**Settings:** stored as TOML in the platform config directory (`directories` crate). Settings cover theme, default font, **default format for new documents (ODT, or DOCX)**, **graphics acceleration (off by default, §4.5)**, autosave interval, sidebar state, and recent files. A new document's first "Save" dialog preselects the default format, and the user can still pick another.
+**Settings:** stored as TOML in the platform config directory (`directories` crate). Settings cover theme, default font, **default format for new documents (ODT, or DOCX)**, autosave interval, sidebar state, and recent files. A new document's first "Save" dialog preselects the default format, and the user can still pick another.
 
 **Autosave and recovery:** every 60 s, and on focus loss, write a recovery snapshot to the platform data directory, never over the user's file. On launch, offer to restore after a crash.
 
@@ -453,6 +447,10 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 - **HTML for AO3:** export a fragment (not a full page) with only the markup AO3 accepts — paragraphs, `em`, `strong`, `blockquote`, `ul`/`ol`/`li`, headings, horizontal rules and line breaks — with correct escaping and no page furniture. Copy-to-clipboard is the primary action; Save as `.html` is secondary.
 - **Tags:** a local tag vocabulary stored in settings; BM25 (or another local ranking method) scores the chapter text against tag names, and the user reviews/edits the suggested tags. No network call and no automatic tagging: the writer stays in control. Tag rules (rating, warning, fandom, relationship, character, freeform) are kept separate.
 - **Acceptance:** a fixture book exports the expected chapter only; the fragment pastes into AO3's HTML editor with correct emphasis, lists, headings and quotation marks; tag suggestions are deterministic and explainable.
+
+> Done 2026-11-13: the Export menu writes PDF/PDF-A-2b, EPUB 3, RTF, plain text and Markdown, and its **AO3 Chapter** item lists the chapters (heading levels chosen in Settings, Heading 1 and 2 by default) and copies one chapter's AO3-compatible HTML fragment. The **local tag suggestions** are in too: the writer keeps a tag vocabulary in Settings (six AO3 categories), `libertum-export::tags` ranks it against the chapter with BM25 and shows the words that earned each place, the review list starts unticked, and **Copy tags** writes the ticked tags for AO3's tag fields. No network call and no automatic tagging. PDF export is post-v1 in PLAN but was pulled forward at the user's request; it is real text with embedded fonts, and the archival variant adds an sRGB output intent and XMP. The AO3 paste check (a fragment pasted into AO3's own HTML editor) has not been done on this machine; neither have real tag names been ranked against a real chapter beyond the tests.
+
+
 
 ### Phase 12 — Proofreading mode and AO3 sync (post-v1, priority 3)
 

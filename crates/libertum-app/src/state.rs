@@ -97,6 +97,35 @@ choice_enum!(FormatPane {
     More => s::PANE_MORE,
 });
 
+/// An AO3 tag category in a popup. Iced's `pick_list` needs `Display`, which the export
+/// crate's own enum cannot implement here, and the labels belong in `strings.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TagCategoryChoice(pub libertum_export::TagCategory);
+
+impl TagCategoryChoice {
+    pub const ALL: &'static [Self] = &[
+        Self(libertum_export::TagCategory::Rating),
+        Self(libertum_export::TagCategory::Warning),
+        Self(libertum_export::TagCategory::Fandom),
+        Self(libertum_export::TagCategory::Relationship),
+        Self(libertum_export::TagCategory::Character),
+        Self(libertum_export::TagCategory::Freeform),
+    ];
+}
+
+impl fmt::Display for TagCategoryChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use libertum_export::TagCategory;
+        f.write_str(match self.0 {
+            TagCategory::Rating => s::TAG_CATEGORY_RATING,
+            TagCategory::Warning => s::TAG_CATEGORY_WARNING,
+            TagCategory::Fandom => s::TAG_CATEGORY_FANDOM,
+            TagCategory::Relationship => s::TAG_CATEGORY_RELATIONSHIP,
+            TagCategory::Character => s::TAG_CATEGORY_CHARACTER,
+            TagCategory::Freeform => s::TAG_CATEGORY_FREEFORM,
+        })
+    }
+}
 choice_enum!(DocumentPane {
     Document => s::PANE_DOCUMENT,
     Section => s::PANE_SECTION,
@@ -108,7 +137,8 @@ pub enum Menu {
     View,
     Zoom,
     Insert,
-    Table,
+    /// Save a copy in another format, or copy an AO3 chapter.
+    Export,
 }
 
 /// Which swatch popover is expanded in the Style pane.
@@ -946,7 +976,6 @@ impl Field {
 choice_enum!(ViewAction {
     Inspector => s::VIEW_HIDE_INSPECTOR,
     WordCount => s::VIEW_WORD_COUNT,
-    Invisibles => s::VIEW_INVISIBLES,
     Booklet => s::VIEW_BOOKLET,
     Pageless => s::VIEW_PAGELESS,
 });
@@ -1022,9 +1051,12 @@ pub struct AppState {
     /// When the current slide started and from which fraction; `None` when settled.
     pub sidebar_anim: Option<(Instant, f32)>,
     pub show_word_count: bool,
-    pub show_invisibles: bool,
     pub open_menu: Option<Menu>,
     pub open_swatch: Option<SwatchTarget>,
+    /// The Export menu's chapter list is open beside it.
+    pub ao3_open: bool,
+    /// Chapters of the open document, computed when the list is opened.
+    pub ao3_chapters: Vec<libertum_export::Chapter>,
     /// The caret is in a table cell (the Table menu's row/column commands apply).
     pub in_table: bool,
     /// The window fills the screen.
@@ -1078,9 +1110,10 @@ impl Default for AppState {
             sidebar_open: 1.0,
             sidebar_anim: None,
             show_word_count: true,
-            show_invisibles: false,
             open_menu: None,
             open_swatch: None,
+            ao3_open: false,
+            ao3_chapters: Vec::new(),
             in_table: false,
             fullscreen: false,
             thumbnails: false,
@@ -1178,11 +1211,11 @@ impl AppState {
     }
 
     pub fn toggle_menu(&mut self, menu: Menu) {
-        self.open_menu = if self.open_menu == Some(menu) {
-            None
-        } else {
-            Some(menu)
-        };
+        let closing = self.open_menu == Some(menu);
+        self.open_menu = if closing { None } else { Some(menu) };
+        if closing || self.open_menu != Some(Menu::Export) {
+            self.ao3_open = false;
+        }
     }
 
     pub fn toggle_swatch(&mut self, target: SwatchTarget) {

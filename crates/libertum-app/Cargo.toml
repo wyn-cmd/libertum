@@ -14,6 +14,7 @@ iced = { workspace = true, features = ["advanced", "image-without-codecs", "svg"
 libertum-layout = { workspace = true }
 libertum-model = { workspace = true }
 libertum-editor = { workspace = true }
+libertum-export = { workspace = true }
 libertum-render = { workspace = true }
 libertum-docx = { workspace = true }
 libertum-odt = { workspace = true }

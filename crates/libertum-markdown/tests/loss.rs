@@ -63,8 +63,10 @@ fn colour_a_section_break_and_a_table_span_are_reported() {
     table.rows[0].cells[0].col_span = 2;
     table.rows[0].cells.truncate(1);
 
+    // Opaque colour is written as `<span style="color:…">`; only the alpha channel has
+    // nowhere to go.
     let red = CharFormat {
-        colour: Some([200, 0, 0, 255]),
+        colour: Some([200, 0, 0, 128]),
         ..CharFormat::default()
     };
     let document = Document::from_blocks(vec![
@@ -185,14 +187,14 @@ fn character_and_paragraph_formatting_is_reported_by_kind() {
             ..ParaProps::default()
         },
     )]);
+    // Underline and superscript are written as `<u>` and `<sup>`, so they are no longer
+    // losses; the highlight, which has no Markdown or HTML form here, still is.
     assert_eq!(
         kinds(&document),
         vec![
             LossKind::FontFamily,
             LossKind::FontSize,
             LossKind::Highlight,
-            LossKind::Underline,
-            LossKind::SuperSubscript,
             LossKind::LetterSpacing,
             LossKind::Alignment,
             LossKind::Indent,

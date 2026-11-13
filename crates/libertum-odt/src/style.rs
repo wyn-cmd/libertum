@@ -15,6 +15,7 @@ use libertum_formats_common::{colour, units};
 use libertum_model::{
     Align, BorderSides, Borders, CharFormat, LineSpacing, ListStyle, ParagraphStyle, ResolvedChar,
     Section, StyleId, StyleSheet, TabStop, TabStopKind, TabStops, TableBorders, VerticalAlign,
+    Watermark,
 };
 use quick_xml::Reader;
 
@@ -158,6 +159,88 @@ pub(crate) struct MasterPage {
     pub footer: Option<XmlNode>,
     pub footer_first: Option<XmlNode>,
     pub footer_left: Option<XmlNode>,
+}
+
+/// Marks a shape as a watermark, as LibreOffice names it (and Word, in DOCX).
+pub(crate) const WATERMARK_MARKER: &str = "PowerPlusWaterMarkObject";
+
+/// The master page with any watermark shape removed from its headers, and the watermark found
+/// there (its text, and whether it is turned).
+pub(crate) fn split_watermark(master: &MasterPage) -> (MasterPage, Option<Watermark>) {
+    let mut master = master.clone();
+    let mut found = None;
+    for block in [
+        &mut master.header,
+        &mut master.header_first,
+        &mut master.header_left,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(watermark) = take_watermark(block) {
+            found.get_or_insert(watermark);
+        }
+    }
+    (master, found)
+}
+
+fn take_watermark(node: &mut XmlNode) -> Option<Watermark> {
+    let mut found = None;
+    let mut index = 0;
+    while index < node.content.len() {
+        let is_shape = matches!(
+            &node.content[index],
+            XmlContent::Element(child)
+                if child.name == "custom-shape"
+                    && child.attr("name").is_some_and(|name| name.contains(WATERMARK_MARKER))
+        );
+        if is_shape {
+            if let XmlContent::Element(shape) = node.content.remove(index) {
+                if found.is_none() {
+                    found = shape_watermark(&shape);
+                }
+            }
+            continue;
+        }
+        if let XmlContent::Element(child) = &mut node.content[index] {
+            if let Some(inner) = take_watermark(child) {
+                found.get_or_insert(inner);
+            }
+        }
+        index += 1;
+    }
+    found
+}
+
+/// All the text under a node, spans included.
+fn deep_text(node: &XmlNode, out: &mut String) {
+    for content in &node.content {
+        match content {
+            XmlContent::Text(text) => out.push_str(text),
+            XmlContent::Element(child) => deep_text(child, out),
+        }
+    }
+}
+
+fn shape_watermark(shape: &XmlNode) -> Option<Watermark> {
+    let mut text = String::new();
+    for paragraph in shape.elements().filter(|child| child.name == "p") {
+        deep_text(paragraph, &mut text);
+        text.push(' ');
+    }
+    let turned = shape
+        .attr("transform")
+        .and_then(|transform| {
+            let start = transform.find("rotate")? + "rotate".len();
+            let number: String = transform[start..]
+                .trim_start_matches([' ', '('])
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E'))
+                .collect();
+            number.parse::<f32>().ok()
+        })
+        .is_some_and(|radians| radians.abs() > 0.01);
+    Watermark::new(&text, turned)
 }
 
 /// A list style's levels, reduced to what the model's four built-in lists need.

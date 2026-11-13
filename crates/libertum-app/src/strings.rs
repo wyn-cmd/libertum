@@ -36,6 +36,11 @@ pub const FILE_FILTER_DOCX: &str = "Word Document (*.docx)";
 pub const FILE_FILTER_ODT: &str = "OpenDocument Text (*.odt)";
 pub const FILE_FILTER_MARKDOWN: &str = "Markdown (*.md)";
 pub const FILE_FILTER_RTF: &str = "Rich Text Format (*.rtf)";
+pub const FILE_FILTER_PDF: &str = "PDF (*.pdf)";
+pub const FILE_FILTER_EPUB: &str = "EPUB (*.epub)";
+pub const FILE_FILTER_TEXT: &str = "Plain Text (*.txt)";
+pub const EXPORT_SAVE_TITLE: &str = "Export Document";
+pub const EXPORT_FAILED: &str = "The document could not be exported.";
 pub const FILE_FILTER_SUPPORTED: &str = "Documents (*.lbtd, *.odt, *.docx, *.md, *.rtf)";
 pub const SAVE: &str = "Save";
 pub const DONT_SAVE: &str = "Don't Save";
@@ -51,9 +56,9 @@ pub const TB_VIEW: &str = "View";
 pub const TB_ZOOM: &str = "Zoom";
 pub const TB_FULL_SCREEN: &str = "Full Screen";
 pub const TB_INSERT: &str = "Insert";
-pub const TB_TABLE: &str = "Table";
 pub const TB_IMAGE: &str = "Image";
 pub const TB_FOOTNOTE: &str = "Footnote";
+pub const TB_EXPORT: &str = "Export";
 pub const TB_FORMAT: &str = "Format";
 pub const TB_DOCUMENT: &str = "Document";
 pub const TB_HEADERS: &str = "Headers";
@@ -70,11 +75,45 @@ pub const BOOKMARK_ADD: &str = "Add Bookmark";
 pub const BOOKMARK_NAME: &str = "Bookmark name";
 pub const BOOKMARK_REMOVE: &str = "Remove";
 
+// Export menu
+pub const EXPORT_PDF: &str = "PDF";
+pub const EXPORT_PDF_ARCHIVAL: &str = "PDF Archival";
+pub const EXPORT_EPUB: &str = "EPUB";
+pub const EXPORT_RTF: &str = "Rich Text Format (RTF)";
+pub const EXPORT_TEXT: &str = "Plain Text";
+pub const EXPORT_MARKDOWN: &str = "Markdown";
+pub const EXPORT_AO3: &str = "AO3 Chapter";
+pub const AO3_TITLE: &str = "AO3 Chapters";
+pub const AO3_EMPTY: &str = "No chapters yet. Add headings at the selected levels.";
+pub const AO3_HINT: &str = "Choose a chapter to copy its HTML into AO3's HTML editor.";
+pub const AO3_COPY: &str = "Copy HTML";
+pub const AO3_COPIED: &str = "Copied to the clipboard";
+pub const AO3_CLOSE: &str = "Close";
+pub const AO3_TAGS: &str = "Tags";
+pub const AO3_TAGS_HINT: &str = "Suggested from your tag vocabulary, ranked on this chapter only. Nothing leaves this computer.";
+pub const AO3_TAGS_EMPTY: &str = "No tags suggested. Add a few to your vocabulary first.";
+pub const AO3_TAGS_COPY: &str = "Copy tags";
+pub const AO3_TAGS_COPIED: &str = "Tags copied";
+pub const AO3_TAGS_EDIT: &str = "Edit vocabulary…";
+pub const TAG_VOCAB_TITLE: &str = "AO3 tags";
+pub const TAG_VOCAB_HINT: &str =
+    "Your own list. A chapter is ranked against it locally; no tags are ever added for you.";
+pub const TAG_NAME_PLACEHOLDER: &str = "Tag name";
+pub const TAG_ADD: &str = "Add tag";
+pub const TAG_EMPTY: &str = "No tags yet.";
+pub const TAG_REMOVE: &str = "Remove";
+pub const TAG_DONE: &str = "Done";
+pub const TAG_CATEGORY_RATING: &str = "Rating";
+pub const TAG_CATEGORY_WARNING: &str = "Warning";
+pub const TAG_CATEGORY_FANDOM: &str = "Fandom";
+pub const TAG_CATEGORY_RELATIONSHIP: &str = "Relationship";
+pub const TAG_CATEGORY_CHARACTER: &str = "Character";
+pub const TAG_CATEGORY_FREEFORM: &str = "Freeform";
+
 // View menu
 pub const VIEW_SHOW_INSPECTOR: &str = "Show Inspector";
 pub const VIEW_HIDE_INSPECTOR: &str = "Hide Inspector";
 pub const VIEW_WORD_COUNT: &str = "Show Word Count";
-pub const VIEW_INVISIBLES: &str = "Show Invisibles";
 pub const VIEW_THUMBNAILS: &str = "Page Thumbnails";
 pub const VIEW_BOOKLET: &str = "Booklet View";
 pub const VIEW_PAGELESS: &str = "Pageless";
@@ -382,12 +421,19 @@ pub const SETTINGS_THEME: &str = "Appearance";
 pub const SETTINGS_FORMAT: &str = "Default format for new documents";
 pub const SETTINGS_AUTOSAVE: &str = "Autosave every";
 pub const SETTINGS_UNITS: &str = "Measurement units";
-pub const SETTINGS_GRAPHICS: &str = "Graphics acceleration for pages";
+pub const SETTINGS_CHAPTERS: &str = "Chapter breaks";
+pub const SETTINGS_CHAPTERS_HINT: &str =
+    "Headings at these levels start a chapter in AO3 and EPUB exports.";
+pub const SETTINGS_TAGS: &str = "AO3 tags";
+pub const SETTINGS_TAGS_HINT: &str =
+    "Your own tag list. Suggested tags in the AO3 chapter window are ranked against it locally.";
+pub const SETTINGS_CHAPTER_H1: &str = "Heading 1";
+pub const SETTINGS_CHAPTER_H2: &str = "Heading 2";
+pub const SETTINGS_CHAPTER_H3: &str = "Heading 3";
+pub const SETTINGS_CHAPTER_H4: &str = "Heading 4";
 pub const SETTINGS_PERFORMANCE: &str = "Show performance overlay";
 pub const SETTINGS_PERFORMANCE_HINT: &str = "Frames per second and frame time in the top-right corner of the document view. It keeps the window redrawing while it is on.";
 pub const PERFORMANCE_MEASURING: &str = "measuring…";
-pub const SETTINGS_GRAPHICS_HINT: &str =
-    "Takes effect the next time Libertum starts. Pages use the CPU renderer until then.";
 pub const SETTINGS_CLOSE: &str = "Done";
 pub const VIEW_SETTINGS: &str = "Settings…";
 pub const THEME_SYSTEM: &str = "System";
@@ -481,7 +527,7 @@ pub const WATERMARK_PLACEHOLDER: &str = "Text, for example DRAFT";
 pub const WATERMARK_DIAGONAL: &str = "Diagonal";
 pub const WATERMARK_APPLY: &str = "Apply";
 pub const WATERMARK_REMOVE: &str = "Remove";
-pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page. Saved in Libertum documents (.lbtd); Word, OpenDocument, RTF and Markdown files do not keep it.";
+pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page, and kept in Libertum (.lbtd), Word (.docx) and OpenDocument (.odt) files and in PDF exports. RTF and Markdown files do not keep it.";
 
 #[cfg(test)]
 mod tests {

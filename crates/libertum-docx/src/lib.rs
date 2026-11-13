@@ -7,6 +7,7 @@
 
 mod package;
 mod read;
+mod watermark;
 mod write;
 mod xml;
 

@@ -34,6 +34,13 @@ cargo bench -p libertum-layout --bench pagination     # full and incremental pag
 cargo run --release -p libertum-editor --example find_bench           # Find on a 1,000-page document
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1   # dist\Libertum-Setup-<version>.exe
 packaging/linux/build-packages.sh                     # dist/libertum_<version>_amd64.deb and dist/libertum-<version>-1.x86_64.rpm
+packaging/linux/build-appimage.sh                     # dist/Libertum-<version>-x86_64.AppImage (downloads linuxdeploy/appimagetool)
+packaging/macos/build-app.sh                          # dist/Libertum.app and dist/Libertum-<version>-macos-<arch>.dmg (on macOS)
+cargo run -p libertum-render --example export_pdf     # target/pdf-sample{,-a}.pdf, for a viewer and a PDF/A check
+cargo run --release -p libertum-app --example page_count -- tests/fixtures/odt/rich.odt   # our page count, for the LibreOffice comparison
+tools/check-page-counts.sh <documents...>             # compares with LibreOffice's count (needs soffice and pdfinfo)
+cargo bench -p libertum-layout --bench pagination -- --save-baseline base   # then again with `head`, then:
+tools/check-benches.py target/criterion --threshold 10 --floor-us 50        # the performance job's comparison
 ```
 
 The macOS compile check covers the whole workspace; to lint the platform-specific code for macOS with warnings as errors (as CI does), leave out the benches, whose C dependencies need a macOS compiler: `cargo clippy -p libertum-app -p libertum-installer -p libertum-render --bins --lib --tests --examples --all-features --target aarch64-apple-darwin -- -D warnings`.
@@ -42,11 +49,11 @@ The macOS compile check covers the whole workspace; to lint the platform-specifi
 
 **Definition of done for any task:** fmt is clean, clippy passes with `-D warnings` (with and without `--all-features`), all tests pass, the macOS compile check passes if you touched platform or GPU code, and the performance budgets still hold if you touched the canvas, layout or rendering. Report anything you could not verify. Do not claim it works.
 
-CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. Each platform's build is uploaded as a run artifact (`libertum-<target>`), and the Windows job also packs `Libertum-Setup.exe`; the Linux job also builds the `.deb` and `.rpm` (`packaging/linux/build-packages.sh`) and installs both on the runner as a check. `RUSTFLAGS=-D warnings` is set for every job, so code used only on one platform must not leave dead code on the others. The Linux job runs on `ubuntu-24.04` on purpose: the `.deb` records the glibc the binary needs (2.39), and a newer runner image would silently raise it.
+CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Windows, macOS (Apple Silicon and Intel) and Linux. Each platform's build is uploaded as a run artifact (`libertum-<target>`), and the Windows job also packs `Libertum-Setup.exe`; the Linux job also builds the `.deb` and `.rpm` (`packaging/linux/build-packages.sh`) and the AppImage (`packaging/linux/build-appimage.sh`) and installs the packages on the runner as a check; the macOS jobs build `Libertum.app` and the `.dmg` (`packaging/macos/build-app.sh`). A separate `libreoffice-page-counts` job compares our page counts with LibreOffice's (`tools/check-page-counts.sh`, ±2%), and a `performance` job on pull requests benches the base and head commits in one runner and fails a regression past 10% and 50 µs (`tools/check-benches.py`). `RUSTFLAGS=-D warnings` is set for every job, so code used only on one platform must not leave dead code on the others. The Linux job runs on `ubuntu-24.04` on purpose: the `.deb` records the glibc the binary needs (2.39), and a newer runner image would silently raise it.
 
 ## Releases
 
-A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`; for Linux attach the `.deb` and the `.rpm` from the Linux artifact. Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
+A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`; for Linux attach the `.deb`, the `.rpm` and the `.AppImage` from the Linux artifact, and for macOS the `.dmg` from each macOS artifact (they are inside the artifact, not at its top level). Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
 
 ## Workspace layout
 
@@ -54,11 +61,12 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 |---|---|---|
 | `libertum-model` | Document tree, operations with exact inverses, undo/redo. `format.rs` (character and paragraph formatting, style sheet), `paragraph.rs` (paragraphs, runs, `ParaProps`, blocks), `table.rs` (tables, rows, cells), `lists.rs`, `ops.rs`, `document.rs`, `history.rs`. No I/O, no UI. | Working |
 | `libertum-layout` | parley shaping and line breaking (`engine.rs`: indents, line spacing, super/subscript, ligatures, hyphenation), incremental pagination with keep and widow rules, decorations (page numbers, TOC leaders, list markers, hyphens) (`paginate.rs`). `spike.rs` holds `ParagraphSnapshot` (model to layout) and the demo-document generator. | Working |
-| `libertum-render` | Page rendering. CPU: tiny-skia + swash (`renderer.rs`, `glyphs.rs`, `page_cache.rs`). GPU: vello behind the `gpu` feature (`gpu.rs`, `gpu/caps.rs`). `backend.rs` holds the `PageBackend` trait. | Working (vello not wired into the canvas) |
+| `libertum-render` | Page rendering. CPU: tiny-skia + swash (`renderer.rs`, `glyphs.rs`, `page_cache.rs`). GPU: vello behind the `gpu` feature (`gpu.rs`, `gpu/caps.rs`), an experiment the app does not link. `backend.rs` holds the `PageBackend` trait. | Working (CPU pages; GPU pages not offered) |
 | `libertum-editor` | Cursor, selection, movement, typing, clipboard, character and paragraph formatting, styles, lists, TOC sync, sections. UI-agnostic. | Working |
 | `libertum-docx`, `libertum-odt`, `libertum-rtf` | DOCX, ODT and RTF import/export: paragraphs, runs and styles, lists, sections and page setup, headers and footers, tables (spans, merges, styles), footnotes and endnotes, bookmarks and cross-references, inline images; unknown parts or groups are preserved | Working (round-trip fixtures; Word opens the exports with no repair prompt) |
 | `libertum-markdown` | GFM Markdown with byte-identical re-save of unedited blocks, the file's own conventions for edited ones, local images, and `loss_report` (what a Markdown save would drop) | Working |
 | `libertum-native` | The `.lbtd` format: the model serialised with serde in a deterministic ZIP (see `docs/format-libertum-native.md`); also the crash-recovery snapshot | Working |
+| `libertum-export` | Chapter splitting, the AO3 HTML fragment, EPUB 3 and plain text (model only) | Working |
 | `libertum-formats-common` | Shared XML helpers, units, colours, and image bytes (`media`: PNG/JPEG kept, GIF/BMP converted) | Working |
 | `libertum-installer` | The single-file Windows installer: carries `libertum.exe`, `install.ps1` and the README appended to its own `.exe`; `pack` builds it (`packaging/windows/build-installer.ps1`) | Working (unsigned) |
 | `libertum-app` | Iced 0.14 app: `app.rs` (messages, update, formatting commands), `toolbar.rs`, `inspector/`, `home.rs`, `templates.rs`, `widgets/` (stepper, segmented, controls), `canvas.rs` (custom page widget, caret, IME), `docview.rs` (model + editor + layout + strip render cache), `shortcuts.rs` (the single shortcut map), `theme.rs` (all colour tokens), `strings.rs` (all UI text), `state.rs`, `settings.rs`, `perf.rs` | Working; some sidebar controls not bound yet (see STATUS) |
@@ -70,7 +78,7 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 - **Performance is the product.** Nothing may be O(document size) on the keystroke path. Layout is cached per paragraph, pagination is incremental, and only visible pages (±1) are rendered.
 - **Rendering has two layers** (see PLAN §4.5):
   - The Iced window compositor is always wgpu, with tiny-skia only as an automatic fallback (it measured 15 fps vs 60 fps).
-  - The **Graphics acceleration** setting selects only the page renderer: CPU (default) or vello on the GPU.
+  - Pages are always rendered on the CPU (tiny-skia + swash); there is no Graphics acceleration setting (removed 2026-11-13: vello measured slower per page than the CPU renderer, and the setting never did anything). The vello code stays behind the `gpu` feature as an experiment.
 - **Pinned versions with reasons:** iced 0.14, parley 0.12, vello **0.7** (iced_wgpu 0.14 needs wgpu 27; vello 0.11 needs wgpu 30), wgpu 27.0.1, peniko 0.6. Do not bump vello or Iced independently. They must share one wgpu version, so check with `cargo tree -i wgpu`.
 - **GPU safety:** vello is only started after `gpu::caps::check_caps` passes (Vulkan, DX12 or Metal; OpenGL refused by default). Initialisation runs in the background (`init_in_background`), and failure falls back to CPU pages. Never introduce a code path that can panic on an unsupported GPU.
 - **Known vello 0.7 issue:** embedded bitmap strikes (for example in Cambria) render invisibly. `gpu.rs` works around this by renaming the `EBLC` table.
@@ -120,7 +128,11 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 | `LIBERTUM_THUMBNAILS=1` | Start with the page thumbnails column shown |
 
 A document path given as the first command-line argument (what Windows passes when a file is double-clicked or opened with "Open with") opens straight into the editor; `LIBERTUM_OPEN` does the same for scripts.
-| `LIBERTUM_MENU=view\|zoom` | Open a toolbar menu at start (for screenshots) |
+| `LIBERTUM_MENU=view\|zoom\|insert\|export` | Open a toolbar menu at start (for screenshots) |
+| `LIBERTUM_AO3=1` | Open the Export menu's AO3 chapter list at start (for screenshots) |
+| `LIBERTUM_AO3_PICK=<n>` | With `LIBERTUM_AO3=1`, open that chapter's HTML window at start |
+| `LIBERTUM_TAGS=1` | Open the AO3 tag vocabulary window at start (for screenshots) |
+| `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
 | `LIBERTUM_ZOOM=<percent>\|fit` | Initial zoom |
 | `LIBERTUM_UNITS=cm\|in` | Measurement units |
 | `LIBERTUM_FILTER=linear` | Linear instead of nearest filtering for page images |

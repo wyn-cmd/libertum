@@ -29,6 +29,7 @@ icons! {
     Maximize => "maximize.svg",
     Minimize => "minimize.svg",
     CirclePlus => "circle-plus.svg",
+    Upload => "upload.svg",
     Table => "table.svg",
     Image => "image.svg",
     Asterisk => "asterisk.svg",

@@ -21,6 +21,7 @@ libertum-formats-common = { path = "crates/libertum-formats-common" }
 libertum-native = { path = "crates/libertum-native" }
 libertum-markdown = { path = "crates/libertum-markdown" }
 libertum-editor = { path = "crates/libertum-editor" }
+libertum-export = { path = "crates/libertum-export" }
 
 # UI
 iced = "0.14"
@@ -39,7 +40,8 @@ unicode-segmentation = "1"
 hypher = { version = "0.1.8", default-features = false, features = ["alloc", "english"] }
 
 # Formats
-zip = "9"
+# Pure-Rust deflate only: no C toolchain is needed to cross-check macOS.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
 quick-xml = "0.42"
 comrak = "0.59"
 # Decoding and PNG re-encoding of inline images (MIT OR Apache-2.0). Only the codecs the
@@ -56,6 +58,10 @@ smallvec = "1"
 thiserror = "2"
 # Build scripts only (Windows): embeds the application icon in the .exe files. MIT.
 winresource = { version = "0.1", default-features = false }
+# PDF export: printpdf writes the text with embedded/subset fonts; lopdf post-processes
+# the archival variant (output intent and XMP). Both MIT.
+printpdf = { version = "0.12", default-features = false }
+lopdf = "0.44"
 # macOS only: the Dock icon (crates/libertum-app/src/macos_icon.rs). MIT.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }

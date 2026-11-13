@@ -1418,3 +1418,114 @@ fn cant_split_maps_to_keep_together_both_ways() {
         .expect("table");
     assert!(!table.rows[0].keep_together);
 }
+
+fn watermarked(text: &str, diagonal: bool) -> Document {
+    let mut document = Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "Body text"))]);
+    for section in &mut document.sections {
+        section.watermark = libertum_model::Watermark::new(text, diagonal);
+    }
+    document
+}
+
+#[test]
+fn a_watermark_round_trips_through_a_new_docx() {
+    for diagonal in [true, false] {
+        let bytes = Docx::new(watermarked("DRAFT & <FINAL>", diagonal))
+            .to_bytes()
+            .expect("save");
+        let back = Docx::parse(&bytes).expect("reopen");
+        let watermark = back.document().sections[0]
+            .watermark
+            .clone()
+            .expect("the watermark comes back");
+        assert_eq!(watermark.text, "DRAFT & <FINAL>");
+        assert_eq!(watermark.diagonal, diagonal);
+        // The shape sits in a header the section refers to, with `r:id`.
+        let document = zip_text(&bytes, "word/document.xml").expect("document.xml");
+        assert!(document.contains("<w:headerReference w:type=\"default\" r:id=\""));
+        let content_types = zip_text(&bytes, "[Content_Types].xml").expect("content types");
+        assert!(content_types.contains("wordprocessingml.header+xml"));
+    }
+}
+
+#[test]
+fn changing_and_removing_a_watermark_leaves_nothing_behind() {
+    let first = Docx::new(watermarked("DRAFT", true))
+        .to_bytes()
+        .expect("save");
+    let mut docx = Docx::parse(&first).expect("reopen");
+    let mut document = docx.document().clone();
+    for section in &mut document.sections {
+        section.watermark = libertum_model::Watermark::new("FINAL", false);
+    }
+    docx.set_document(document.clone());
+    let second = docx.to_bytes().expect("save again");
+    let header = zip_text(&second, "word/header1.xml").expect("the header");
+    assert_eq!(header.matches("PowerPlusWaterMarkObject").count(), 1);
+    assert!(header.contains("string=\"FINAL\"") && !header.contains("DRAFT"));
+
+    let mut docx = Docx::parse(&second).expect("reopen");
+    let mut document = docx.document().clone();
+    for section in &mut document.sections {
+        section.watermark = None;
+    }
+    docx.set_document(document);
+    let third = docx.to_bytes().expect("save a third time");
+    assert!(
+        !zip_text(&third, "word/header1.xml")
+            .expect("the header stays")
+            .contains("PowerPlusWaterMarkObject")
+    );
+    assert!(
+        Docx::parse(&third).expect("reopen").document().sections[0]
+            .watermark
+            .is_none()
+    );
+}
+
+#[test]
+fn a_watermark_joins_an_existing_header_and_keeps_its_text() {
+    let ns = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+    let document = format!(
+        "<w:document {ns}><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p>\
+         <w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId7\"/>\
+         <w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr></w:body></w:document>"
+    );
+    let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId7\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header9.xml\"/></Relationships>";
+    let header = format!(
+        "<w:hdr {ns}><w:p><w:pPr><w:jc w:val=\"right\"/></w:pPr><w:r><w:t>Running head</w:t></w:r></w:p></w:hdr>"
+    );
+    let bytes = zip_package(&[
+        ("word/document.xml", &document),
+        ("word/_rels/document.xml.rels", rels),
+        ("word/header9.xml", &header),
+    ]);
+    let mut docx = Docx::parse(&bytes).expect("parse");
+    assert!(docx.document().sections[0].watermark.is_none());
+    let mut edited = docx.document().clone();
+    edited.sections[0].watermark = libertum_model::Watermark::new("SECRET", true);
+    docx.set_document(edited);
+    let saved = docx.to_bytes().expect("save");
+    let header = zip_text(&saved, "word/header9.xml").expect("header9");
+    assert!(header.contains("Running head"), "{header}");
+    assert!(header.contains("string=\"SECRET\""));
+    assert!(
+        header.find("<w:jc").unwrap_or(0) < header.find("<w:pict").unwrap_or(0),
+        "the shape comes after the paragraph properties"
+    );
+    // No second header was invented, and the reference is intact.
+    assert!(zip_text(&saved, "word/header1.xml").is_none());
+    let document = zip_text(&saved, "word/document.xml").expect("document");
+    assert!(document.contains("r:id=\"rId7\""), "{document}");
+    let back = Docx::parse(&saved).expect("reopen");
+    assert_eq!(
+        back.document().sections[0]
+            .watermark
+            .as_ref()
+            .map(|w| w.text.as_str()),
+        Some("SECRET")
+    );
+}

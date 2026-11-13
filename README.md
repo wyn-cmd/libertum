@@ -27,10 +27,13 @@ Working today:
 - **Files**: ODT, DOCX, RTF and Markdown, plus the native `.lbtd` format. Find and replace,
   autosave with crash recovery, recent files, drag and drop, right-click menus and a Settings
   window.
+- **Export**: PDF (searchable text), PDF Archival (PDF/A-2b), EPUB 3, RTF, plain text and
+  Markdown, or a single AO3 chapter as HTML ready to paste into AO3's editor, with tag
+  suggestions ranked locally from your own tag list.
 
 `docs/STATUS.md` has the current detail and the open items. `PLAN.md` has the architecture,
-the performance budgets and the phases: document stitching is done, and the writing tools still
-to come are AO3 chapter export and proofreading.
+the performance budgets and the phases: document stitching and the AO3 chapter export with
+local tag suggestions are done, and the writing tool still to come is proofreading and AO3 sync.
 
 ## Install on Windows
 
@@ -66,8 +69,18 @@ The packages are built on Ubuntu 24.04, so they need glibc 2.39 or newer: Debian
 runtime libraries are declared as dependencies — fontconfig, X11, Wayland, `libxkbcommon`,
 Vulkan and EGL/GLES — because the fonts, the window and the compositor are chosen at run time.
 
-On macOS the release has the `libertum` program itself, unsigned and without an installer: run
-it from a terminal (on macOS, the first time, right-click it and choose Open).
+There is also a portable AppImage, `Libertum-<version>-x86_64.AppImage`, which carries the
+font, input, Wayland and graphics libraries itself and needs only the host's X11/XCB and glibc:
+
+```sh
+chmod +x Libertum-0.1.1-x86_64.AppImage
+./Libertum-0.1.1-x86_64.AppImage
+```
+
+On macOS download `Libertum-<version>-macos-arm64.dmg` (Apple Silicon) or
+`Libertum-<version>-macos-x64.dmg` (Intel), open it and drag **Libertum** to Applications. The
+app is signed ad hoc, not notarised, so the first launch needs Finder > right-click Libertum >
+**Open** and then Open again. It opens `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` from Finder.
 
 To build the installer: `powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1`
 (it writes `dist\Libertum-Setup-<version>.exe`). The same install can be done by hand by running

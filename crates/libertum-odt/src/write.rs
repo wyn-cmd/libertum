@@ -954,6 +954,13 @@ impl<'a> Writer<'a> {
                 "<style:style style:name=\"{name}\" style:family=\"paragraph\" style:parent-style-name=\"{parent}\"><style:paragraph-properties fo:text-align=\"{align}\"/></style:style>"
             ));
         }
+        if document
+            .sections
+            .iter()
+            .any(|section| section.watermark.is_some())
+        {
+            out.push_str(WATERMARK_STYLES);
+        }
         let sections = self.section_count(document);
         for index in 0..sections {
             out.push_str(&self.page_layout(document, index));
@@ -1121,13 +1128,39 @@ impl<'a> Writer<'a> {
             master_name(index),
             layout_name(index)
         );
-        if let Some(block) = self.hf_block(&section, HfKind::Header, HfVariant::Default) {
+        // The watermark is a shape anchored in each header the master page has. The default
+        // header always exists when there is a watermark, so every page carries it.
+        let watermark = |variant: u32| {
+            section
+                .watermark
+                .as_ref()
+                .map(|watermark| watermark_shape(watermark, &section, index as u32 * 4 + variant))
+        };
+        let header =
+            |block: Option<String>, force: bool, variant: u32| match (block, watermark(variant)) {
+                (Some(block), Some(shape)) => Some(with_shape(&block, &shape)),
+                (None, Some(shape)) if force => Some(with_shape("", &shape)),
+                (block, _) => block,
+            };
+        if let Some(block) = header(
+            self.hf_block(&section, HfKind::Header, HfVariant::Default),
+            true,
+            0,
+        ) {
             out.push_str(&format!("<style:header>{block}</style:header>"));
         }
-        if let Some(block) = self.hf_block(&section, HfKind::Header, HfVariant::First) {
+        if let Some(block) = header(
+            self.hf_block(&section, HfKind::Header, HfVariant::First),
+            false,
+            1,
+        ) {
             out.push_str(&format!("<style:header-first>{block}</style:header-first>"));
         }
-        if let Some(block) = self.hf_block(&section, HfKind::Header, HfVariant::Even) {
+        if let Some(block) = header(
+            self.hf_block(&section, HfKind::Header, HfVariant::Even),
+            false,
+            2,
+        ) {
             out.push_str(&format!("<style:header-left>{block}</style:header-left>"));
         }
         if let Some(block) = self.hf_block(&section, HfKind::Footer, HfVariant::Default) {
@@ -1224,6 +1257,96 @@ impl<'a> Writer<'a> {
         }
         Some(out)
     }
+}
+
+// ------------------------------------------------------------------ watermark
+
+/// The graphic style of a watermark shape (light grey, half transparent, behind the text, no
+/// outline, placed by its own coordinates on the page) and the paragraph style of its text.
+const WATERMARK_STYLES: &str = concat!(
+    "<style:style style:name=\"LbtWatermark\" style:family=\"graphic\">",
+    "<style:graphic-properties draw:stroke=\"none\" draw:fill=\"solid\" ",
+    "draw:fill-color=\"#808080\" draw:opacity=\"31%\" ",
+    "style:run-through=\"background\" style:wrap=\"run-through\" ",
+    "style:number-wrapped-paragraphs=\"no-limit\" ",
+    "style:vertical-pos=\"from-top\" style:vertical-rel=\"page\" ",
+    "style:horizontal-pos=\"from-left\" style:horizontal-rel=\"page\" ",
+    "draw:textarea-horizontal-align=\"center\" draw:textarea-vertical-align=\"middle\" ",
+    "draw:auto-grow-height=\"false\" draw:auto-grow-width=\"false\" ",
+    "fo:wrap-option=\"no-wrap\"/></style:style>",
+    "<style:style style:name=\"LbtWatermarkText\" style:family=\"paragraph\">",
+    "<style:paragraph-properties fo:text-align=\"center\"/>",
+    "<style:text-properties fo:font-size=\"96pt\" fo:font-weight=\"bold\"/></style:style>",
+);
+
+/// The watermark as a Fontwork custom shape, as LibreOffice writes one. The text is stretched
+/// to the shape, so the shape has the text's proportions; its centre is the page's centre.
+fn watermark_shape(watermark: &libertum_model::Watermark, section: &Section, salt: u32) -> String {
+    let (page_width, page_height) = (section.page.width_pt(), section.page.height_pt());
+    let chars = watermark.text.chars().count().max(1) as f32;
+    let (span, angle) = if watermark.diagonal {
+        (
+            (page_width * page_width + page_height * page_height).sqrt() * 0.62,
+            page_height.atan2(page_width),
+        )
+    } else {
+        (page_width * 0.8, 0.0)
+    };
+    let width = span.min(chars * 0.8 * 160.0).max(24.0);
+    let height = (width / (chars * 0.8)).max(6.0);
+    let (centre_x, centre_y) = (page_width * 0.5, page_height * 0.5);
+    // `rotate` turns counter-clockwise about the shape's top-left corner, then `translate`
+    // moves it; the translation puts the shape's middle on the page's middle.
+    let placement = if angle == 0.0 {
+        format!(
+            "svg:x=\"{}\" svg:y=\"{}\"",
+            units::format(centre_x - width * 0.5),
+            units::format(centre_y - height * 0.5)
+        )
+    } else {
+        let (sin, cos) = angle.sin_cos();
+        let turned_x = width * 0.5 * cos + height * 0.5 * sin;
+        let turned_y = -width * 0.5 * sin + height * 0.5 * cos;
+        format!(
+            "draw:transform=\"rotate ({angle}) translate ({}pt {}pt)\"",
+            centre_x - turned_x,
+            centre_y - turned_y
+        )
+    };
+    format!(
+        concat!(
+            "<draw:custom-shape text:anchor-type=\"paragraph\" draw:z-index=\"0\" ",
+            "draw:name=\"{marker}{salt}\" draw:style-name=\"LbtWatermark\" ",
+            "draw:text-style-name=\"LbtWatermarkText\" svg:width=\"{width}\" ",
+            "svg:height=\"{height}\" {placement}>",
+            "<text:p text:style-name=\"LbtWatermarkText\">{text}</text:p>",
+            "<draw:enhanced-geometry svg:viewBox=\"0 0 21600 21600\" ",
+            "draw:text-areas=\"0 0 21600 21600\" draw:text-path=\"true\" ",
+            "draw:text-path-mode=\"normal\" draw:text-path-scale=\"shape\" ",
+            "draw:text-path-same-letter-heights=\"false\" draw:type=\"fontwork-plain-text\" ",
+            "draw:enhanced-path=\"M 0 0 L 21600 0 21600 21600 0 21600 0 0 Z N\"/>",
+            "</draw:custom-shape>",
+        ),
+        marker = crate::style::WATERMARK_MARKER,
+        salt = salt,
+        placement = placement,
+        width = units::format(width),
+        height = units::format(height),
+        text = escape_text(&watermark.text),
+    )
+}
+
+/// A header block with the watermark shape anchored in its first paragraph (or in a new one
+/// when the block has none).
+fn with_shape(block: &str, shape: &str) -> String {
+    if let Some(start) = block.find("<text:p") {
+        if let Some(close) = block[start..].find('>').map(|offset| start + offset) {
+            if !block[..close].ends_with('/') {
+                return format!("{}{shape}{}", &block[..=close], &block[close + 1..]);
+            }
+        }
+    }
+    format!("{block}<text:p text:style-name=\"Header\">{shape}</text:p>")
 }
 
 // ------------------------------------------------------------------ lists

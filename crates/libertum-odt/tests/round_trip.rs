@@ -1218,3 +1218,68 @@ fn a_table_without_a_style_writes_no_template_name() {
     assert!(!content.contains("template-name"));
     assert_eq!(table_of(&bytes).style, None);
 }
+
+fn watermark_document(text: &str, diagonal: bool) -> Document {
+    let mut document = Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "Body text"))]);
+    for section in &mut document.sections {
+        section.watermark = libertum_model::Watermark::new(text, diagonal);
+    }
+    document
+}
+
+#[test]
+fn a_watermark_round_trips_and_is_not_read_as_header_text() {
+    for diagonal in [true, false] {
+        let bytes = Odt::new(watermark_document("DRAFT & <FINAL>", diagonal))
+            .to_bytes()
+            .expect("save");
+        let styles = zip_text(&bytes, "styles.xml").expect("styles.xml");
+        assert!(styles.contains("<draw:custom-shape"), "{styles}");
+        assert!(styles.contains("PowerPlusWaterMarkObject"));
+        assert_eq!(styles.contains("draw:transform=\"rotate ("), diagonal);
+        let back = Odt::parse(&bytes).expect("reopen");
+        let section = &back.document().sections[0];
+        let watermark = section.watermark.clone().expect("the watermark comes back");
+        assert_eq!(watermark.text, "DRAFT & <FINAL>");
+        assert_eq!(watermark.diagonal, diagonal);
+        assert!(
+            section.headers.default.is_none(),
+            "the shape's text is not header text: {:?}",
+            section.headers.default
+        );
+    }
+}
+
+#[test]
+fn a_watermark_shares_a_header_with_its_text_and_page_number() {
+    let mut document = watermark_document("SECRET", true);
+    document.sections[0].headers = HeadersFooters::with_default("Running head");
+    document.sections[0].page_numbers = Some(PageNumberPos {
+        vertical: PageNumberVertical::Top,
+        horizontal: PageNumberHorizontal::Right,
+        mirror: false,
+    });
+    let bytes = Odt::new(document).to_bytes().expect("save");
+    let back = Odt::parse(&bytes).expect("reopen");
+    let section = &back.document().sections[0];
+    assert_eq!(
+        section.watermark.as_ref().map(|w| w.text.as_str()),
+        Some("SECRET")
+    );
+    assert_eq!(
+        section.headers.default.as_ref().map(|h| h.text.as_str()),
+        Some("Running head")
+    );
+    assert!(section.page_numbers.is_some());
+    // And taking it off removes the shape.
+    let mut document = back.into_document();
+    document.sections[0].watermark = None;
+    let bytes = Odt::new(document).to_bytes().expect("save again");
+    assert!(
+        !zip_text(&bytes, "styles.xml")
+            .expect("styles")
+            .contains("custom-shape")
+    );
+}

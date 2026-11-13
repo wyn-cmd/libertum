@@ -13,6 +13,11 @@ swash = { workspace = true }
 vello = { workspace = true, optional = true }
 pollster = { version = "0.4", optional = true }
 tiny-skia = { workspace = true }
+printpdf = { workspace = true }
+lopdf = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 libertum-formats-common = { workspace = true }

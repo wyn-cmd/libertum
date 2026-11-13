@@ -19,11 +19,12 @@ use crate::package::Package;
 use crate::xml::{escape_attr, escape_text};
 use crate::{DocxError, Extras, SectionExtras};
 
-const XML_DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
-const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
-const REL_TYPE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+pub(crate) const XML_DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
+pub(crate) const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+pub(crate) const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+pub(crate) const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+pub(crate) const REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const PIC_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
@@ -44,6 +45,8 @@ const CT_FOOTNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
 const CT_ENDNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
+pub(crate) const CT_HEADER: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
 const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
 const CT_APP: &str = "application/vnd.openxmlformats-officedocument.extended-properties+xml";
 
@@ -56,7 +59,11 @@ pub(crate) fn build(
     let footnotes_part = notes_part(NoteKind::Footnote, &note_ids.footnotes);
     let endnotes_part = notes_part(NoteKind::Endnote, &note_ids.endnotes);
     let table_styles = table_styles(document);
-    let (document_part, media) = document_xml(document, extras, &note_ids, &table_styles);
+    // Watermarks live in the headers: work out their edits first, since new headers add
+    // references to the sections' properties.
+    let mut extras = extras.clone();
+    let header_edits = crate::watermark::plan(document, &mut extras, origin);
+    let (document_part, media) = document_xml(document, &extras, &note_ids, &table_styles);
     let styles_part = styles_xml(&document.styles, &table_styles);
     let numbering_part = numbering_xml(document);
 
@@ -96,6 +103,7 @@ pub(crate) fn build(
         ),
     };
     add_media(&mut package, &media);
+    header_edits.apply(&mut package);
 
     if !package.contains("docProps/core.xml") {
         package.set_text("docProps/core.xml", core_properties());
@@ -238,7 +246,7 @@ fn ensure_notes_part(package: &mut Package, kind: NoteKind, part: Option<String>
 }
 
 /// Adds the content-type override for `part` if the package does not declare it.
-fn ensure_content_type(package: &mut Package, part: &str, content_type: &str) {
+pub(crate) fn ensure_content_type(package: &mut Package, part: &str, content_type: &str) {
     let name = "[Content_Types].xml";
     match package.text(name) {
         Some(text) => {
@@ -1261,7 +1269,10 @@ fn sect_pr(section: &Section, extra: &SectionExtras) -> String {
     let emit = |out: &mut String, name: &str, attrs: &[(String, String)]| {
         out.push_str(&format!("<w:{name}"));
         for (key, value) in attrs {
-            out.push_str(&format!(" w:{key}=\"{}\"", escape_attr(value)));
+            // A header or footer reference points at its part with `r:id`; the reader keeps
+            // only local names.
+            let prefix = if key == "id" { "r" } else { "w" };
+            out.push_str(&format!(" {prefix}:{key}=\"{}\"", escape_attr(value)));
         }
         out.push_str("/>");
     };
@@ -1326,7 +1337,7 @@ fn sect_pr(section: &Section, extra: &SectionExtras) -> String {
     out
 }
 
-fn paper_points(setup: PageSetup) -> (f32, f32) {
+pub(crate) fn paper_points(setup: PageSetup) -> (f32, f32) {
     let (width, height) = setup.paper.points();
     match setup.orientation {
         Orientation::Portrait => (width, height),

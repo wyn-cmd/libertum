@@ -61,7 +61,6 @@ pub enum UnitsPreference {
 pub struct Settings {
     pub theme: ThemePreference,
     pub default_format: DefaultFormat,
-    pub graphics_acceleration: bool,
     pub sidebar_collapsed: bool,
     pub sidebar_width: f32,
     /// Which inspector the sidebar shows (Format or Document).
@@ -75,6 +74,11 @@ pub struct Settings {
     pub recent_files: Vec<PathBuf>,
     /// Measurement units in the inspector (Auto follows the locale).
     pub units: UnitsPreference,
+    /// Which heading levels start a chapter in AO3 and EPUB exports.
+    pub chapter_headings: libertum_export::ChapterLevels,
+    /// The local AO3 tag vocabulary: what suggested tags are ranked against. Nothing
+    /// leaves this file; see `libertum_export::tags`.
+    pub tags: Vec<libertum_export::Tag>,
 }
 
 impl UnitsPreference {
@@ -100,7 +104,6 @@ impl Default for Settings {
         Self {
             theme: ThemePreference::System,
             default_format: DefaultFormat::Odt,
-            graphics_acceleration: false,
             sidebar_collapsed: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             inspector: Inspector::Format,
@@ -109,6 +112,8 @@ impl Default for Settings {
             autosave_secs: 60,
             recent_files: Vec::new(),
             units: UnitsPreference::Auto,
+            chapter_headings: libertum_export::ChapterLevels::default(),
+            tags: Vec::new(),
         }
     }
 }
@@ -183,7 +188,6 @@ mod tests {
     fn defaults_match_plan() {
         let s = Settings::default();
         assert_eq!(s.default_format, DefaultFormat::Odt);
-        assert!(!s.graphics_acceleration);
         assert!(!s.show_performance, "the overlay is off until asked for");
         assert_eq!(s.theme, ThemePreference::System);
     }
@@ -193,7 +197,6 @@ mod tests {
         let original = Settings {
             theme: ThemePreference::Dark,
             default_format: DefaultFormat::Docx,
-            graphics_acceleration: true,
             sidebar_collapsed: true,
             sidebar_width: 320.0,
             inspector: Inspector::Document,
@@ -202,6 +205,22 @@ mod tests {
             autosave_secs: 30,
             recent_files: vec![PathBuf::from("a.odt"), PathBuf::from("b.docx")],
             units: UnitsPreference::Inches,
+            chapter_headings: libertum_export::ChapterLevels {
+                h1: false,
+                h2: true,
+                h3: true,
+                h4: false,
+            },
+            tags: vec![
+                libertum_export::Tag::new(
+                    "Teen And Up Audiences",
+                    libertum_export::TagCategory::Rating,
+                ),
+                libertum_export::Tag::new(
+                    "Enemies to Lovers",
+                    libertum_export::TagCategory::Relationship,
+                ),
+            ],
         };
         let text = original.to_toml().expect("serialise");
         assert_eq!(Settings::from_toml(&text).expect("parse"), original);
@@ -212,6 +231,10 @@ mod tests {
         let s = Settings::from_toml("sidebar_collapsed = true\n").expect("parse");
         assert!(s.sidebar_collapsed);
         assert_eq!(s.autosave_secs, 60);
+        assert_eq!(
+            s.chapter_headings,
+            libertum_export::ChapterLevels::default()
+        );
     }
 
     #[test]
@@ -223,6 +246,23 @@ mod tests {
         .expect("parse");
         assert_eq!(s.inspector, Inspector::Format);
         assert!(s.show_word_count);
+        assert!(s.tags.is_empty(), "an old file has no vocabulary yet");
+    }
+
+    #[test]
+    fn the_tag_vocabulary_is_stored_as_a_readable_list() {
+        let s = Settings {
+            tags: vec![
+                libertum_export::Tag::new("Mature", libertum_export::TagCategory::Rating),
+                libertum_export::Tag::new("Slow Burn", libertum_export::TagCategory::Freeform),
+            ],
+            ..Settings::default()
+        };
+        let text = s.to_toml().expect("serialise");
+        assert!(text.contains("[[tags]]"), "{text}");
+        assert!(text.contains("category = \"rating\""), "{text}");
+        assert!(text.contains("category = \"freeform\""), "{text}");
+        assert_eq!(Settings::from_toml(&text).expect("parse").tags, s.tags);
     }
 
     #[test]

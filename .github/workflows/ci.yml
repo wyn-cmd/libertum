@@ -134,6 +134,33 @@ jobs:
           sudo rpm -q libertum
           test -x /usr/bin/libertum
           sudo rpm -e libertum
+      # The portable Linux artefact: one AppImage carrying the binary, the libraries it loads
+      # and the desktop entry (packaging/linux/build-appimage.sh). linuxdeploy and appimagetool
+      # are downloaded by the script; there is no FUSE on the runner, so the script runs them
+      # with APPIMAGE_EXTRACT_AND_RUN=1.
+      - name: Build the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build-appimage.sh \
+            --binary "target/${{ matrix.target }}/release/libertum" --out dist
+          chmod +x dist/Libertum-*.AppImage
+          # Unpacking is the check that the image's layout is complete; running the GUI needs
+          # a display.
+          ./dist/Libertum-*.AppImage --appimage-extract > /dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/libertum
+          test -f squashfs-root/usr/share/applications/libertum.desktop
+          test -n "$(find squashfs-root -name 'libertum.png' -print -quit)"
+          rm -rf squashfs-root
+      # The macOS bundle: Libertum.app with its icon, Info.plist and document types, packed into
+      # a .dmg (packaging/macos/build-app.sh). Signed ad hoc, not notarised.
+      - name: Build the macOS app and disk image
+        if: runner.os == 'macOS'
+        run: |
+          bash packaging/macos/build-app.sh \
+            --binary "target/${{ matrix.target }}/release/libertum" \
+            --out dist --arch "${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x64' }}"
+          hdiutil verify dist/Libertum-*.dmg
       # Downloadable from the run's summary page for 30 days.
       - name: Upload the build
         uses: actions/upload-artifact@v4
@@ -142,3 +169,74 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+  # Phase 5's acceptance check, separate from the platform matrix: LibreOffice's own page count
+  # for the fixtures and for the generated 343-page acceptance document must be within 2% of
+  # Libertum's. The office suite is a large download, so it gets its own job.
+  libreoffice-page-counts:
+    name: LibreOffice page counts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LibreOffice Writer and poppler
+        run: |
+          sudo apt-get update
+          for attempt in 1 2 3; do
+            if sudo apt-get install -y --no-install-recommends \
+                libreoffice-writer-nogui poppler-utils; then
+              exit 0
+            fi
+            echo "apt install attempt $attempt failed; retrying in 20s"
+            sleep 20
+          done
+          echo "could not install LibreOffice" >&2
+          exit 1
+      - name: Build the page-count tool and the acceptance document
+        run: |
+          cargo build --release -p libertum-app --example page_count
+          cargo run --release -p libertum-app --example novel_notes_acceptance > /dev/null
+      - name: Compare our page counts with LibreOffice's
+        run: |
+          tools/check-page-counts.sh \
+            --page-count target/release/examples/page_count \
+            tests/fixtures/odt/rich.odt \
+            tests/fixtures/docx/rich.docx \
+            tests/fixtures/docx/table.docx \
+            target/novel-300.odt \
+            target/novel-300.docx
+
+  # Criterion benches for the base and the head commit in one job, so a shared runner's noise
+  # is all that separates the two runs. Fork pull requests are skipped: their base commit is
+  # not fetched into this repository's origin.
+  performance:
+    name: Performance regression
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bench the base commit
+        run: |
+          git worktree add base "${{ github.event.pull_request.base.sha }}"
+          (cd base && cargo bench -p libertum-layout --bench pagination -- \
+             --save-baseline base --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30)
+          (cd base && cargo bench -p libertum-editor --bench editing -- \
+             --save-baseline base --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30)
+      - name: Bench the head commit
+        run: |
+          cargo bench -p libertum-layout --bench pagination -- \
+            --save-baseline head --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
+          cargo bench -p libertum-editor --bench editing -- \
+            --save-baseline head --noplot --warm-up-time 1 --measurement-time 3 --sample-size 30
+      # A regression must pass both 10% and 50 us: runner noise must not fail a pull request.
+      - name: Compare with the base commit
+        run: python3 tools/check-benches.py target/criterion --threshold 10 --floor-us 50

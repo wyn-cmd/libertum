@@ -204,3 +204,55 @@ fn bold_text_inside_a_code_span_is_written() {
     let saved = edit("Use **`cargo`** now.\n", "Use", None, "!");
     assert_eq!(saved, "Use **`cargo`** now.!\n");
 }
+
+#[test]
+fn underline_superscript_subscript_and_colour_survive_an_edit() {
+    let source = "<u>Under</u> and <sup>up</sup> and <sub>down</sub> and <span style=\"color:#ff0000\">red</span>.
+";
+    let saved = edit(source, "Under", None, "!");
+    assert_eq!(
+        saved,
+        "<u>Under</u> and <sup>up</sup> and <sub>down</sub> and <span style=\"color:#ff0000\">red</span>.!
+"
+    );
+}
+
+#[test]
+fn inline_html_is_read_back_as_formatting() {
+    let markdown = Markdown::parse(
+        b"<u>U</u> <sup>S</sup> <sub>B</sub> <span style=\"color:#FF0000\">C</span>
+",
+    )
+    .expect("parse");
+    let paragraph = markdown.document().paragraphs().next().expect("paragraph");
+    assert_eq!(paragraph.text(), "U S B C");
+    let format_at = |offset: usize| {
+        paragraph
+            .runs()
+            .iter()
+            .find(|run| run.range.contains(&offset))
+            .map(|run| run.format.clone())
+            .expect("run")
+    };
+    assert_eq!(format_at(0).underline, Some(true));
+    assert_eq!(
+        format_at(2).vertical,
+        Some(libertum_model::VerticalAlign::Superscript)
+    );
+    assert_eq!(
+        format_at(4).vertical,
+        Some(libertum_model::VerticalAlign::Subscript)
+    );
+    assert_eq!(format_at(6).colour, Some([255, 0, 0, 255]));
+}
+
+#[test]
+fn other_inline_html_is_still_text() {
+    let markdown = Markdown::parse(
+        b"a <kbd>b</kbd> c
+",
+    )
+    .expect("parse");
+    let paragraph = markdown.document().paragraphs().next().expect("paragraph");
+    assert_eq!(paragraph.text(), "a <kbd>b</kbd> c");
+}

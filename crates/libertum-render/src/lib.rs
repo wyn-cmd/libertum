@@ -5,6 +5,7 @@ mod backend;
 mod glyphs;
 pub mod images;
 mod page_cache;
+pub mod pdf;
 mod renderer;
 
 #[cfg(feature = "gpu")]

@@ -11,7 +11,7 @@ use libertum_formats_common::media::media_from_bytes;
 use libertum_model::{
     Align, Block, BlockId, Borders, CharFormat, Document, InlineImage, ListItem, ListStyle,
     MAX_LIST_LEVEL, Media, ParaFormat, ParaProps, Paragraph, ParagraphStyle, Run, StyleId,
-    StyleSheet, Table, TableBorders, TableCell, TableRow,
+    StyleSheet, Table, TableBorders, TableCell, TableRow, VerticalAlign,
 };
 
 use crate::MarkdownError;
@@ -59,6 +59,12 @@ pub(crate) struct Hints {
     pub list_starts: HashMap<(u64, u8), usize>,
     pub links: HashMap<BlockId, ParaLinks>,
     pub code: HashMap<BlockId, CodeMeta>,
+    /// The title of an image, by the target it was written with. An image's title has no
+    /// place in the model, and an edited block must write it back.
+    pub image_titles: HashMap<String, String>,
+    /// The address of a link wrapped around an image, by the image's target. Such a link has
+    /// no text of its own, so it cannot be a [`LinkSpan`].
+    pub image_links: HashMap<String, String>,
 }
 
 /// The source of one top-level Markdown block, and the model blocks it produced.
@@ -474,6 +480,8 @@ impl Builder {
         let mut cx = InlineCx {
             warnings: &mut self.warnings,
             base_dir: self.base_dir.as_deref(),
+            image_titles: &mut self.hints.image_titles,
+            image_links: &mut self.hints.image_links,
         };
         inline_text(node, &CharFormat::default(), out, &mut cx);
     }
@@ -755,6 +763,8 @@ impl TextBuf {
 struct InlineCx<'a> {
     warnings: &'a mut Vec<String>,
     base_dir: Option<&'a Path>,
+    image_titles: &'a mut HashMap<String, String>,
+    image_links: &'a mut HashMap<String, String>,
 }
 
 impl InlineCx<'_> {
@@ -851,41 +861,138 @@ fn plain_text<'a>(node: &'a AstNode<'a>, out: &mut String) {
     }
 }
 
+/// Inline HTML that Markdown has no syntax for, read back as formatting. Anything else
+/// written as raw HTML is still shown as text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HtmlKind {
+    Underline,
+    Superscript,
+    Subscript,
+    /// The colour from `<span style="color:#rrggbb">`.
+    Colour([u8; 4]),
+}
+
+/// Reads `<u>`, `<sup>`, `<sub>`, `<span style="color:#rrggbb">` and their closing tags.
+/// `true` marks a closing tag, which carries no attributes.
+fn html_tag(literal: &str) -> Option<(bool, HtmlKind)> {
+    let tag = literal.trim();
+    let (closing, rest) = match tag.strip_prefix("</") {
+        Some(rest) => (true, rest),
+        None => (false, tag.strip_prefix('<')?),
+    };
+    let rest = rest.strip_suffix('>')?.trim();
+    let name = rest
+        .split(|character: char| character.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = match name.as_str() {
+        "u" => HtmlKind::Underline,
+        "sup" => HtmlKind::Superscript,
+        "sub" => HtmlKind::Subscript,
+        // `</span>` has no attributes: the stack decides which colour it closes.
+        "span" if closing => HtmlKind::Colour([0, 0, 0, 255]),
+        "span" => HtmlKind::Colour(style_colour(rest)?),
+        _ => return None,
+    };
+    Some((closing, kind))
+}
+
+/// The colour in a `style` attribute (`color:#rrggbb` or `color: #rgb`), or `None` when the
+/// span is there for something else. A named colour is left as raw HTML rather than guessed.
+fn style_colour(attributes: &str) -> Option<[u8; 4]> {
+    let lower = attributes.to_ascii_lowercase();
+    let start = lower.find("color")?;
+    let rest = attributes.get(start + "color".len()..)?;
+    let rest = rest.trim_start().strip_prefix(':')?;
+    let value: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|character| *character == '#' || character.is_ascii_hexdigit())
+        .collect();
+    parse_hex_colour(&value)
+}
+
+fn parse_hex_colour(value: &str) -> Option<[u8; 4]> {
+    let hex = value.trim().trim_start_matches('#');
+    let byte = |pair: &str| u8::from_str_radix(pair, 16).ok();
+    match hex.len() {
+        3 => {
+            let mut rgba = [255u8; 4];
+            for (index, character) in hex.chars().enumerate() {
+                rgba[index] = (character.to_digit(16)? as u8) * 17;
+            }
+            Some(rgba)
+        }
+        6 => Some([
+            byte(hex.get(0..2)?)?,
+            byte(hex.get(2..4)?)?,
+            byte(hex.get(4..6)?)?,
+            255,
+        ]),
+        _ => None,
+    }
+}
+
+/// Whether two HTML tags are of the same kind (a colour closer need not carry its colour).
+fn same_tag(one: HtmlKind, other: HtmlKind) -> bool {
+    std::mem::discriminant(&one) == std::mem::discriminant(&other)
+}
+
+/// The formatting in force with `stack` applied on top of `base`.
+fn apply_html(base: &CharFormat, stack: &[HtmlKind]) -> CharFormat {
+    let mut format = base.clone();
+    for kind in stack {
+        match kind {
+            HtmlKind::Underline => format.underline = Some(true),
+            HtmlKind::Superscript => format.vertical = Some(VerticalAlign::Superscript),
+            HtmlKind::Subscript => format.vertical = Some(VerticalAlign::Subscript),
+            HtmlKind::Colour(colour) => format.colour = Some(*colour),
+        }
+    }
+    format
+}
+
 /// Maps inline Markdown to text and direct character formatting. An image that can be loaded
 /// becomes an anchored image; one that cannot is flattened to its alt text with a warning.
 /// A link is shown as its text, and its address is remembered for writing the paragraph back.
+/// The inline HTML that `write.rs` emits for underline, superscript, subscript and colour is
+/// read back as that formatting; other raw HTML stays text.
 fn inline_text<'a>(
     node: &'a AstNode<'a>,
     format: &CharFormat,
     out: &mut TextBuf,
     cx: &mut InlineCx<'_>,
 ) {
+    // Open HTML tags, innermost last. `current` is always `format` with the stack applied.
+    let mut stack: Vec<HtmlKind> = Vec::new();
+    let mut current = format.clone();
     for child in node.children() {
         let value = child.data().value.clone();
         match value {
-            NodeValue::Text(text) => out.push(&text, format),
-            NodeValue::SoftBreak => out.push(" ", format),
-            NodeValue::LineBreak => out.push(" ", format),
+            NodeValue::Text(text) => out.push(&text, &current),
+            NodeValue::SoftBreak => out.push(" ", &current),
+            NodeValue::LineBreak => out.push(" ", &current),
             NodeValue::Code(code) => {
-                let code_format = format.overlay(&CharFormat {
+                let code_format = current.overlay(&CharFormat {
                     family: Some(Arc::from("Courier New")),
                     ..CharFormat::default()
                 });
                 out.push(&code.literal, &code_format);
             }
             NodeValue::Strong => {
-                let bold = format.overlay(&CharFormat::bold());
+                let bold = current.overlay(&CharFormat::bold());
                 inline_text(child, &bold, out, cx);
             }
             NodeValue::Emph => {
-                let italic = format.overlay(&CharFormat {
+                let italic = current.overlay(&CharFormat {
                     italic: Some(true),
                     ..CharFormat::default()
                 });
                 inline_text(child, &italic, out, cx);
             }
             NodeValue::Strikethrough => {
-                let strike = format.overlay(&CharFormat {
+                let strike = current.overlay(&CharFormat {
                     strikethrough: Some(true),
                     ..CharFormat::default()
                 });
@@ -896,8 +1003,9 @@ fn inline_text<'a>(
                     "a hyperlink is shown as its text; its address is kept when the paragraph is saved as Markdown"
                         .to_owned(),
                 );
+                let images_before = out.images.len();
                 let start = out.text.len();
-                inline_text(child, format, out, cx);
+                inline_text(child, &current, out, cx);
                 let end = out.text.len();
                 if end > start {
                     out.links.push(LinkSpan {
@@ -906,11 +1014,20 @@ fn inline_text<'a>(
                         title: link.title.clone(),
                     });
                 }
+                // A link around an image alone adds no text, so it has no `LinkSpan`; keep
+                // the address on the image instead, by its target.
+                for image in &out.images[images_before..] {
+                    if !image.name.is_empty() {
+                        cx.image_links
+                            .entry(image.name.clone())
+                            .or_insert_with(|| link.url.clone());
+                    }
+                }
             }
             NodeValue::Image(link) => {
                 let Some(base_dir) = cx.base_dir else {
                     cx.warn("an image was flattened to its alt text".to_owned());
-                    inline_text(child, format, out, cx);
+                    inline_text(child, &current, out, cx);
                     continue;
                 };
                 match load_image(base_dir, &link.url) {
@@ -922,22 +1039,42 @@ fn inline_text<'a>(
                         image.alt = alt;
                         image.name = link.url.clone();
                         out.images.push(image);
+                        if !link.title.is_empty() {
+                            cx.image_titles
+                                .entry(link.url.clone())
+                                .or_insert_with(|| link.title.clone());
+                        }
                     }
                     Err(reason) => {
                         let shown: String = link.url.chars().take(80).collect();
                         cx.warn(format!(
                             "the image \"{shown}\" was not loaded ({reason}); its alt text is shown instead"
                         ));
-                        inline_text(child, format, out, cx);
+                        inline_text(child, &current, out, cx);
                     }
                 }
             }
-            NodeValue::HtmlInline(html) => out.push(&html, format),
+            NodeValue::HtmlInline(html) => match html_tag(&html) {
+                Some((false, kind)) => {
+                    stack.push(kind);
+                    current = apply_html(format, &stack);
+                }
+                Some((true, kind)) => {
+                    if let Some(position) = stack.iter().rposition(|open| same_tag(*open, kind)) {
+                        stack.truncate(position);
+                        current = apply_html(format, &stack);
+                    } else {
+                        // A closing tag with nothing open is not formatting: show it.
+                        out.push(&html, &current);
+                    }
+                }
+                None => out.push(&html, &current),
+            },
             NodeValue::FootnoteReference(reference) => {
-                out.push(&format!("[^{}]", reference.name), format);
+                out.push(&format!("[^{}]", reference.name), &current);
             }
-            NodeValue::Math(math) => out.push(&math.literal, format),
-            _ => inline_text(child, format, out, cx),
+            NodeValue::Math(math) => out.push(&math.literal, &current),
+            _ => inline_text(child, &current, out, cx),
         }
     }
 }

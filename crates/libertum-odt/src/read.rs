@@ -388,6 +388,11 @@ fn build_section(
     let Some(master) = styles.master(master_name) else {
         return Ok(section);
     };
+    // A watermark is a shape anchored in a header; take it out so its text is not read as
+    // header text.
+    let (master, watermark) = style::split_watermark(master);
+    let master = &master;
+    section.watermark = watermark;
 
     let header = style::read_header_footer(master.header.as_ref(), styles, warnings, PART_CONTENT)?;
     let footer = style::read_header_footer(master.footer.as_ref(), styles, warnings, PART_CONTENT)?;

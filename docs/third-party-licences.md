@@ -28,3 +28,11 @@ Lucide icons (ISC), with the licence in `crates/libertum-app/assets/icons/`.
 AGENTS.md is satisfied. They were added to the workspace for `libertum-native` and the serde derives on
 `libertum-model`. The ZIP reader and writer was already a dependency of the DOCX and ODT crates (`zip`, MIT).
 No embedded data files were added, so the notices this application must ship are unchanged.
+
+## PDF export (2026-11-13)
+
+`printpdf` 0.12.9 and `lopdf` 0.44 are MIT. printpdf brings `allsorts`/`allsorts-azul`, `time` and
+`image` transitively; those are MIT or Apache-2.0. No font or ICC data is shipped: fonts come from
+the user's system and are embedded (subset) in the exported PDF only, and the sRGB profile used
+for PDF/A's output intent is generated in `crates/libertum-render/src/pdf.rs`, so there is no
+third-party profile licence to carry.
