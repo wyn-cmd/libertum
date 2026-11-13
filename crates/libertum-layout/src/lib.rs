@@ -20,7 +20,7 @@ pub use geometry::{Margins, PageGeometry};
 pub use paginate::{
     CaretRect, CellDraw, CellSnapshot, Decoration, FlowPos, HitResult, INK_OVERHANG,
     LEADER_PITCH_PT, LayoutState, PageItem, PageLayout, PageNote, PaginationStats, ParaSlice,
-    RowSnapshot, SelectionRect, TableDraw, TableSnapshot, WATERMARK_COLOUR, WatermarkDraw,
+    RowSnapshot, SelectionRect, TableDraw, TableSnapshot, TocLink, WATERMARK_COLOUR, WatermarkDraw,
     column_layout, table_snapshots,
 };
 pub use spike::{ImageSnapshot, ParagraphSnapshot, SpanStyle, SpikeParagraph};

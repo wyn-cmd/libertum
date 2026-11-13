@@ -8,7 +8,11 @@ use libertum_render::{PageBackend, PageOutput, PageRenderer};
 use vello::wgpu::Backend;
 
 fn ink(data: &[u8]) -> usize {
-    data.chunks_exact(4).filter(|p| p[0] < 200).count()
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[0] < 200)
+        .count()
 }
 
 #[test]
@@ -37,8 +41,10 @@ fn gpu_matches_cpu_within_tolerance() {
         assert_eq!((c.width(), c.height()), (g.width, g.height));
         let mad = c
             .data()
-            .chunks_exact(4)
-            .zip(g.data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(g.data.as_chunks::<4>().0.iter())
             .map(|(a, b)| (0..3).map(|i| u64::from(a[i].abs_diff(b[i]))).sum::<u64>())
             .sum::<u64>() as f64
             / (c.data().len() as f64 / 4.0 * 3.0);

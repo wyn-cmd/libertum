@@ -8,6 +8,7 @@
 //! Output (through `tracing`, at INFO): one line per second while scrolling, a WARN for any
 //! frame longer than 33 ms (the PLAN §2 hard limit), and a summary on exit ([`summary`]).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -18,8 +19,25 @@ static RECORDER: OnceLock<Mutex<Recorder>> = OnceLock::new();
 /// A frame longer than this breaks the PLAN §2 "no frames > 33 ms" budget.
 const SLOW_FRAME_MS: f64 = 33.0;
 
+/// One thing that happened, kept in a short ring so a slow frame can be explained afterwards.
+struct Ev {
+    /// When it ended.
+    at: Instant,
+    /// `update`, `view` and `draw` run on the UI thread; `raster` runs on the render worker;
+    /// `stall` is the watchdog thread noticing that the whole process was not scheduled.
+    kind: &'static str,
+    ms: f64,
+    detail: String,
+}
+
+/// How many events the ring keeps (a few seconds of a busy scroll).
+const EVENT_CAP: usize = 800;
+/// A slow frame report shows events from this long before the previous frame's start.
+const LEAD_MS: f64 = 25.0;
+
 #[derive(Default)]
 struct Recorder {
+    events: VecDeque<Ev>,
     last_frame: Option<Instant>,
     prev_scrolling: bool,
     intervals: Vec<f64>,
@@ -38,6 +56,8 @@ struct Recorder {
     window_intervals: Vec<f64>,
     window_draw: Vec<f64>,
     window_update: Vec<f64>,
+    /// How many `App::update` calls each kind of message caused.
+    messages: std::collections::HashMap<String, u64>,
 }
 
 /// Reads `LIBERTUM_PERF`. Call once at start-up.
@@ -46,6 +66,7 @@ pub fn init() {
     ENABLED.store(on, Ordering::Relaxed);
     if on {
         let _ = RECORDER.set(Mutex::new(Recorder::default()));
+        start_watchdog();
         tracing::info!("LIBERTUM_PERF=1: frame-time recording on");
     }
 }
@@ -67,6 +88,89 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
+/// Keeps a timed event for the slow-frame report. `ms` is how long it took, ending now.
+pub fn event(kind: &'static str, ms: f64, detail: impl FnOnce() -> String) {
+    with(|r| {
+        if r.events.len() >= EVENT_CAP {
+            r.events.pop_front();
+        }
+        r.events.push_back(Ev {
+            at: Instant::now(),
+            kind,
+            ms,
+            detail: detail(),
+        });
+    });
+}
+
+/// A thread that asks to be woken every 4 ms and notes when it was not woken for 25 ms or
+/// more. If a slow frame coincides with one of these, the process as a whole was starved
+/// (another program, power management, a driver), not just the UI thread.
+fn start_watchdog() {
+    let spawned = std::thread::Builder::new()
+        .name("libertum-watchdog".into())
+        .spawn(|| {
+            loop {
+                let asked = Instant::now();
+                std::thread::sleep(Duration::from_millis(4));
+                let took = ms(asked.elapsed());
+                if took >= 25.0 {
+                    event("stall", took, || "process not scheduled".to_owned());
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start the stall watchdog");
+    }
+}
+
+/// Describes the events around a slow frame: what the UI thread did between the previous
+/// frame and this one, and how much of the interval nothing accounts for.
+fn slow_frame_report(r: &Recorder, last: Instant, now: Instant, dt: f64) -> String {
+    let from = last.checked_sub(Duration::from_secs_f64(LEAD_MS / 1000.0));
+    let mut out = format!(
+        "slow frame: {dt:.1} ms since the previous frame began
+"
+    );
+    let (mut ui, mut stalled) = (0.0, 0.0_f64);
+    for e in r
+        .events
+        .iter()
+        .filter(|e| from.is_none_or(|from| e.at >= from))
+    {
+        let end = ms(e.at.saturating_duration_since(last));
+        let before = e.at < last && ms(last.saturating_duration_since(e.at)) > 0.0;
+        let offset = if before {
+            -ms(last.saturating_duration_since(e.at))
+        } else {
+            end
+        };
+        let in_interval = e.at >= last && e.at <= now;
+        if in_interval {
+            match e.kind {
+                "update" | "view" | "draw" => ui += e.ms,
+                "stall" => stalled = stalled.max(e.ms),
+                _ => {}
+            }
+        }
+        out += &format!(
+            "  {offset:+8.1} ms  {:<6} {:>7.2} ms  {}
+",
+            e.kind, e.ms, e.detail
+        );
+    }
+    out += &format!(
+        "  UI thread work in the interval: {ui:.1} ms; unaccounted: {:.1} ms{}",
+        (dt - ui).max(0.0),
+        if stalled > 0.0 {
+            format!("; the watchdog reports the process unscheduled for {stalled:.0} ms")
+        } else {
+            String::new()
+        }
+    );
+    out
+}
+
 /// Marks the start of a frame. `scrolling` is true when the scroll offset changed since the
 /// previous frame.
 pub fn frame(scrolling: bool) {
@@ -81,6 +185,8 @@ pub fn frame(scrolling: bool) {
             r.window_intervals.push(dt);
             if dt > SLOW_FRAME_MS {
                 tracing::warn!(interval_ms = format!("{dt:.1}"), "slow frame");
+                let report = slow_frame_report(r, last, now, dt);
+                tracing::warn!("{report}");
             }
         }
         if scrolling {
@@ -156,6 +262,12 @@ pub fn update_done(elapsed: Duration) {
     });
 }
 
+/// Counts one message by its kind (the variant name), for the summary's busiest list. Only
+/// called while recording, because it formats the message.
+pub fn message(kind: String) {
+    with(|r| *r.messages.entry(kind).or_insert(0) += 1);
+}
+
 /// Records one page rasterisation on the render worker.
 pub fn render_done(elapsed: Duration) {
     with(|r| r.render_ms.push(ms(elapsed)));
@@ -211,7 +323,19 @@ pub fn summary() -> Option<String> {
             "  {}\n",
             stats("edit sync (model + layout)", &r.edit_sync_ms)
         );
-        out += &format!("  {}", stats("keystroke to screen", &r.edit_to_screen_ms));
+        out += &format!(
+            "  {}
+",
+            stats("keystroke to screen", &r.edit_to_screen_ms)
+        );
+        let mut kinds: Vec<_> = r.messages.iter().collect();
+        kinds.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let busiest: Vec<String> = kinds
+            .iter()
+            .take(6)
+            .map(|(kind, count)| format!("{kind} x{count}"))
+            .collect();
+        out += &format!("  busiest messages: {}", busiest.join(", "));
         out
     })
 }

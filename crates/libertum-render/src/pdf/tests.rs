@@ -157,3 +157,54 @@ fn a_watermark_is_written_on_every_page_in_both_variants() {
         assert!(bytes.len() > plain.len(), "the watermark adds content");
     }
 }
+
+#[test]
+fn headings_become_bookmarks_and_the_contents_list_does_not() {
+    let mut document = Document::new();
+    // The contents title is heading-styled and is followed by one generated entry per chapter.
+    let title = document.alloc_id();
+    let mut contents = Paragraph::new(title, "Contents");
+    contents.props.outline_level = Some(1);
+    document.append_blocks(vec![Block::Paragraph(contents)]);
+    let mut chapters = Vec::new();
+    for text in ["Chapter One", "Chapter Two"] {
+        let id = document.alloc_id();
+        chapters.push(id);
+        let mut paragraph = Paragraph::new(id, text);
+        paragraph.props.outline_level = Some(1);
+        document.append_blocks(vec![Block::Paragraph(paragraph)]);
+    }
+    for (index, target) in chapters.iter().enumerate() {
+        let id = document.alloc_id();
+        let mut entry = Paragraph::new(id, format!("Chapter {index}"));
+        entry.props.toc_target = Some(*target);
+        document.append_blocks(vec![Block::Paragraph(entry)]);
+    }
+    let bytes = export(&document, false, "Outline").expect("PDF export");
+    let parsed = LoDocument::load_mem(&bytes).expect("parse");
+    let catalog = parsed.catalog().expect("catalog");
+    assert!(catalog.get(b"Outlines").is_ok(), "an outline is written");
+    // Two chapters, and no bookmark for the "Contents" title.
+    let titles = parsed
+        .objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .filter(|dict| dict.has(b"Title") && dict.has(b"Dest"))
+        .count();
+    assert_eq!(titles, 2, "one bookmark per chapter heading");
+    // Each generated entry is a link that jumps to a page.
+    // The annotations sit in each page's /Annots array.
+    let links = parsed
+        .get_pages()
+        .values()
+        .filter_map(|id| parsed.get_object(*id).and_then(Object::as_dict).ok())
+        .filter_map(|page| page.get(b"Annots").ok())
+        .filter_map(|annots| annots.as_array().ok())
+        .flatten()
+        .filter_map(|annot| annot.as_dict().ok())
+        .filter(|dict| {
+            dict.get(b"Subtype").ok().and_then(|s| s.as_name().ok()) == Some(b"Link".as_slice())
+        })
+        .count();
+    assert_eq!(links, 2, "one link per contents entry");
+}

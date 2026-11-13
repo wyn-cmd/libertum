@@ -100,18 +100,18 @@ impl History {
         if entry.forward.is_empty() {
             return;
         }
-        if entry.kind == EditKind::Typing {
-            if let Some(run) = self.typing {
-                let within = now.saturating_duration_since(run.at) <= TYPING_PAUSE;
-                if within {
-                    if let Some(updated) = self.try_coalesce(run, &entry) {
-                        self.typing = Some(updated);
-                        return;
-                    }
-                    if let Some(updated) = self.try_coalesce_section(run, &entry) {
-                        self.typing = Some(updated);
-                        return;
-                    }
+        if entry.kind == EditKind::Typing
+            && let Some(run) = self.typing
+        {
+            let within = now.saturating_duration_since(run.at) <= TYPING_PAUSE;
+            if within {
+                if let Some(updated) = self.try_coalesce(run, &entry) {
+                    self.typing = Some(updated);
+                    return;
+                }
+                if let Some(updated) = self.try_coalesce_section(run, &entry) {
+                    self.typing = Some(updated);
+                    return;
                 }
             }
         }
@@ -207,43 +207,43 @@ impl History {
             last.inverse.as_mut_slice(),
             entry.forward.as_slice(),
             entry.inverse.as_slice(),
-        ) {
-            if b0 == b1 && b0 == b2 {
-                if t2.chars().any(char::is_whitespace) || t2.contains(['\n', '\r']) {
-                    return None;
-                }
-                let backspace = r2.end == r0.start;
-                let forward = r2.start == r0.end;
-                // The undo re-inserts the merged text with the formatting of both parts.
-                let shift = |runs: &[Run], by: usize| -> Vec<Run> {
-                    runs.iter()
-                        .map(|r| Run {
-                            range: r.range.start + by..r.range.end + by,
-                            format: r.format.clone(),
-                        })
-                        .collect()
-                };
-                if backspace {
-                    *r0 = r2.start..r0.end;
-                    *o1 = r0.start;
-                    let mut runs = f2.clone();
-                    runs.extend(shift(f1, t2.len()));
-                    *f1 = runs;
-                    t1.insert_str(0, t2);
-                } else if forward {
-                    *r0 = r0.start..r2.end;
-                    *o1 = r0.start;
-                    let extra = shift(f2, t1.len());
-                    f1.extend(extra);
-                    t1.push_str(t2);
-                } else {
-                    return None;
-                }
-                return Some(TypingRun {
-                    at: run.at,
-                    last_char_whitespace: false,
-                });
+        ) && b0 == b1
+            && b0 == b2
+        {
+            if t2.chars().any(char::is_whitespace) || t2.contains(['\n', '\r']) {
+                return None;
             }
+            let backspace = r2.end == r0.start;
+            let forward = r2.start == r0.end;
+            // The undo re-inserts the merged text with the formatting of both parts.
+            let shift = |runs: &[Run], by: usize| -> Vec<Run> {
+                runs.iter()
+                    .map(|r| Run {
+                        range: r.range.start + by..r.range.end + by,
+                        format: r.format.clone(),
+                    })
+                    .collect()
+            };
+            if backspace {
+                *r0 = r2.start..r0.end;
+                *o1 = r0.start;
+                let mut runs = f2.clone();
+                runs.extend(shift(f1, t2.len()));
+                *f1 = runs;
+                t1.insert_str(0, t2);
+            } else if forward {
+                *r0 = r0.start..r2.end;
+                *o1 = r0.start;
+                let extra = shift(f2, t1.len());
+                f1.extend(extra);
+                t1.push_str(t2);
+            } else {
+                return None;
+            }
+            return Some(TypingRun {
+                at: run.at,
+                last_char_whitespace: false,
+            });
         }
         None
     }

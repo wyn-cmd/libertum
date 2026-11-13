@@ -12,7 +12,7 @@
 # Usage (from the repository root, after `cargo build --release -p libertum-app`):
 #
 #   packaging/linux/build-appimage.sh
-#   packaging/linux/build-appimage.sh --version 0.1.1 --binary target/x86_64-unknown-linux-gnu/release/libertum --out dist
+#   packaging/linux/build-appimage.sh --version 0.1.2 --binary target/x86_64-unknown-linux-gnu/release/libertum --out dist
 #   packaging/linux/build-appimage.sh --linuxdeploy /tmp/linuxdeploy --appimagetool /tmp/appimagetool
 #
 # Tools and network: set APPIMAGE_TOOLS_DIR to reuse downloaded tools between runs.

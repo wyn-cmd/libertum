@@ -9,7 +9,7 @@
 # Usage (from the repository root, after `cargo build --release -p libertum-app`):
 #
 #   packaging/macos/build-app.sh
-#   packaging/macos/build-app.sh --version 0.1.1 --binary target/aarch64-apple-darwin/release/libertum --out dist
+#   packaging/macos/build-app.sh --version 0.1.2 --binary target/aarch64-apple-darwin/release/libertum --out dist
 #
 # Good to run only on macOS.
 set -euo pipefail

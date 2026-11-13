@@ -28,6 +28,7 @@ pub(crate) struct GlyphKey {
     coords_hash: u64,
     embolden: bool,
     skew: i8,
+    smooth: bool,
 }
 
 pub(crate) struct GlyphRequest<'a> {
@@ -40,6 +41,8 @@ pub(crate) struct GlyphRequest<'a> {
     pub coords: &'a [i16],
     pub embolden: bool,
     pub skew_degrees: Option<f32>,
+    /// Antialiased edges; false thresholds coverage to hard pixels.
+    pub smooth: bool,
 }
 
 struct Entry {
@@ -94,6 +97,7 @@ impl GlyphCache {
             coords_hash: h.finish(),
             embolden: req.embolden,
             skew: req.skew_degrees.map_or(0, |s| s as i8),
+            smooth: req.smooth,
         };
         if let Some(e) = self.map.get_mut(&key) {
             e.tick = self.tick;
@@ -148,12 +152,18 @@ impl GlyphCache {
         if img.content != Content::Mask {
             return None;
         }
+        let mut alpha = img.data;
+        if !req.smooth {
+            for a in &mut alpha {
+                *a = if *a >= 128 { 255 } else { 0 };
+            }
+        }
         Some(GlyphBitmap {
             left: img.placement.left,
             top: img.placement.top,
             width: img.placement.width,
             height: img.placement.height,
-            alpha: img.data,
+            alpha,
         })
     }
 

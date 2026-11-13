@@ -66,20 +66,20 @@ impl Package {
     /// Word normally uses `word/footnotes.xml` and `word/endnotes.xml`, but the name is only a
     /// convention; reading and writing it back by relationship keeps unusual packages intact.
     pub fn related_part(&self, type_suffix: &str, default: &str) -> Option<String> {
-        if let Some(rels) = self.text("word/_rels/document.xml.rels") {
-            if let Ok(root) = crate::xml::parse(&rels, "word/_rels/document.xml.rels") {
-                for relationship in root.children_named("Relationship") {
-                    let matches = relationship
-                        .attr("Type")
-                        .is_some_and(|relationship_type| relationship_type.ends_with(type_suffix));
-                    if !matches {
-                        continue;
-                    }
-                    if let Some(target) = relationship.attr("Target") {
-                        let part = resolve_target(target);
-                        if self.contains(&part) {
-                            return Some(part);
-                        }
+        if let Some(rels) = self.text("word/_rels/document.xml.rels")
+            && let Ok(root) = crate::xml::parse(&rels, "word/_rels/document.xml.rels")
+        {
+            for relationship in root.children_named("Relationship") {
+                let matches = relationship
+                    .attr("Type")
+                    .is_some_and(|relationship_type| relationship_type.ends_with(type_suffix));
+                if !matches {
+                    continue;
+                }
+                if let Some(target) = relationship.attr("Target") {
+                    let part = resolve_target(target);
+                    if self.contains(&part) {
+                        return Some(part);
                     }
                 }
             }

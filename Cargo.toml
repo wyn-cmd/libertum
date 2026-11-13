@@ -3,9 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "UNLICENSED"
 repository = ""
 
@@ -19,6 +19,7 @@ libertum-odt = { path = "crates/libertum-odt" }
 libertum-rtf = { path = "crates/libertum-rtf" }
 libertum-formats-common = { path = "crates/libertum-formats-common" }
 libertum-native = { path = "crates/libertum-native" }
+libertum-library = { path = "crates/libertum-library" }
 libertum-markdown = { path = "crates/libertum-markdown" }
 libertum-editor = { path = "crates/libertum-editor" }
 libertum-export = { path = "crates/libertum-export" }

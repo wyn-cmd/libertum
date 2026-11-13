@@ -135,15 +135,17 @@ impl HeadersFooters {
         first_in_section: bool,
     ) -> Option<(HfVariant, &HeaderFooter)> {
         let default = self.default.as_ref()?;
-        if self.different_first && first_in_section {
-            if let Some(first) = self.first.as_ref() {
-                return Some((HfVariant::First, first));
-            }
+        if self.different_first
+            && first_in_section
+            && let Some(first) = self.first.as_ref()
+        {
+            return Some((HfVariant::First, first));
         }
-        if self.different_even_odd && page_index % 2 == 1 {
-            if let Some(even) = self.even.as_ref() {
-                return Some((HfVariant::Even, even));
-            }
+        if self.different_even_odd
+            && page_index % 2 == 1
+            && let Some(even) = self.even.as_ref()
+        {
+            return Some((HfVariant::Even, even));
         }
         Some((HfVariant::Default, default))
     }

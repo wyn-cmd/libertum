@@ -123,6 +123,7 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 | `LIBERTUM_PERF=1` | Log frame and update timings, and print a summary on exit |
 | `LIBERTUM_AUTOSCROLL=1` | Scroll page 1 to the last page, then exit (combine with `LIBERTUM_PERF`). `LIBERTUM_AUTOSCROLL_SPEED` sets px/s (default 4000) |
 | `LIBERTUM_THEME=light\|dark` | Force the theme |
+| `LIBERTUM_LAYOUT_THREADS=<n>` | Threads that shape paragraphs ahead of pagination (0 or unset: one per core, up to 8; 1: none), for measuring |
 | `LIBERTUM_INSPECTOR=format-style\|format-layout\|format-more\|document\|section` | Open a given inspector pane at start |
 | `LIBERTUM_BOOKLET=1` | Start in the booklet (two-page spread) view |
 | `LIBERTUM_THUMBNAILS=1` | Start with the page thumbnails column shown |
@@ -133,6 +134,8 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_AO3_PICK=<n>` | With `LIBERTUM_AO3=1`, open that chapter's HTML window at start |
 | `LIBERTUM_TAGS=1` | Open the AO3 tag vocabulary window at start (for screenshots) |
 | `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
+| `LIBERTUM_LIBRARY=<folder>` | Open the Library window on that folder at start (for screenshots) |
+| `LIBERTUM_HISTORY=<file>` | Open that document's version history window at start (for screenshots) |
 | `LIBERTUM_ZOOM=<percent>\|fit` | Initial zoom |
 | `LIBERTUM_UNITS=cm\|in` | Measurement units |
 | `LIBERTUM_FILTER=linear` | Linear instead of nearest filtering for page images |

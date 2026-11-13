@@ -334,6 +334,134 @@ fn partial_pagination_then_edit_beyond_prefix_is_cheap() {
     assert_eq!(s.pages(), fresh.pages());
 }
 
+/// Every paragraph taller (more space before): the deferred path drops the pages and the
+/// later passes must rebuild exactly what a fresh layout (and `replace_paragraphs`) gives.
+#[test]
+fn deferred_bulk_replace_matches_a_fresh_layout_and_the_immediate_path() {
+    let mut deferred = state(40);
+    deferred.paginate_all();
+    let mut immediate = state(40);
+    immediate.paginate_all();
+    let items: Vec<(usize, ParagraphSnapshot)> = deferred
+        .paragraphs()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut q = p.clone();
+            q.space_before_pt += 6.0;
+            q.version += 1;
+            (i, q)
+        })
+        .collect();
+    immediate.replace_paragraphs(items.clone());
+    immediate.paginate_all();
+
+    let pages_before = deferred.page_count();
+    assert!(deferred.replace_paragraphs_deferred(items));
+    assert!(!deferred.is_complete());
+    assert!(
+        deferred.page_count() < pages_before,
+        "pages were not dropped"
+    );
+    deferred.paginate_until(3);
+    assert!(deferred.page_count() >= 3);
+    assert!(!deferred.is_complete());
+    deferred.paginate_all();
+    assert!(deferred.is_complete());
+
+    let mut fresh = LayoutState::new(
+        PageGeometry::a4(),
+        deferred.paragraphs().to_vec(),
+        LayoutOptions::default(),
+    );
+    fresh.paginate_all();
+    assert_eq!(deferred.pages(), fresh.pages());
+    assert_eq!(deferred.pages(), immediate.pages());
+}
+
+/// Changes beyond the paginated prefix need no pass at all.
+#[test]
+fn deferred_replace_beyond_the_paginated_prefix_drops_nothing() {
+    let mut s = state(40);
+    s.paginate_until(2);
+    let last = s.paragraphs().len() - 1;
+    let mut q = s.paragraphs()[last].clone();
+    q.space_before_pt += 6.0;
+    q.version += 1;
+    let pages = s.page_count();
+    assert!(!s.replace_paragraphs_deferred(vec![(last, q)]));
+    assert_eq!(s.page_count(), pages);
+    s.paginate_all();
+    let mut fresh = LayoutState::new(
+        PageGeometry::a4(),
+        s.paragraphs().to_vec(),
+        LayoutOptions::default(),
+    );
+    fresh.paginate_all();
+    assert_eq!(s.pages(), fresh.pages());
+}
+
+/// Shaping paragraphs ahead on several threads must give the very same pages as one thread.
+#[test]
+fn parallel_shaping_gives_the_same_pages_as_one_thread() {
+    let build = |threads: usize| {
+        let mut s = LayoutState::new(
+            PageGeometry::a4(),
+            generate_document(80, 9),
+            LayoutOptions {
+                threads,
+                ..LayoutOptions::default()
+            },
+        );
+        s.paginate_all();
+        s
+    };
+    let serial = build(1);
+    let parallel = build(4);
+    assert!(serial.is_complete() && parallel.is_complete());
+    assert_eq!(serial.pages(), parallel.pages());
+    // The paragraph layouts that drawing reads are identical too.
+    for i in (0..serial.paragraphs().len()).step_by(37) {
+        let a = serial.paragraph_layout(i).expect("serial layout");
+        let b = parallel.paragraph_layout(i).expect("parallel layout");
+        assert_eq!(a.lines.len(), b.lines.len(), "paragraph {i}");
+        assert_eq!(a.height, b.height, "paragraph {i}");
+    }
+    // Both built every paragraph's layout the same number of times (nothing laid out twice).
+    assert_eq!(
+        serial.engine_stats().layouts_built,
+        parallel.engine_stats().layouts_built
+    );
+}
+
+/// The window of paragraphs shaped ahead is also used a few pages at a time, the way the
+/// background pass paginates.
+#[test]
+fn parallel_shaping_in_small_chunks_matches_a_fresh_layout() {
+    let mut s = LayoutState::new(
+        PageGeometry::a4(),
+        generate_document(60, 3),
+        LayoutOptions {
+            threads: 4,
+            ..LayoutOptions::default()
+        },
+    );
+    while !s.is_complete() {
+        let have = s.page_count();
+        s.paginate_until(have + 4);
+    }
+    let mut fresh = LayoutState::new(
+        PageGeometry::a4(),
+        s.paragraphs().to_vec(),
+        LayoutOptions {
+            threads: 1,
+            ..LayoutOptions::default()
+        },
+    );
+    fresh.paginate_all();
+    assert_eq!(s.pages(), fresh.pages());
+}
+
 #[test]
 fn page_hash_changes_only_for_edited_page() {
     let mut s = state(30);

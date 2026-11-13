@@ -18,7 +18,7 @@ use libertum_model::{Document, Section, Watermark};
 
 use crate::package::Package;
 use crate::write::{
-    CT_HEADER, R_NS, REL_NS, REL_TYPE, W_NS, XML_DECL, ensure_content_type, paper_points,
+    CT_FOOTER, CT_HEADER, R_NS, REL_NS, REL_TYPE, W_NS, XML_DECL, ensure_content_type, paper_points,
 };
 use crate::xml::{self, XmlNode, escape_attr};
 use crate::{Extras, SectionExtras};
@@ -93,26 +93,56 @@ fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// What a save must add to the package for the watermarks.
-#[derive(Default)]
+/// What a save must add to the package for headers, footers and watermarks.
+#[derive(Clone, Default)]
 pub(crate) struct Edits {
-    /// Header parts to write: their name and new text.
+    /// Header and footer parts to write: their name and new text.
     parts: Vec<(String, String)>,
-    /// Relationships from `document.xml` to header parts created here: id and part name.
+    /// Relationships from `document.xml` to parts created here: id and part name.
     relationships: Vec<(String, String)>,
+    /// `settings.xml` must turn on separate even-page headers.
+    even_and_odd: bool,
 }
 
 impl Edits {
+    pub fn has_part(&self, name: &str) -> bool {
+        self.parts.iter().any(|(part, _)| part == name)
+    }
+
+    pub fn add_part(&mut self, name: String, text: String) {
+        self.parts.push((name, text));
+    }
+
+    pub fn add_relationship(&mut self, id: String, part: String) {
+        self.relationships.push((id, part));
+    }
+
+    pub fn require_even_and_odd(&mut self) {
+        self.even_and_odd = true;
+    }
+
+    /// Adds the other edits after these, so they win where both write the same part.
+    pub fn then(mut self, later: Self) -> Self {
+        self.parts.extend(later.parts);
+        self.relationships.extend(later.relationships);
+        self.even_and_odd |= later.even_and_odd;
+        self
+    }
+
     /// Writes the edits into the package.
     pub fn apply(self, package: &mut Package) {
         for (name, text) in self.parts {
             if !package.contains(&name) {
-                ensure_content_type(package, &name, CT_HEADER);
+                let footer = name.starts_with("word/footer");
+                ensure_content_type(package, &name, if footer { CT_FOOTER } else { CT_HEADER });
             }
             package.set_text(&name, text);
         }
         for (id, part) in self.relationships {
             add_relationship(package, &id, &part);
+        }
+        if self.even_and_odd {
+            crate::headers::turn_on_even_and_odd(package);
         }
     }
 }
@@ -169,7 +199,7 @@ pub(crate) fn plan(document: &Document, extras: &mut Extras, origin: Option<&Pac
                 None => stripped,
             };
             if edited != text {
-                edits.parts.push((part, edited));
+                edits.add_part(part, edited);
             }
         }
 
@@ -191,8 +221,8 @@ pub(crate) fn plan(document: &Document, extras: &mut Extras, origin: Option<&Pac
             let part = unused_part_name(origin, &edits, created);
             let id = format!("rIdLbtWm{created}");
             let run = shape(watermark, section, index * 4 + created);
-            edits.parts.push((part.clone(), new_header(&run)));
-            edits.relationships.push((id.clone(), part));
+            edits.add_part(part.clone(), new_header(&run));
+            edits.add_relationship(id.clone(), part);
             extra.elements.insert(
                 0,
                 (
@@ -208,10 +238,7 @@ pub(crate) fn plan(document: &Document, extras: &mut Extras, origin: Option<&Pac
 fn unused_part_name(origin: Option<&Package>, edits: &Edits, from: usize) -> String {
     (from..)
         .map(|number| format!("word/header{number}.xml"))
-        .find(|name| {
-            !origin.is_some_and(|package| package.contains(name))
-                && !edits.parts.iter().any(|(part, _)| part == name)
-        })
+        .find(|name| !origin.is_some_and(|package| package.contains(name)) && !edits.has_part(name))
         .unwrap_or_else(|| "word/header-watermark.xml".to_owned())
 }
 
@@ -222,8 +249,13 @@ fn new_header(run: &str) -> String {
 fn add_relationship(package: &mut Package, id: &str, part: &str) {
     const NAME: &str = "word/_rels/document.xml.rels";
     let target = part.strip_prefix("word/").unwrap_or(part);
+    let kind = if part.starts_with("word/footer") {
+        "footer"
+    } else {
+        "header"
+    };
     let entry = format!(
-        "<Relationship Id=\"{id}\" Type=\"{REL_TYPE}/header\" Target=\"{target}\"/></Relationships>"
+        "<Relationship Id=\"{id}\" Type=\"{REL_TYPE}/{kind}\" Target=\"{target}\"/></Relationships>"
     );
     match package.text(NAME) {
         Some(text) if text.contains(&format!("Id=\"{id}\"")) => {}
@@ -301,25 +333,25 @@ fn inject(xml: &str, run: &str) -> String {
             .next()
             .is_some_and(|next| matches!(next, '>' | ' ' | '/'))
     });
-    if let Some((start, _)) = paragraph {
-        if let Some(close) = xml[start..].find('>').map(|offset| start + offset) {
-            if xml[..close].ends_with('/') {
-                // `<w:p/>`: open it up around the run.
-                let open = &xml[start..close - 1];
-                return format!("{}{}>{run}</w:p>{}", &xml[..start], open, &xml[close + 1..]);
-            }
-            let mut at = close + 1;
-            // Properties come first in a paragraph.
-            let rest = &xml[at..];
-            if rest.starts_with("<w:pPr/>") {
-                at += "<w:pPr/>".len();
-            } else if rest.starts_with("<w:pPr>") || rest.starts_with("<w:pPr ") {
-                if let Some(end) = rest.find("</w:pPr>") {
-                    at += end + "</w:pPr>".len();
-                }
-            }
-            return format!("{}{run}{}", &xml[..at], &xml[at..]);
+    if let Some((start, _)) = paragraph
+        && let Some(close) = xml[start..].find('>').map(|offset| start + offset)
+    {
+        if xml[..close].ends_with('/') {
+            // `<w:p/>`: open it up around the run.
+            let open = &xml[start..close - 1];
+            return format!("{}{}>{run}</w:p>{}", &xml[..start], open, &xml[close + 1..]);
         }
+        let mut at = close + 1;
+        // Properties come first in a paragraph.
+        let rest = &xml[at..];
+        if rest.starts_with("<w:pPr/>") {
+            at += "<w:pPr/>".len();
+        } else if (rest.starts_with("<w:pPr>") || rest.starts_with("<w:pPr "))
+            && let Some(end) = rest.find("</w:pPr>")
+        {
+            at += end + "</w:pPr>".len();
+        }
+        return format!("{}{run}{}", &xml[..at], &xml[at..]);
     }
     match xml.rfind("</w:hdr>") {
         Some(end) => format!("{}<w:p>{run}</w:p>{}", &xml[..end], &xml[end..]),

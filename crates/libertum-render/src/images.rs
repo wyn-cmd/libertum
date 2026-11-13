@@ -58,7 +58,7 @@ pub fn decode(media: &Media) -> Option<Decoded> {
 
 /// Straight RGBA to the premultiplied pixmap tiny-skia draws.
 fn to_pixmap(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Pixmap> {
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         let a = u32::from(px[3]);
         if a < 255 {
             for c in &mut px[..3] {

@@ -1185,10 +1185,10 @@ impl Editor {
                 return CharSummary::default();
             };
             let mut f = p.format_for_typing_at(caret.offset);
-            if let Some((at, patch)) = &self.pending {
-                if *at == caret {
-                    f = f.overlay(patch);
-                }
+            if let Some((at, patch)) = &self.pending
+                && *at == caret
+            {
+                f = f.overlay(patch);
             }
             return CharSummary::of(&resolved(p, &f));
         };
@@ -1810,12 +1810,11 @@ impl Editor {
     /// Typing, deleting or splitting inside a generated table-of-contents entry is refused.
     fn guard_caret(&self) -> Result<(), EditorError> {
         if self.has_selection() {
-            if let Some((start, end)) = self.ordered_selection() {
-                if let (Some(si), Some(ei)) =
+            if let Some((start, end)) = self.ordered_selection()
+                && let (Some(si), Some(ei)) =
                     (self.doc.index_of(start.block), self.doc.index_of(end.block))
-                {
-                    return self.guard_range(si, ei);
-                }
+            {
+                return self.guard_range(si, ei);
             }
             return Ok(());
         }
@@ -2722,8 +2721,8 @@ fn next_cell(table: &Table, row: usize, cell: usize) -> Option<(usize, usize)> {
             }
         }
     }
-    for r in row + 1..table.rows.len() {
-        for c in 0..table.rows[r].cells.len() {
+    for (r, row_ref) in table.rows.iter().enumerate().skip(row + 1) {
+        for c in 0..row_ref.cells.len() {
             if open(r, c) {
                 return Some((r, c));
             }

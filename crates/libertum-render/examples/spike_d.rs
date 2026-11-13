@@ -37,7 +37,12 @@ mod gpu {
         let (da, db) = (a.data(), b.data());
         let mut sum = 0u64;
         let mut big = 0u64;
-        for (pa, pb) in da.chunks_exact(4).zip(db.chunks_exact(4)) {
+        for (pa, pb) in da
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(db.as_chunks::<4>().0.iter())
+        {
             let mut mx = 0u8;
             for c in 0..3 {
                 let d = pa[c].abs_diff(pb[c]);
@@ -54,7 +59,12 @@ mod gpu {
 
     /// Ink-containing pixels (not near white), to compare coverage between the renderers.
     fn ink(a: &Pixmap) -> f64 {
-        a.data().chunks_exact(4).filter(|p| p[0] < 200).count() as f64
+        a.data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[0] < 200)
+            .count() as f64
     }
 
     pub fn run() {

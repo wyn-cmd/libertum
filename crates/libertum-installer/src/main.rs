@@ -156,10 +156,10 @@ fn install() -> ExitCode {
     }
     match run_script(&files) {
         Ok(()) => {
-            if ui::ask("Libertum is installed.\n\nOpen it now?") {
-                if let Some(exe) = installed_exe() {
-                    let _ = std::process::Command::new(exe).spawn();
-                }
+            if ui::ask("Libertum is installed.\n\nOpen it now?")
+                && let Some(exe) = installed_exe()
+            {
+                let _ = std::process::Command::new(exe).spawn();
             }
             ExitCode::SUCCESS
         }

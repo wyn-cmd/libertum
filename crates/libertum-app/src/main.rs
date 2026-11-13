@@ -54,6 +54,24 @@ fn select_renderer(_settings: &Settings) {
     // SAFETY: called at the start of `main`, before any other thread has been spawned.
     unsafe { std::env::set_var("ICED_BACKEND", backend) };
     tracing::info!(backend, "compositor selected");
+    limit_wgpu_backends();
+}
+
+/// Stops wgpu creating an OpenGL instance on Windows.
+///
+/// Iced 0.14 asks wgpu for every backend unless `WGPU_BACKEND` is set, and each backend loads
+/// its driver. Measured on the development laptop (500-page document at rest): all backends
+/// 279 MB, Vulkan and DX12 only 227 MB. OpenGL on Windows is only a last resort for GPUs
+/// without Vulkan or DX12; those fall through to the tiny-skia compositor. A value the user
+/// has already exported is respected, and other platforms are untouched.
+fn limit_wgpu_backends() {
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        let backends = "vulkan,dx12";
+        // SAFETY: called at the start of `main`, before any other thread has been spawned.
+        unsafe { std::env::set_var("WGPU_BACKEND", backends) };
+        tracing::info!(backends, "graphics backends limited");
+    }
 }
 
 /// The platform UI font.

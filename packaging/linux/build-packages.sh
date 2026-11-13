@@ -8,7 +8,7 @@
 # Usage (from the repository root, after `cargo build --release -p libertum-app`):
 #
 #   packaging/linux/build-packages.sh
-#   packaging/linux/build-packages.sh --version 0.1.1 --binary target/x86_64-unknown-linux-gnu/release/libertum
+#   packaging/linux/build-packages.sh --version 0.1.2 --binary target/x86_64-unknown-linux-gnu/release/libertum
 #   packaging/linux/build-packages.sh --format deb          # one of deb, rpm, all
 #
 # Requirements: dpkg-deb for the .deb, rpmbuild (the `rpm` package on Debian/Ubuntu)

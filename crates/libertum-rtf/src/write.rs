@@ -510,31 +510,31 @@ fn write_section_furniture(
             ctx,
         );
     }
-    if headers.different_first {
-        if let Some(header) = headers.first.as_ref().or(headers.default.as_ref()) {
-            write_header_group(
-                out,
-                "headerf",
-                header,
-                HfKind::Header,
-                HfVariant::First,
-                section_index,
-                ctx,
-            );
-        }
+    if headers.different_first
+        && let Some(header) = headers.first.as_ref().or(headers.default.as_ref())
+    {
+        write_header_group(
+            out,
+            "headerf",
+            header,
+            HfKind::Header,
+            HfVariant::First,
+            section_index,
+            ctx,
+        );
     }
-    if headers.different_even_odd {
-        if let Some(header) = headers.even.as_ref().or(headers.default.as_ref()) {
-            write_header_group(
-                out,
-                "headerl",
-                header,
-                HfKind::Header,
-                HfVariant::Even,
-                section_index,
-                ctx,
-            );
-        }
+    if headers.different_even_odd
+        && let Some(header) = headers.even.as_ref().or(headers.default.as_ref())
+    {
+        write_header_group(
+            out,
+            "headerl",
+            header,
+            HfKind::Header,
+            HfVariant::Even,
+            section_index,
+            ctx,
+        );
     }
     let footers = &section.footers;
     if let Some(footer) = &footers.default {
@@ -548,31 +548,31 @@ fn write_section_furniture(
             ctx,
         );
     }
-    if footers.different_first {
-        if let Some(footer) = footers.first.as_ref().or(footers.default.as_ref()) {
-            write_header_group(
-                out,
-                "footerf",
-                footer,
-                HfKind::Footer,
-                HfVariant::First,
-                section_index,
-                ctx,
-            );
-        }
+    if footers.different_first
+        && let Some(footer) = footers.first.as_ref().or(footers.default.as_ref())
+    {
+        write_header_group(
+            out,
+            "footerf",
+            footer,
+            HfKind::Footer,
+            HfVariant::First,
+            section_index,
+            ctx,
+        );
     }
-    if footers.different_even_odd {
-        if let Some(footer) = footers.even.as_ref().or(footers.default.as_ref()) {
-            write_header_group(
-                out,
-                "footerl",
-                footer,
-                HfKind::Footer,
-                HfVariant::Even,
-                section_index,
-                ctx,
-            );
-        }
+    if footers.different_even_odd
+        && let Some(footer) = footers.even.as_ref().or(footers.default.as_ref())
+    {
+        write_header_group(
+            out,
+            "footerl",
+            footer,
+            HfKind::Footer,
+            HfVariant::Even,
+            section_index,
+            ctx,
+        );
     }
 }
 
@@ -646,11 +646,11 @@ fn write_paragraph(out: &mut Vec<u8>, paragraph: &Paragraph, in_table: bool, ctx
     if paragraph.props.page_break_before {
         ctrl(out, "pagebb");
     }
-    if let Some(item) = paragraph.props.list {
-        if let Some(ls) = ctx.lists.ls(item.style, item.group) {
-            ctrl_i(out, "ls", i32::from(ls));
-            ctrl_i(out, "ilvl", i32::from(item.level));
-        }
+    if let Some(item) = paragraph.props.list
+        && let Some(ls) = ctx.lists.ls(item.style, item.group)
+    {
+        ctrl_i(out, "ls", i32::from(ls));
+        ctrl_i(out, "ilvl", i32::from(item.level));
     }
     if let Some(level) = paragraph.props.outline_level {
         ctrl_i(out, "outlinelevel", i32::from(level.saturating_sub(1)));
@@ -1025,10 +1025,10 @@ fn resolved_para_format(resolved: &ResolvedPara) -> ParaFormat {
 }
 
 fn write_char_format(out: &mut Vec<u8>, format: &CharFormat, ctx: &Context<'_>) {
-    if let Some(family) = &format.family {
-        if !family.is_empty() {
-            ctrl_i(out, "f", ctx.fonts.index(family) as i32);
-        }
+    if let Some(family) = &format.family
+        && !family.is_empty()
+    {
+        ctrl_i(out, "f", ctx.fonts.index(family) as i32);
     }
     if let Some(size) = format.size_pt {
         ctrl_i(out, "fs", (size * 2.0).round().clamp(1.0, 32767.0) as i32);
@@ -1150,19 +1150,20 @@ fn write_align(out: &mut Vec<u8>, align: Align) {
 
 fn run_controls(format: &CharFormat, base: &ResolvedChar, ctx: &Context<'_>) -> Vec<u8> {
     let mut out = Vec::new();
-    if let Some(family) = &format.family {
-        if !family.is_empty() && **family != *base.family {
-            ctrl_i(&mut out, "f", ctx.fonts.index(family) as i32);
-        }
+    if let Some(family) = &format.family
+        && !family.is_empty()
+        && **family != *base.family
+    {
+        ctrl_i(&mut out, "f", ctx.fonts.index(family) as i32);
     }
-    if let Some(size) = format.size_pt {
-        if (size - base.size_pt).abs() > 0.001 {
-            ctrl_i(
-                &mut out,
-                "fs",
-                (size * 2.0).round().clamp(1.0, 32767.0) as i32,
-            );
-        }
+    if let Some(size) = format.size_pt
+        && (size - base.size_pt).abs() > 0.001
+    {
+        ctrl_i(
+            &mut out,
+            "fs",
+            (size * 2.0).round().clamp(1.0, 32767.0) as i32,
+        );
     }
     if let Some(weight) = format.weight {
         let bold = weight >= 600;
@@ -1170,38 +1171,38 @@ fn run_controls(format: &CharFormat, base: &ResolvedChar, ctx: &Context<'_>) -> 
             ctrl_flag(&mut out, "b", bold);
         }
     }
-    if let Some(italic) = format.italic {
-        if italic != base.italic {
-            ctrl_flag(&mut out, "i", italic);
+    if let Some(italic) = format.italic
+        && italic != base.italic
+    {
+        ctrl_flag(&mut out, "i", italic);
+    }
+    if let Some(underline) = format.underline
+        && underline != base.underline
+    {
+        if underline {
+            ctrl(&mut out, "ul");
+        } else {
+            ctrl(&mut out, "ulnone");
         }
     }
-    if let Some(underline) = format.underline {
-        if underline != base.underline {
-            if underline {
-                ctrl(&mut out, "ul");
-            } else {
-                ctrl(&mut out, "ulnone");
-            }
+    if let Some(strike) = format.strikethrough
+        && strike != base.strikethrough
+    {
+        ctrl_flag(&mut out, "strike", strike);
+    }
+    if let Some(vertical) = format.vertical
+        && vertical != base.vertical
+    {
+        match vertical {
+            VerticalAlign::Baseline => ctrl(&mut out, "nosupersub"),
+            VerticalAlign::Superscript => ctrl(&mut out, "super"),
+            VerticalAlign::Subscript => ctrl(&mut out, "sub"),
         }
     }
-    if let Some(strike) = format.strikethrough {
-        if strike != base.strikethrough {
-            ctrl_flag(&mut out, "strike", strike);
-        }
-    }
-    if let Some(vertical) = format.vertical {
-        if vertical != base.vertical {
-            match vertical {
-                VerticalAlign::Baseline => ctrl(&mut out, "nosupersub"),
-                VerticalAlign::Superscript => ctrl(&mut out, "super"),
-                VerticalAlign::Subscript => ctrl(&mut out, "sub"),
-            }
-        }
-    }
-    if let Some(colour) = format.colour {
-        if colour != base.colour {
-            ctrl_i(&mut out, "cf", ctx.colours.index(colour) as i32);
-        }
+    if let Some(colour) = format.colour
+        && colour != base.colour
+    {
+        ctrl_i(&mut out, "cf", ctx.colours.index(colour) as i32);
     }
     if let Some(highlight) = format.highlight {
         match highlight {
@@ -1212,10 +1213,10 @@ fn run_controls(format: &CharFormat, base: &ResolvedChar, ctx: &Context<'_>) -> 
             _ => {}
         }
     }
-    if let Some(spacing) = format.letter_spacing_pt {
-        if (spacing - base.letter_spacing_pt).abs() > 0.001 {
-            ctrl_i(&mut out, "expnd", (spacing * 20.0).round() as i32);
-        }
+    if let Some(spacing) = format.letter_spacing_pt
+        && (spacing - base.letter_spacing_pt).abs() > 0.001
+    {
+        ctrl_i(&mut out, "expnd", (spacing * 20.0).round() as i32);
     }
     out
 }

@@ -346,3 +346,48 @@ fn a_watermark_is_drawn_faintly_behind_the_page() {
         }
     }
 }
+
+/// Distinct colours on a page: hard edges leave only the ink colours and the paper.
+fn distinct_colours(pm: &libertum_render::Pixmap) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for p in pm.data().as_chunks::<4>().0 {
+        seen.insert([p[0], p[1], p[2]]);
+    }
+    seen.len()
+}
+
+#[test]
+fn turning_antialiasing_off_gives_hard_edges_and_a_separate_cache_entry() {
+    let s = state();
+    if !has_fonts(&s) {
+        return;
+    }
+    let mut r = PageRenderer::default();
+    let smooth = r.cached_page(&s, 0, 1.0).expect("page");
+    let smooth_colours = distinct_colours(&smooth);
+    assert!(
+        smooth_colours > 30,
+        "antialiased text has many shades: {smooth_colours}"
+    );
+    r.set_antialias(false);
+    let hard = r.cached_page(&s, 0, 1.0).expect("page");
+    assert!(
+        !std::sync::Arc::ptr_eq(&smooth, &hard),
+        "the cached smooth page must not be served"
+    );
+    let hard_colours = distinct_colours(&hard);
+    assert!(
+        hard_colours <= 8,
+        "hard edges leave only paper and ink colours: {hard_colours}"
+    );
+    assert!(
+        hard.data().as_chunks::<4>().0.iter().any(|p| p[0] < 100),
+        "text is still drawn"
+    );
+    r.set_antialias(true);
+    let again = r.cached_page(&s, 0, 1.0).expect("page");
+    assert!(
+        std::sync::Arc::ptr_eq(&smooth, &again),
+        "switching back reuses the smooth page"
+    );
+}

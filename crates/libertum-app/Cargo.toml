@@ -21,6 +21,7 @@ libertum-odt = { workspace = true }
 libertum-markdown = { workspace = true }
 libertum-rtf = { workspace = true }
 libertum-native = { workspace = true }
+libertum-library = { workspace = true }
 libertum-formats-common = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }

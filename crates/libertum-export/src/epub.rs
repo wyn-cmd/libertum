@@ -11,7 +11,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use crate::html::{ImageAsset, chapter_html};
-use crate::{ChapterLevels, chapters};
+use crate::{Chapter, ChapterLevels, chapters};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EpubError {
@@ -41,8 +41,31 @@ pub fn build_epub(
 
     let mut images: BTreeMap<String, ImageAsset> = BTreeMap::new();
     let mut documents: Vec<(String, String, String)> = Vec::new();
-    for (index, chapter) in chapters.iter().enumerate() {
+    // Each document's heading level in the contents list; front matter sits at the top level.
+    let mut levels_of: Vec<u8> = Vec::new();
+    // What comes before the first chapter (a title page, a dedication) is still part of the
+    // book: it becomes its own first document rather than being dropped.
+    let mut parts: Vec<Chapter> = Vec::new();
+    if let Some(first) = chapters.first().filter(|first| first.start > 0) {
+        parts.push(Chapter {
+            title: FRONT_MATTER.to_owned(),
+            start: 0,
+            end: first.start,
+            level: None,
+        });
+    }
+    parts.extend(chapters.iter().cloned());
+    for chapter in &parts {
+        let index = documents.len();
         let html = chapter_html(document, chapter, Some("../images/"));
+        if chapter.title == FRONT_MATTER
+            && chapter.level.is_none()
+            && !has_content(&html.body)
+            && html.images.is_empty()
+        {
+            continue;
+        }
+        levels_of.push(chapter.level.unwrap_or(1));
         for image in html.images {
             images.insert(image.name.clone(), image);
         }
@@ -112,14 +135,7 @@ pub fn build_epub(
         modified = modified,
     );
 
-    let mut nav_items = String::new();
-    for (index, (_, chapter_title, _)) in documents.iter().enumerate() {
-        nav_items.push_str(&format!(
-            "      <li><a href=\"text/chapter-{:04}.xhtml\">{}</a></li>\n",
-            index + 1,
-            escape(chapter_title)
-        ));
-    }
+    let nav_items = nav_list(&documents, &levels_of);
     let nav = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
 <!DOCTYPE html>\n\
@@ -128,7 +144,7 @@ pub fn build_epub(
 <body>\n\
   <nav epub:type=\"toc\" id=\"toc\">\n\
     <h1>Contents</h1>\n\
-    <ol>\n{nav_items}    </ol>\n\
+    {nav_items}\
   </nav>\n\
 </body>\n\
 </html>\n",
@@ -213,4 +229,81 @@ fn escape(text: &str) -> String {
 
 fn escape_attr(text: &str) -> String {
     escape(text)
+}
+
+/// Whether an XHTML body holds any text, table or picture (empty paragraphs do not count).
+fn has_content(body: &str) -> bool {
+    if body.contains("<img") || body.contains("<table") {
+        return true;
+    }
+    let mut in_tag = false;
+    for character in body.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag && !c.is_whitespace() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Title of the part of the book before its first chapter heading.
+const FRONT_MATTER: &str = "Front matter";
+
+/// The navigation list: chapters nested under the heading above them that has a lower level,
+/// so a book with parts and chapters shows them as a tree.
+fn nav_list(documents: &[(String, String, String)], levels: &[u8]) -> String {
+    let mut out = String::new();
+    // The levels of the lists currently open, innermost last.
+    let mut open: Vec<u8> = Vec::new();
+    for (index, (name, title, _)) in documents.iter().enumerate() {
+        let level = levels.get(index).copied().unwrap_or(1);
+        while let Some(&top) = open.last() {
+            if level < top {
+                out.push_str(
+                    "</li>
+</ol>
+",
+                );
+                open.pop();
+            } else {
+                break;
+            }
+        }
+        match open.last() {
+            Some(&top) if level > top => {
+                out.push_str(
+                    "
+<ol>
+",
+                );
+                open.push(level);
+            }
+            Some(_) => out.push_str(
+                "</li>
+",
+            ),
+            None => {
+                out.push_str(
+                    "<ol>
+",
+                );
+                open.push(level);
+            }
+        }
+        out.push_str(&format!(
+            "<li><a href=\"{}\">{}</a>",
+            escape_attr(name),
+            escape(title)
+        ));
+    }
+    while open.pop().is_some() {
+        out.push_str(
+            "</li>
+</ol>
+",
+        );
+    }
+    out
 }

@@ -490,6 +490,8 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             Entry::item(s::VIEW_HOME, Message::GoHome)
                 .shortcut(shortcuts::label(Shortcut::CloseDocument)),
             Entry::item(s::VIEW_STITCH, Message::OpenStitch),
+            Entry::item(s::VIEW_LIBRARY, Message::OpenLibrary),
+            Entry::item(s::VIEW_HISTORY, Message::OpenHistory(None)),
             Entry::item(
                 if state.fullscreen {
                     s::VIEW_EXIT_FULL_SCREEN

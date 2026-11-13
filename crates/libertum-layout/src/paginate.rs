@@ -167,6 +167,17 @@ pub enum Decoration {
     },
 }
 
+/// A clickable contents entry: its box on the page and the page it jumps to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TocLink {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Index of the page the entry's heading starts on.
+    pub target_page: usize,
+}
+
 /// A page's watermark, ready to draw: a one-line layout of the text, centred on
 /// (`centre_x`, `centre_y`) page points and turned by `angle_deg` (negative rises to the
 /// right). It is drawn behind everything else on the page.
@@ -348,6 +359,15 @@ pub struct LayoutState {
 fn lock(m: &Mutex<Engine>) -> MutexGuard<'_, Engine> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// How far ahead of pagination paragraphs are shaped in parallel: a window of this many
+/// paragraphs per batch when paginating a few pages, and when paginating everything.
+const PREWARM_WINDOW_CHUNK: usize = 128;
+const PREWARM_WINDOW_ALL: usize = 512;
+/// A batch is only worth the threads when at least this many paragraphs are missing.
+const PREWARM_MIN_MISSES: usize = 48;
+/// The next window is prepared when pagination is this close to the end of the last one.
+const PREWARM_REFILL: usize = 32;
 
 impl LayoutState {
     /// Creates a state with no pages yet; call [`paginate_until`](Self::paginate_until) or
@@ -992,6 +1012,45 @@ impl LayoutState {
         Some(self.repaginate_from(first, last, true))
     }
 
+    /// Like [`replace_paragraphs`](Self::replace_paragraphs), but does not re-paginate: the
+    /// snapshots are swapped in and every page from the first changed paragraph's page on is
+    /// dropped, to be rebuilt by `paginate_until` and `paginate_all` (the background pass).
+    /// For a change that touches thousands of paragraphs (Select All then Bold, a style
+    /// change), where re-paginating on the caller's thread froze the window for over a second
+    /// at 500 pages. Returns true when pages were dropped and a pagination pass is needed.
+    pub fn replace_paragraphs_deferred(&mut self, items: Vec<(usize, ParagraphSnapshot)>) -> bool {
+        let mut first: Option<usize> = None;
+        for (index, snapshot) in items {
+            if let Some(p) = self.paragraphs.get_mut(index) {
+                *p = snapshot;
+                first = Some(first.map_or(index, |f| f.min(index)));
+            }
+        }
+        let Some(first) = first else {
+            return false;
+        };
+        self.renumber_notes();
+        if self.pages.is_empty() {
+            return false;
+        }
+        if let Some(resume) = self.resume
+            && (FlowPos {
+                para: first,
+                line: 0,
+            }) >= resume
+        {
+            // Everything changed lies beyond the paginated prefix.
+            return false;
+        }
+        // One page earlier, as `replace_paragraphs` does: the paragraph may move back.
+        let first_page = self.page_of_para(first).saturating_sub(1);
+        let old_tail = self.pages.split_off(first_page);
+        self.resume = Some(old_tail.first().map_or(FlowPos::default(), |p| p.start));
+        self.complete = false;
+        self.endnotes_emitted = false;
+        true
+    }
+
     /// Applies an edit to paragraph `index`, bumps its version, and re-paginates
     /// incrementally (PLAN §4.2): starts at the page where the paragraph begins and stops as
     /// soon as a page break lands on the same (paragraph, line) as before in an untouched
@@ -1055,10 +1114,10 @@ impl LayoutState {
         let index = index.min(self.paragraphs.len());
         let old_resume = self.resume;
         let mut new_resume = old_resume;
-        if let Some(r) = &mut new_resume {
-            if r.para >= index {
-                r.para += 1;
-            }
+        if let Some(r) = &mut new_resume
+            && r.para >= index
+        {
+            r.para += 1;
         }
         self.paragraphs.insert(index, snapshot);
         self.renumber_notes();
@@ -1067,13 +1126,13 @@ impl LayoutState {
             return PaginationStats::default();
         }
         // The new paragraph is beyond the paginated prefix: nothing to repaginate.
-        if let Some(r) = new_resume {
-            if index >= r.para {
-                return PaginationStats {
-                    total_pages: self.pages.len(),
-                    ..Default::default()
-                };
-            }
+        if let Some(r) = new_resume
+            && index >= r.para
+        {
+            return PaginationStats {
+                total_pages: self.pages.len(),
+                ..Default::default()
+            };
         }
         let first = self.page_of_para(index);
         let old_tail = self.pages.split_off(first);
@@ -1111,13 +1170,13 @@ impl LayoutState {
             return Some(PaginationStats::default());
         }
         // The removed paragraph was beyond the paginated prefix: nothing to repaginate.
-        if let Some(o) = old_resume {
-            if index >= o.para {
-                return Some(PaginationStats {
-                    total_pages: self.pages.len(),
-                    ..Default::default()
-                });
-            }
+        if let Some(o) = old_resume
+            && index >= o.para
+        {
+            return Some(PaginationStats {
+                total_pages: self.pages.len(),
+                ..Default::default()
+            });
         }
         let first = self.page_of_para(index);
         let old_tail = self.pages.split_off(first);
@@ -1156,39 +1215,61 @@ impl LayoutState {
         let mut reused = 0usize;
         let mut converged = false;
         self.pages.truncate(first_page);
+        // Paragraphs below this index have been looked at for pre-shaping (see `prewarm`).
+        let mut warmed_to = pos.para;
         loop {
             if pos.para >= n {
                 self.complete = true;
                 self.resume = None;
                 break;
             }
-            if let Some(stop) = stop_at {
-                if pos >= stop {
-                    self.resume = Some(pos);
-                    self.complete = false;
-                    break;
-                }
+            if let Some(stop) = stop_at
+                && pos >= stop
+            {
+                self.resume = Some(pos);
+                self.complete = false;
+                break;
             }
-            if let Some(lim) = limit_pages {
-                if self.pages.len() >= lim {
-                    self.resume = Some(pos);
-                    self.complete = false;
-                    break;
-                }
+            if let Some(lim) = limit_pages
+                && self.pages.len() >= lim
+            {
+                self.resume = Some(pos);
+                self.complete = false;
+                break;
             }
             if !was_complete && edited.is_some() {
                 // Incremental edit on a partially paginated document: do not run past the
                 // previously paginated prefix.
-                if let Some(r) = old_resume {
-                    if pos >= r {
-                        self.resume = Some(pos);
-                        self.complete = false;
-                        break;
-                    }
+                if let Some(r) = old_resume
+                    && pos >= r
+                {
+                    self.resume = Some(pos);
+                    self.complete = false;
+                    break;
                 }
             }
             let (section, number, number_shown) =
                 self.number_for(self.pages.len(), pos, self.pages.last());
+            if edited.is_none() && pos.para + PREWARM_REFILL >= warmed_to && warmed_to < n {
+                // Several paragraphs ahead are not laid out yet: shape them on all cores now
+                // instead of one at a time below. An incremental edit never needs this.
+                let window = if limit_pages.is_some() {
+                    PREWARM_WINDOW_CHUNK
+                } else {
+                    PREWARM_WINDOW_ALL
+                };
+                let from = pos.para.max(warmed_to);
+                let to = (from + window).min(n);
+                let width = self.column_width(section);
+                let ahead: Vec<&ParagraphSnapshot> = self.paragraphs[from..to]
+                    .iter()
+                    .filter(|p| !eng.has_metrics(p, width))
+                    .collect();
+                if ahead.len() >= PREWARM_MIN_MISSES {
+                    eng.prewarm(&ahead, width);
+                }
+                warmed_to = to;
+            }
             let section_settings = self.section(section);
             let geo = self.geometry_for_section(section);
             let full_h = geo.content_height();
@@ -1233,28 +1314,29 @@ impl LayoutState {
             rebuilt += 1;
             if let Some(e) = edited {
                 // Safe to converge only on a break inside a later, untouched paragraph.
-                if next.para > e && next.para < n {
-                    if let Ok(j) = old_tail.binary_search_by(|p| p.start.cmp(&next)) {
-                        reused = old_tail.len() - j;
-                        let from = self.pages.len();
-                        self.pages.extend(old_tail.into_iter().skip(j));
-                        converged = true;
-                        self.complete = was_complete;
-                        self.resume = old_resume;
-                        drop(eng);
-                        // The reused pages keep their numbers unless a page was added or
-                        // removed before them; renumbering stops at the first correct one.
-                        self.renumber_from(from);
-                        return PaginationStats {
-                            first_page,
-                            pages_rebuilt: rebuilt,
-                            pages_reused: reused,
-                            converged,
-                            paragraphs_laid_out: lock(&self.engine).stats().layouts_built
-                                - built_before,
-                            total_pages: self.pages.len(),
-                        };
-                    }
+                if next.para > e
+                    && next.para < n
+                    && let Ok(j) = old_tail.binary_search_by(|p| p.start.cmp(&next))
+                {
+                    reused = old_tail.len() - j;
+                    let from = self.pages.len();
+                    self.pages.extend(old_tail.into_iter().skip(j));
+                    converged = true;
+                    self.complete = was_complete;
+                    self.resume = old_resume;
+                    drop(eng);
+                    // The reused pages keep their numbers unless a page was added or
+                    // removed before them; renumbering stops at the first correct one.
+                    self.renumber_from(from);
+                    return PaginationStats {
+                        first_page,
+                        pages_rebuilt: rebuilt,
+                        pages_reused: reused,
+                        converged,
+                        paragraphs_laid_out: lock(&self.engine).stats().layouts_built
+                            - built_before,
+                        total_pages: self.pages.len(),
+                    };
                 }
             }
             pos = next;
@@ -1396,6 +1478,51 @@ impl LayoutState {
             return None;
         }
         self.pages.get(self.page_of_para(para)).map(|p| p.number)
+    }
+
+    /// Index of the page where the paragraph with model id `id` begins, once it is
+    /// paginated (the page's position, not its printed number). O(paragraphs) scan.
+    pub fn page_index_of_block(&self, id: u64) -> Option<usize> {
+        let para = self.paragraphs.iter().position(|p| p.id == id)?;
+        if self.resume.is_some_and(|r| para >= r.para) {
+            return None;
+        }
+        Some(self.page_of_para(para))
+    }
+
+    /// The clickable areas of the generated contents entries on page `page`: each entry's
+    /// box (page points from the top-left) and the index of the page its heading is on.
+    pub fn page_toc_links(&self, page: usize) -> Vec<TocLink> {
+        let Some(pg) = self.pages.get(page) else {
+            return Vec::new();
+        };
+        let geo = pg.geometry;
+        let mut out = Vec::new();
+        for s in &pg.slices {
+            let Some(target) = self.paragraphs.get(s.para).and_then(|p| p.toc_target) else {
+                continue;
+            };
+            let Some(pl) = self.paragraph_layout(s.para) else {
+                continue;
+            };
+            let (Some(first), Some(last)) = (
+                pl.lines.get(s.line_start),
+                s.line_end.checked_sub(1).and_then(|i| pl.lines.get(i)),
+            ) else {
+                continue;
+            };
+            let Some(target_page) = self.page_index_of_block(target) else {
+                continue;
+            };
+            out.push(TocLink {
+                x: geo.margins.left + s.x,
+                y: geo.margins.top + s.y,
+                width: self.column_width(pg.section),
+                height: (last.top + last.height) - first.top,
+                target_page,
+            });
+        }
+        out
     }
 
     /// The watermark of page `page`, if its section has one: the text sized to span most of
@@ -2275,8 +2402,7 @@ impl LayoutState {
         // (a split row), and a repeated header row is drawn on later pages too. The line is
         // in the flow on exactly one of the pages the row occupies.
         let first_page = self.page_of_para(row_first);
-        for page in first_page..self.pages.len() {
-            let pg = &self.pages[page];
+        for (page, pg) in self.pages.iter().enumerate().skip(first_page) {
             if page > first_page && pg.start.para != row_first {
                 break;
             }

@@ -12,9 +12,10 @@ use libertum_layout::parley::PositionedLayoutItem;
 use libertum_layout::{Decoration, LayoutOptions, LayoutState, PageGeometry, ParagraphLayout};
 use libertum_model::Document;
 use printpdf::{
-    Codepoint, Color, FontId, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
-    PdfSaveOptions, PdfWarnMsg, Point, Pt, RawImage, RawImageData, RawImageFormat, Rect, Rgb,
-    TextItem, TextMatrix, TextRenderingMode, XObjectId, XObjectTransform,
+    Actions, BorderArray, Codepoint, Color, Destination, FontId, LinkAnnotation, Mm, Op, PaintMode,
+    ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, PdfWarnMsg, Point, Pt,
+    RawImage, RawImageData, RawImageFormat, Rect, Rgb, TextItem, TextMatrix, TextRenderingMode,
+    XObjectId, XObjectTransform,
 };
 
 /// Why a PDF could not be written.
@@ -58,6 +59,7 @@ pub fn export(document: &Document, archival: bool, title: &str) -> Result<Vec<u8
         ));
     }
     pdf.with_pages(pages);
+    add_outline(&mut pdf, document, &layout);
 
     let mut warnings: Vec<PdfWarnMsg> = Vec::new();
     let options = PdfSaveOptions {
@@ -77,6 +79,31 @@ pub fn export(document: &Document, archival: bool, title: &str) -> Result<Vec<u8
         archival_pdf(bytes, title)
     } else {
         Ok(bytes)
+    }
+}
+
+/// The viewer's bookmark panel: one entry per heading (not the generated contents title or
+/// its entries), in reading order, each pointing at the page the heading starts on. The
+/// contents entries themselves are not links; the bookmarks are the way to jump.
+fn add_outline(pdf: &mut PdfDocument, document: &Document, layout: &LayoutState) {
+    let paragraphs: Vec<_> = document.paragraphs().collect();
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        if paragraph.props.outline_level.is_none() || paragraph.props.toc_target.is_some() {
+            continue;
+        }
+        // The title above a generated contents list is heading-styled, but is not a chapter.
+        let titles_contents = paragraphs
+            .get(index + 1)
+            .is_some_and(|next| next.props.toc_target.is_some());
+        let text = paragraph.text();
+        let text = text.trim();
+        if titles_contents || text.is_empty() {
+            continue;
+        }
+        if let Some(page) = layout.page_index_of_block(paragraph.id.0) {
+            // Bookmark pages count from one.
+            pdf.add_bookmark(text, page + 1);
+        }
     }
 }
 
@@ -247,6 +274,32 @@ impl Exporter<'_> {
                 page_height,
                 None,
             )?;
+        }
+
+        // Each generated contents entry jumps to the page its heading is on. The box has no
+        // border and does not change the look of the page.
+        for link in layout.page_toc_links(page_index) {
+            ops.push(Op::LinkAnnotation {
+                link: LinkAnnotation::new(
+                    Rect {
+                        x: Pt(link.x),
+                        y: Pt(page_height - (link.y + link.height)),
+                        width: Pt(link.width),
+                        height: Pt(link.height),
+                        mode: None,
+                        winding_order: None,
+                    },
+                    Actions::Goto(Destination::Xyz {
+                        page: link.target_page + 1,
+                        left: Some(0.0),
+                        top: Some(page_height),
+                        zoom: None,
+                    }),
+                    Some(BorderArray::Solid([0.0, 0.0, 0.0])),
+                    None,
+                    None,
+                ),
+            });
         }
 
         // Page numbers, TOC entries, headers and footers, inline images and rules.
@@ -587,10 +640,10 @@ fn archival_pdf(bytes: Vec<u8>, title: &str) -> Result<Vec<u8>, PdfError> {
         catalog.set("Lang", Object::string_literal("en-GB"));
     }
     // PDF/X's key is not allowed in PDF/A.
-    if let Ok(Object::Reference(info_id)) = document.trailer.get(b"Info") {
-        if let Some(Object::Dictionary(info)) = document.objects.get_mut(info_id) {
-            info.remove(b"GTS_PDFXVersion");
-        }
+    if let Ok(Object::Reference(info_id)) = document.trailer.get(b"Info")
+        && let Some(Object::Dictionary(info)) = document.objects.get_mut(info_id)
+    {
+        info.remove(b"GTS_PDFXVersion");
     }
 
     let mut out = Vec::new();

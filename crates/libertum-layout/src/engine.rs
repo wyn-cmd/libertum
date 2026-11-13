@@ -133,7 +133,13 @@ pub struct LayoutOptions {
     /// Tallest an inline image is drawn, points; taller ones are scaled down in proportion
     /// so a line always fits on a page. The pagination state sets this from the page size.
     pub max_image_height_pt: f32,
+    /// Threads used to shape paragraphs ahead of pagination: 0 picks one per core (at most
+    /// [`MAX_LAYOUT_THREADS`]), 1 keeps everything on the calling thread.
+    pub threads: usize,
 }
+
+/// Most threads the engine uses to lay out paragraphs ahead of pagination.
+pub const MAX_LAYOUT_THREADS: usize = 8;
 
 impl Default for LayoutOptions {
     fn default() -> Self {
@@ -154,6 +160,7 @@ impl Default for LayoutOptions {
             line_height: 1.2,
             max_cached_layouts: 4_000,
             max_image_height_pt: 600.0,
+            threads: 0,
         }
     }
 }
@@ -799,10 +806,10 @@ impl Engine {
                 .collect();
             let n = layout.len();
             for li in 0..n.saturating_sub(1) {
-                if let Some(line) = layout.get(li) {
-                    if byte_points.contains(&line.text_range().end) {
-                        hyphen_lines.push(li);
-                    }
+                if let Some(line) = layout.get(li)
+                    && byte_points.contains(&line.text_range().end)
+                {
+                    hyphen_lines.push(li);
                 }
             }
         }
@@ -849,11 +856,11 @@ impl Engine {
     pub(crate) fn full(&mut self, para: &SpikeParagraph, width: f32) -> Arc<ParagraphLayout> {
         self.tick += 1;
         let key = (para.id, width.to_bits());
-        if let Some(e) = self.full.get_mut(&key) {
-            if e.layout.version == para.version {
-                e.tick = self.tick;
-                return e.layout.clone();
-            }
+        if let Some(e) = self.full.get_mut(&key)
+            && e.layout.version == para.version
+        {
+            e.tick = self.tick;
+            return e.layout.clone();
         }
         let built = Arc::new(self.build(para, width));
         // Refresh the compact metrics from the same layout.
@@ -874,13 +881,119 @@ impl Engine {
         built
     }
 
+    /// A copy for a worker thread: it shares the font collection and the loaded font data,
+    /// has its own shaping state and empty caches.
+    ///
+    /// The font collection and its data cache are switched to fontique's shared mode first.
+    /// Unshared clones each load their own copy of every font they touch (about 55 MB of
+    /// mapped font data per worker, measured), so the working set grew with the thread count.
+    fn fork(&mut self) -> Engine {
+        self.fcx.collection.make_shared();
+        self.fcx.source_cache.make_shared();
+        Engine {
+            fcx: self.fcx.clone(),
+            lcx: LayoutContext::new(),
+            family: self.family.clone(),
+            opts: self.opts.clone(),
+            report: self.report.clone(),
+            full: HashMap::new(),
+            metrics: HashMap::new(),
+            labels: HashMap::new(),
+            markers: HashMap::new(),
+            tick: 0,
+            layouts_built: 0,
+        }
+    }
+
+    /// How many threads a batch of `jobs` paragraphs may use.
+    fn worker_count(&self, jobs: usize) -> usize {
+        let wanted = if self.opts.threads == 0 {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        } else {
+            self.opts.threads
+        };
+        wanted.min(MAX_LAYOUT_THREADS).min(jobs / 8).max(1)
+    }
+
+    /// True when the compact metrics of `para` at `width` are cached for its current version.
+    pub(crate) fn has_metrics(&self, para: &SpikeParagraph, width: f32) -> bool {
+        self.metrics
+            .get(&(para.id, width.to_bits()))
+            .is_some_and(|m| m.version == para.version)
+    }
+
+    /// Lays out `paras` at `width` on several threads and caches the results, so the
+    /// pagination that follows finds them. The layouts equal what [`Engine::full`] builds on
+    /// this thread (same fonts, same code); only the order of work differs. Does nothing when
+    /// one thread would do the work. Returns how many paragraphs were built.
+    pub(crate) fn prewarm(&mut self, paras: &[&SpikeParagraph], width: f32) -> usize {
+        let threads = self.worker_count(paras.len());
+        if threads < 2 {
+            return 0;
+        }
+        const CLAIM: usize = 8;
+        let next = AtomicUsize::new(0);
+        let mut forks: Vec<Engine> = (0..threads).map(|_| self.fork()).collect();
+        let built: Vec<Vec<(Key, Arc<ParagraphLayout>)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = forks
+                .iter_mut()
+                .map(|fork| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        loop {
+                            let from = next.fetch_add(CLAIM, Ordering::Relaxed);
+                            if from >= paras.len() {
+                                break;
+                            }
+                            for para in &paras[from..(from + CLAIM).min(paras.len())] {
+                                let layout = fork.full(para, width);
+                                out.push(((para.id, width.to_bits()), layout));
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            // A worker that panicked simply contributes nothing; pagination builds its
+            // paragraphs itself.
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+        let mut count = 0;
+        for (key, layout) in built.into_iter().flatten() {
+            self.tick += 1;
+            self.metrics.insert(
+                key,
+                Arc::new(ParaMetrics {
+                    heights: layout.lines.iter().map(|l| l.height).collect(),
+                    version: layout.version,
+                    width_bits: key.1,
+                }),
+            );
+            self.full.insert(
+                key,
+                FullEntry {
+                    layout,
+                    tick: self.tick,
+                },
+            );
+            count += 1;
+        }
+        self.layouts_built += forks.iter().map(|f| f.layouts_built).sum::<u64>();
+        self.evict();
+        count
+    }
+
     /// Line heights only (what pagination needs). Cached for every paragraph.
     pub(crate) fn metrics(&mut self, para: &SpikeParagraph, width: f32) -> Arc<ParaMetrics> {
         let key = (para.id, width.to_bits());
-        if let Some(m) = self.metrics.get(&key) {
-            if m.version == para.version {
-                return m.clone();
-            }
+        if let Some(m) = self.metrics.get(&key)
+            && m.version == para.version
+        {
+            return m.clone();
         }
         self.full(para, width);
         self.metrics.get(&key).cloned().unwrap_or_else(|| {

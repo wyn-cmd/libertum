@@ -921,16 +921,16 @@ impl<'a> Reader<'a> {
                 }
                 Some(Token::ControlSymbol(_)) => {}
                 Some(Token::ControlWord { name, param }) => {
-                    if name == "u" {
-                        if let Some(value) = param {
-                            let unit = if value < 0 {
-                                (value + 65536) as u16
-                            } else {
-                                value.min(65535) as u16
-                            };
-                            if let Some(character) = char::from_u32(u32::from(unit)) {
-                                text.push(character);
-                            }
+                    if name == "u"
+                        && let Some(value) = param
+                    {
+                        let unit = if value < 0 {
+                            (value + 65536) as u16
+                        } else {
+                            value.min(65535) as u16
+                        };
+                        if let Some(character) = char::from_u32(u32::from(unit)) {
+                            text.push(character);
                         }
                     }
                 }
@@ -1605,10 +1605,10 @@ impl<'a> Reader<'a> {
         self.header = Some(HeaderBuilder::new((kind, variant)));
         let parsed = self.parse_contents(depth);
         let mut builder = self.header.take();
-        if let Some(builder) = &mut builder {
-            if builder.paragraphs == 0 {
-                builder.align = self.para.format.align.unwrap_or(Align::Start);
-            }
+        if let Some(builder) = &mut builder
+            && builder.paragraphs == 0
+        {
+            builder.align = self.para.format.align.unwrap_or(Align::Start);
         }
         self.sink = saved_sink;
         self.char_state = saved_char;
@@ -1733,16 +1733,16 @@ impl<'a> Reader<'a> {
             return Ok(());
         }
         if self.sink == Sink::Instruction {
-            if name == "u" {
-                if let Some(value) = param {
-                    let unit = if value < 0 {
-                        (value + 65536) as u16
-                    } else {
-                        value.min(65535) as u16
-                    };
-                    if let Some(character) = char::from_u32(u32::from(unit)) {
-                        self.field_instruction.push(character);
-                    }
+            if name == "u"
+                && let Some(value) = param
+            {
+                let unit = if value < 0 {
+                    (value + 65536) as u16
+                } else {
+                    value.min(65535) as u16
+                };
+                if let Some(character) = char::from_u32(u32::from(unit)) {
+                    self.field_instruction.push(character);
                 }
             }
             return Ok(());
@@ -2322,10 +2322,11 @@ impl<'a> Reader<'a> {
 
     fn note_break(&mut self) {
         self.flush_decoder_text();
-        if let Some(note) = &mut self.note {
-            if !note.text.is_empty() && !note.text.ends_with('\n') {
-                note.text.push('\n');
-            }
+        if let Some(note) = &mut self.note
+            && !note.text.is_empty()
+            && !note.text.ends_with('\n')
+        {
+            note.text.push('\n');
         }
     }
 
@@ -2367,10 +2368,10 @@ impl<'a> Reader<'a> {
                 }
             }
             "f" => {
-                if let Some(index) = param {
-                    if let Some(family) = self.fonts.get(&index) {
-                        format.family = Some(family.clone().into());
-                    }
+                if let Some(index) = param
+                    && let Some(family) = self.fonts.get(&index)
+                {
+                    format.family = Some(family.clone().into());
                 }
             }
             "cf" | "cb" | "highlight" => {
@@ -2504,10 +2505,10 @@ impl<'a> Reader<'a> {
         self.pending_page_break = false;
         self.pending_section_start = false;
         let id = self.alloc_id();
-        if let Some(table) = &mut self.table {
-            if table.row_started {
-                table.cell_open = true;
-            }
+        if let Some(table) = &mut self.table
+            && table.row_started
+        {
+            table.cell_open = true;
         }
         self.current = Some(PendingParagraph::new(id, props));
     }
@@ -2581,10 +2582,10 @@ impl<'a> Reader<'a> {
             return;
         }
         let mut paragraphs = std::mem::take(&mut table.cell_paragraphs);
-        if paragraphs.is_empty() {
-            if let Some(id) = empty_id {
-                paragraphs.push(Paragraph::new(id, ""));
-            }
+        if paragraphs.is_empty()
+            && let Some(id) = empty_id
+        {
+            paragraphs.push(Paragraph::new(id, ""));
         }
         let flags = table.next_cell_flags();
         if flags.h_continue && table.merge_open {
@@ -2635,10 +2636,10 @@ impl<'a> Reader<'a> {
         }
         if opens_cell {
             let mut paragraphs = std::mem::take(&mut table.cell_paragraphs);
-            if paragraphs.is_empty() {
-                if let Some(id) = empty_id {
-                    paragraphs.push(Paragraph::new(id, ""));
-                }
+            if paragraphs.is_empty()
+                && let Some(id) = empty_id
+            {
+                paragraphs.push(Paragraph::new(id, ""));
             }
             let flags = table.next_cell_flags();
             table.row.push(TableCell {
@@ -2964,10 +2965,9 @@ impl<'a> Reader<'a> {
                 if let Some(base) = def
                     .based_on
                     .and_then(|index| self.style_ids.get(&index).copied())
+                    && base != model_id
                 {
-                    if base != model_id {
-                        slot.base = Some(base);
-                    }
+                    slot.base = Some(base);
                 }
                 if let Some(next) = def
                     .next

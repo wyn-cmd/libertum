@@ -726,10 +726,11 @@ fn small_table(
                     let mut cell =
                         TableCell::new(Paragraph::new(BlockId(next), format!("r{row}c{column}")));
                     next += 1;
-                    if let Some((fill_row, fill)) = own_fill {
-                        if fill_row == row && column == 0 {
-                            cell.fill = Some(fill);
-                        }
+                    if let Some((fill_row, fill)) = own_fill
+                        && fill_row == row
+                        && column == 0
+                    {
+                        cell.fill = Some(fill);
                     }
                     cell
                 })
@@ -1528,4 +1529,123 @@ fn a_watermark_joins_an_existing_header_and_keeps_its_text() {
             .map(|w| w.text.as_str()),
         Some("SECRET")
     );
+}
+
+const HF_NS: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+
+fn furniture_package(header: &str, footer: &str) -> Vec<u8> {
+    let document = format!(
+        "<w:document {HF_NS}><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p>\
+         <w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId7\"/>\
+         <w:footerReference w:type=\"default\" r:id=\"rId8\"/>\
+         <w:pgSz w:w=\"11906\" w:h=\"16838\"/></w:sectPr></w:body></w:document>"
+    );
+    let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Id=\"rId7\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header9.xml\"/>\
+        <Relationship Id=\"rId8\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer9.xml\"/></Relationships>";
+    zip_package(&[
+        ("word/document.xml", &document),
+        ("word/_rels/document.xml.rels", rels),
+        ("word/header9.xml", header),
+        ("word/footer9.xml", footer),
+    ])
+}
+
+#[test]
+fn headers_and_footers_are_read_with_their_page_fields() {
+    let header = format!(
+        "<w:hdr {HF_NS}><w:p><w:pPr><w:jc w:val=\"right\"/></w:pPr><w:r><w:t>Running head</w:t></w:r></w:p></w:hdr>"
+    );
+    let footer = format!(
+        "<w:ftr {HF_NS}><w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t xml:space=\"preserve\">Page </w:t></w:r>\
+         <w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>\
+         <w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>3</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>\
+         <w:r><w:t xml:space=\"preserve\"> of </w:t></w:r><w:fldSimple w:instr=\" NUMPAGES \"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p></w:ftr>"
+    );
+    let docx = Docx::parse(&furniture_package(&header, &footer)).expect("parse");
+    let section = &docx.document().sections[0];
+    let head = section.headers.default.as_ref().expect("a header");
+    assert_eq!(head.text, "Running head");
+    assert_eq!(head.align, libertum_model::Align::End);
+    let foot = section.footers.default.as_ref().expect("a footer");
+    assert_eq!(foot.text, "Page {page} of {pages}");
+    assert_eq!(foot.align, libertum_model::Align::Centre);
+}
+
+#[test]
+fn an_unedited_header_keeps_its_original_part_and_an_edited_one_is_rewritten() {
+    let header = format!(
+        "<w:hdr {HF_NS}><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Bold running head</w:t></w:r></w:p></w:hdr>"
+    );
+    let footer = format!("<w:ftr {HF_NS}><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>");
+    let bytes = furniture_package(&header, &footer);
+    let mut docx = Docx::parse(&bytes).expect("parse");
+    // Saved as it was: the original parts, with their bold run, are untouched.
+    let same = docx.to_bytes().expect("save");
+    assert!(
+        zip_text(&same, "word/header9.xml")
+            .expect("header")
+            .contains("<w:b/>")
+    );
+    // Edit only the header.
+    let mut edited = docx.document().clone();
+    edited.sections[0].headers.default = Some(libertum_model::HeaderFooter::new("New head {page}"));
+    docx.set_document(edited);
+    let saved = docx.to_bytes().expect("save");
+    assert!(
+        zip_text(&saved, "word/footer9.xml")
+            .expect("footer kept")
+            .contains("Footer")
+    );
+    let back = Docx::parse(&saved).expect("reopen");
+    let section = &back.document().sections[0];
+    assert_eq!(
+        section.headers.default.as_ref().map(|h| h.text.as_str()),
+        Some("New head {page}")
+    );
+    assert_eq!(
+        section.footers.default.as_ref().map(|h| h.text.as_str()),
+        Some("Footer")
+    );
+}
+
+#[test]
+fn a_new_docx_writes_its_headers_footers_and_even_page_switch() {
+    let mut document = libertum_model::Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "Body"))]);
+    let section = &mut document.sections[0];
+    section.headers = libertum_model::HeadersFooters::with_default("Book Title");
+    section.footers = libertum_model::HeadersFooters::with_default("{page} / {pages}");
+    section.footers.even = Some(libertum_model::HeaderFooter::new("Even {page}"));
+    section.footers.different_even_odd = true;
+    section.headers.different_even_odd = true;
+    let bytes = Docx::new(document).to_bytes().expect("save");
+    let content_types = zip_text(&bytes, "[Content_Types].xml").expect("content types");
+    assert!(
+        content_types.contains("wordprocessingml.footer+xml"),
+        "{content_types}"
+    );
+    let settings = zip_text(&bytes, "word/settings.xml").expect("settings");
+    assert!(settings.contains("evenAndOddHeaders"), "{settings}");
+    let document_xml = zip_text(&bytes, "word/document.xml").expect("document");
+    assert!(
+        document_xml.contains("<w:footerReference w:type=\"even\" r:id=\""),
+        "{document_xml}"
+    );
+    let back = Docx::parse(&bytes).expect("reopen");
+    let section = &back.document().sections[0];
+    assert_eq!(
+        section.headers.default.as_ref().map(|h| h.text.as_str()),
+        Some("Book Title")
+    );
+    assert_eq!(
+        section.footers.default.as_ref().map(|h| h.text.as_str()),
+        Some("{page} / {pages}")
+    );
+    assert_eq!(
+        section.footers.even.as_ref().map(|h| h.text.as_str()),
+        Some("Even {page}")
+    );
+    assert!(section.footers.different_even_odd);
 }

@@ -73,6 +73,7 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Parsed, DocxError> {
     let mut document = Document::from_blocks(blocks);
     document.styles = styles.sheet;
     document.sections = sections;
+    crate::headers::read(&package, &body.extras, &mut document.sections);
     // A watermark in the headers belongs to the whole document.
     if let Some(watermark) = crate::watermark::read(&package, &body.extras) {
         for section in &mut document.sections {
@@ -303,13 +304,13 @@ fn parse_styles(xml_text: Option<&str>, warnings: &mut Vec<String>) -> Result<St
                 .and_then(|name| ids.get(name).copied());
             slot.next = def.next.as_deref().and_then(|name| ids.get(name).copied());
         }
-        if let Some(name) = &def.based_on {
-            if !ids.contains_key(name) {
-                warnings.push(format!(
-                    "style {:?} is based on unknown style {name:?}",
-                    def.name
-                ));
-            }
+        if let Some(name) = &def.based_on
+            && !ids.contains_key(name)
+        {
+            warnings.push(format!(
+                "style {:?} is based on unknown style {name:?}",
+                def.name
+            ));
         }
     }
 
@@ -590,10 +591,8 @@ fn note_body(note: &XmlNode) -> (String, bool) {
         }
     }
     // Word puts a leading space after the automatic note marker; it is not part of the note.
-    if has_reference {
-        if let Some(stripped) = text.strip_prefix(' ') {
-            text = stripped.to_owned();
-        }
+    if has_reference && let Some(stripped) = text.strip_prefix(' ') {
+        text = stripped.to_owned();
     }
     (text, rich)
 }
@@ -771,12 +770,11 @@ fn collect_ref_targets(xml_text: &str) -> HashSet<String> {
                 "instrText" => in_instruction = true,
                 "fldSimple" => {
                     for attribute in start.attributes().flatten() {
-                        if attribute.key.local_name().as_ref() == "instr" {
-                            if let Ok(value) =
+                        if attribute.key.local_name().as_ref() == "instr"
+                            && let Ok(value) =
                                 attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                            {
-                                note(&value);
-                            }
+                        {
+                            note(&value);
                         }
                     }
                 }
@@ -1045,42 +1043,42 @@ fn parse_section(node: &XmlNode, warnings: &mut Vec<String>) -> (Section, Sectio
     let mut section = Section::default();
     let mut extra = SectionExtras::default();
 
-    if let Some(size) = node.child("pgSz") {
-        if let (Some(width), Some(height)) = (
+    if let Some(size) = node.child("pgSz")
+        && let (Some(width), Some(height)) = (
             size.attr_f32("w").map(|twips| twips / 20.0),
             size.attr_f32("h").map(|twips| twips / 20.0),
-        ) {
-            section.page.orientation = if size
-                .attr("orient")
-                .is_some_and(|value| value.eq_ignore_ascii_case("landscape"))
-            {
-                Orientation::Landscape
-            } else {
-                Orientation::Portrait
-            };
-            let (long, short) = if width >= height {
-                (width, height)
-            } else {
-                (height, width)
-            };
-            let mut best = PaperSize::A4;
-            let mut best_delta = f32::MAX;
-            for paper in PaperSize::ALL {
-                let (pw, ph) = paper.points();
-                let (paper_long, paper_short) = if pw >= ph { (pw, ph) } else { (ph, pw) };
-                let delta = (paper_long - long).abs() + (paper_short - short).abs();
-                if delta < best_delta {
-                    best_delta = delta;
-                    best = paper;
-                }
+        )
+    {
+        section.page.orientation = if size
+            .attr("orient")
+            .is_some_and(|value| value.eq_ignore_ascii_case("landscape"))
+        {
+            Orientation::Landscape
+        } else {
+            Orientation::Portrait
+        };
+        let (long, short) = if width >= height {
+            (width, height)
+        } else {
+            (height, width)
+        };
+        let mut best = PaperSize::A4;
+        let mut best_delta = f32::MAX;
+        for paper in PaperSize::ALL {
+            let (pw, ph) = paper.points();
+            let (paper_long, paper_short) = if pw >= ph { (pw, ph) } else { (ph, pw) };
+            let delta = (paper_long - long).abs() + (paper_short - short).abs();
+            if delta < best_delta {
+                best_delta = delta;
+                best = paper;
             }
-            if best_delta > 8.0 {
-                warnings.push(format!(
-                    "page size {width:.0}x{height:.0} pt is not a standard paper; using {best:?}"
-                ));
-            }
-            section.page.paper = best;
         }
+        if best_delta > 8.0 {
+            warnings.push(format!(
+                "page size {width:.0}x{height:.0} pt is not a standard paper; using {best:?}"
+            ));
+        }
+        section.page.paper = best;
     }
 
     if let Some(margin) = node.child("pgMar") {
@@ -1642,10 +1640,10 @@ fn append_text(segment: &mut Segment, text: &str, format: &CharFormat) {
 
 fn parse_char_format(rpr: &XmlNode) -> CharFormat {
     let mut format = CharFormat::default();
-    if let Some(fonts) = rpr.child("rFonts") {
-        if let Some(family) = fonts.attr("ascii").or_else(|| fonts.attr("hAnsi")) {
-            format.family = Some(family.to_owned().into());
-        }
+    if let Some(fonts) = rpr.child("rFonts")
+        && let Some(family) = fonts.attr("ascii").or_else(|| fonts.attr("hAnsi"))
+    {
+        format.family = Some(family.to_owned().into());
     }
     if let Some(size) = rpr.child("sz").and_then(|n| n.attr_f32("val")) {
         format.size_pt = Some(size / 2.0);
@@ -1666,15 +1664,15 @@ fn parse_char_format(rpr: &XmlNode) -> CharFormat {
     if let Some(strike) = rpr.child("strike") {
         format.strikethrough = Some(strike.on());
     }
-    if let Some(colour) = rpr.child("color").and_then(|n| n.attr("val")) {
-        if let Some(rgba) = parse_hex_colour(colour) {
-            format.colour = Some(rgba);
-        }
+    if let Some(colour) = rpr.child("color").and_then(|n| n.attr("val"))
+        && let Some(rgba) = parse_hex_colour(colour)
+    {
+        format.colour = Some(rgba);
     }
-    if let Some(highlight) = rpr.child("highlight").and_then(|n| n.attr("val")) {
-        if let Some(rgba) = highlight_colour(highlight) {
-            format.highlight = Some(Some(rgba));
-        }
+    if let Some(highlight) = rpr.child("highlight").and_then(|n| n.attr("val"))
+        && let Some(rgba) = highlight_colour(highlight)
+    {
+        format.highlight = Some(Some(rgba));
     }
     if let Some(vertical) = rpr.child("vertAlign").and_then(|n| n.attr("val")) {
         format.vertical = match vertical.to_ascii_lowercase().as_str() {
@@ -1820,10 +1818,10 @@ fn parse_props(ppr: Option<&XmlNode>, styles: &Styles, numbering: &Numbering) ->
     let Some(ppr) = ppr else {
         return props;
     };
-    if let Some(style) = ppr.child("pStyle").and_then(|n| n.attr("val")) {
-        if let Some(id) = styles.id(style) {
-            props.style = id;
-        }
+    if let Some(style) = ppr.child("pStyle").and_then(|n| n.attr("val"))
+        && let Some(id) = styles.id(style)
+    {
+        props.style = id;
     }
     props.format = parse_para_format(ppr);
     if let Some(break_before) = ppr.child("pageBreakBefore") {

@@ -228,3 +228,56 @@ fn the_generated_contents_title_is_not_a_chapter() {
     assert_eq!(chapters.len(), 1, "{chapters:?}");
     assert_eq!(chapters[0].title, "Chapter One");
 }
+
+fn epub_file(bytes: Vec<u8>, name: &str) -> String {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip");
+    let mut text = String::new();
+    archive
+        .by_name(name)
+        .expect("the file is in the package")
+        .read_to_string(&mut text)
+        .expect("read");
+    text
+}
+
+#[test]
+fn the_epub_contents_list_nests_sections_under_their_chapters() {
+    let mut document = Document::new();
+    push_paragraph(&mut document, "Chapter One", StyleId::HEADING_1, Some(1));
+    push_paragraph(&mut document, "Body.", StyleId::BODY, None);
+    push_paragraph(&mut document, "A Section", StyleId::HEADING_2, Some(2));
+    push_paragraph(&mut document, "More.", StyleId::BODY, None);
+    push_paragraph(&mut document, "Chapter Two", StyleId::HEADING_1, Some(1));
+    push_paragraph(&mut document, "End.", StyleId::BODY, None);
+    let levels = ChapterLevels {
+        h2: true,
+        ..ChapterLevels::default()
+    };
+    let bytes = build_epub(&document, levels, "Nested", "en-GB").expect("epub");
+    let nav = epub_file(bytes, "OEBPS/nav.xhtml");
+    let one = nav.find("Chapter One").expect("chapter one");
+    let section = nav.find("A Section").expect("the section");
+    let two = nav.find("Chapter Two").expect("chapter two");
+    assert!(one < section && section < two, "{nav}");
+    // The section's list opens after chapter one and closes before chapter two.
+    assert_eq!(nav.matches("<ol>").count(), 2, "{nav}");
+    assert_eq!(nav.matches("</ol>").count(), 2, "{nav}");
+    assert!(nav[one..section].contains("<ol>"), "{nav}");
+    assert!(nav[section..two].contains("</ol>"), "{nav}");
+}
+
+#[test]
+fn the_epub_keeps_what_comes_before_the_first_chapter() {
+    let mut document = Document::new();
+    push_paragraph(&mut document, "A Title Page", StyleId::BODY, None);
+    push_paragraph(&mut document, "Chapter One", StyleId::HEADING_1, Some(1));
+    push_paragraph(&mut document, "Body.", StyleId::BODY, None);
+    let bytes = build_epub(&document, ChapterLevels::default(), "Front", "en-GB").expect("epub");
+    let front = epub_file(bytes.clone(), "OEBPS/text/chapter-0001.xhtml");
+    assert!(front.contains("A Title Page"), "{front}");
+    let nav = epub_file(bytes, "OEBPS/nav.xhtml");
+    assert!(
+        nav.contains("Front matter") && nav.contains("Chapter One"),
+        "{nav}"
+    );
+}

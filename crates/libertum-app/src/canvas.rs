@@ -1128,16 +1128,15 @@ where
             for s in &self.props.selection {
                 if let Some(rect) = page_point_rect(
                     &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
-                ) {
-                    if rect.intersects(&bounds) {
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: rect,
-                                ..Quad::default()
-                            },
-                            selection_colour,
-                        );
-                    }
+                ) && rect.intersects(&bounds)
+                {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: rect,
+                            ..Quad::default()
+                        },
+                        selection_colour,
+                    );
                 }
             }
 
@@ -1146,21 +1145,20 @@ where
             for s in &self.props.find {
                 if let Some(rect) = page_point_rect(
                     &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
-                ) {
-                    if rect.intersects(&bounds) {
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: rect,
-                                ..Quad::default()
-                            },
-                            FIND_MATCH_COLOUR,
-                        );
-                    }
+                ) && rect.intersects(&bounds)
+                {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: rect,
+                            ..Quad::default()
+                        },
+                        FIND_MATCH_COLOUR,
+                    );
                 }
             }
 
-            if let Some(caret) = self.props.caret {
-                if let Some(rect) = page_point_rect(
+            if let Some(caret) = self.props.caret
+                && let Some(rect) = page_point_rect(
                     &m,
                     viewport,
                     bounds,
@@ -1173,24 +1171,20 @@ where
                     // needs a positive overlap), which used to hide the caret completely.
                     caret.width.max(0.75),
                     caret.height,
-                ) {
-                    if rect.intersects(&bounds) {
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: Rectangle::new(
-                                    rect.position(),
-                                    Size::new(1.5, rect.height),
-                                ),
-                                ..Quad::default()
-                            },
-                            palette.primary.strong.color,
-                        );
-                    }
-                }
+                )
+                && rect.intersects(&bounds)
+            {
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(rect.position(), Size::new(1.5, rect.height)),
+                        ..Quad::default()
+                    },
+                    palette.primary.strong.color,
+                );
             }
 
-            if let Some(pre) = &self.props.preedit {
-                if let Some(rect) = page_point_rect(
+            if let Some(pre) = &self.props.preedit
+                && let Some(rect) = page_point_rect(
                     &m,
                     viewport,
                     bounds,
@@ -1202,38 +1196,37 @@ where
                     // Not zero: `Rectangle::intersects` requires a positive overlap.
                     1.0,
                     pre.height_pt,
-                ) {
-                    if rect.intersects(&bounds) {
-                        let size = (pre.height_pt * m.scale / m.sf).max(6.0);
-                        let colour = palette.primary.strong.color;
-                        renderer.fill_text(
-                            Text {
-                                content: pre.text.clone(),
-                                bounds: Size::new(bounds.width, size * 1.4),
-                                size: Pixels(size),
-                                line_height: text::LineHeight::Relative(1.0),
-                                font: renderer.default_font(),
-                                align_x: text::Alignment::Left,
-                                align_y: iced::alignment::Vertical::Top,
-                                shaping: text::Shaping::Advanced,
-                                wrapping: text::Wrapping::None,
-                            },
-                            rect.position(),
-                            colour,
-                            bounds,
-                        );
-                        renderer.fill_quad(
-                            Quad {
-                                bounds: Rectangle::new(
-                                    Point::new(rect.x, rect.y + rect.height),
-                                    Size::new(rect.width.max(2.0), 1.0),
-                                ),
-                                ..Quad::default()
-                            },
-                            colour,
-                        );
-                    }
-                }
+                )
+                && rect.intersects(&bounds)
+            {
+                let size = (pre.height_pt * m.scale / m.sf).max(6.0);
+                let colour = palette.primary.strong.color;
+                renderer.fill_text(
+                    Text {
+                        content: pre.text.clone(),
+                        bounds: Size::new(bounds.width, size * 1.4),
+                        size: Pixels(size),
+                        line_height: text::LineHeight::Relative(1.0),
+                        font: renderer.default_font(),
+                        align_x: text::Alignment::Left,
+                        align_y: iced::alignment::Vertical::Top,
+                        shaping: text::Shaping::Advanced,
+                        wrapping: text::Wrapping::None,
+                    },
+                    rect.position(),
+                    colour,
+                    bounds,
+                );
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(
+                            Point::new(rect.x, rect.y + rect.height),
+                            Size::new(rect.width.max(2.0), 1.0),
+                        ),
+                        ..Quad::default()
+                    },
+                    colour,
+                );
             }
 
             // Scrollbars (overlay, so they never reflow the page strip).
@@ -1262,6 +1255,13 @@ where
             }
         });
         perf::draw_done(started.elapsed(), blank, stale);
+        perf::event("draw", started.elapsed().as_secs_f64() * 1000.0, || {
+            format!(
+                "scroll y {sy:.0}{}{}",
+                if blank { ", blank page" } else { "" },
+                if stale { ", stale strips" } else { "" }
+            )
+        });
         if !blank && !stale {
             perf::screen_current();
         }

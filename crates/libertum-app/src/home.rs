@@ -52,13 +52,18 @@ pub fn view<'a>(
         .on_press(Message::OpenStitch)
         .style(move |_, status| secondary_button(t, status));
 
+    let library = button(text(s::HOME_LIBRARY).size(13))
+        .padding(Padding::from([6.0, 16.0]))
+        .on_press(Message::OpenLibrary)
+        .style(move |_, status| secondary_button(t, status));
+
     let create = button(text(s::HOME_CREATE).size(13).font(bold()))
         .padding(Padding::from([6.0, 20.0]))
         .on_press(Message::CreateDocument(selected))
         .style(move |_, status| primary_button(t, status));
 
     let footer = container(
-        row![space().width(Length::Fill), stitch, open, create]
+        row![space().width(Length::Fill), library, stitch, open, create]
             .spacing(10)
             .align_y(Center),
     )

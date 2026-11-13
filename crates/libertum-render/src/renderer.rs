@@ -33,6 +33,8 @@ pub struct PageRenderer {
     images: ImageCache,
     /// The watermark text rasterised last, by a hash of what it shows and at what size.
     watermark: Option<(u64, Arc<Pixmap>, f32)>,
+    /// Smooth (antialiased) text, dots and turned images; false gives hard pixel edges.
+    antialias: bool,
 }
 
 impl Default for PageRenderer {
@@ -49,7 +51,18 @@ impl PageRenderer {
             pages: PageCache::new(page_cache_bytes),
             images: ImageCache::new(),
             watermark: None,
+            antialias: true,
         }
+    }
+
+    /// Turns antialiasing of text, leader dots and turned images on or off (on by default).
+    /// The setting is part of the page cache key, so cached pages are never served stale.
+    pub fn set_antialias(&mut self, on: bool) {
+        self.antialias = on;
+    }
+
+    pub fn antialias(&self) -> bool {
+        self.antialias
     }
 
     pub fn stats(&self) -> RenderStats {
@@ -79,7 +92,8 @@ impl PageRenderer {
     ) -> Option<Arc<Pixmap>> {
         let key = PageKey {
             page: page_index,
-            content_hash: state.page_content_hash(page_index)?,
+            content_hash: state.page_content_hash(page_index)?
+                ^ if self.antialias { 0 } else { HARD_EDGE_SALT },
             scale_bits: scale.to_bits(),
         };
         if let Some(p) = self.pages.get(&key) {
@@ -226,7 +240,7 @@ impl PageRenderer {
                     self.draw_lines(&mut pm, &layout, lines, x, y - shift, scale);
                 }
                 Decoration::Leader { x0, x1, baseline } => {
-                    draw_leader(&mut pm, x0, x1, baseline - shift, scale);
+                    draw_leader(&mut pm, x0, x1, baseline - shift, scale, self.antialias);
                 }
                 Decoration::Rect {
                     x,
@@ -295,6 +309,7 @@ impl PageRenderer {
         watermark.layout.height.to_bits().hash(&mut hasher);
         watermark.colour.hash(&mut hasher);
         raster_scale.to_bits().hash(&mut hasher);
+        self.antialias.hash(&mut hasher);
         let key = hasher.finish();
         let cached = self
             .watermark
@@ -320,7 +335,7 @@ impl PageRenderer {
                 let lines = 0..layout.lines.len();
                 self.draw_lines(&mut text, layout, lines, pad, pad, raster_scale);
                 let [r, g, b, a] = watermark.colour.map(u32::from);
-                for px in text.data_mut().chunks_exact_mut(4) {
+                for px in text.data_mut().as_chunks_mut::<4>().0 {
                     let coverage = 255 - u32::from(px[0]);
                     let alpha = (coverage * a + 127) / 255;
                     px[0] = ((r * alpha + 127) / 255) as u8;
@@ -347,7 +362,11 @@ impl PageRenderer {
             (watermark.centre_y - shift) * scale,
         );
         let paint = PixmapPaint {
-            quality: FilterQuality::Bilinear,
+            quality: if self.antialias {
+                FilterQuality::Bilinear
+            } else {
+                FilterQuality::Nearest
+            },
             ..PixmapPaint::default()
         };
         pm.draw_pixmap(0, 0, bitmap.as_ref().as_ref(), &paint, transform, None);
@@ -401,6 +420,8 @@ impl PageRenderer {
                 let coords: Vec<i16> = r.normalized_coords().iter().map(|c| c.to_bits()).collect();
                 for g in run.positioned_glyphs() {
                     let x = (dx + g.x) * scale;
+                    // Hard edges also snap each glyph to a whole pixel.
+                    let x = if self.antialias { x } else { x.round() };
                     let y = ((dy + g.y - rise) * scale).round();
                     let xf = x.floor();
                     let subpx = (((x - xf) * 4.0) as u8).min(3);
@@ -414,6 +435,7 @@ impl PageRenderer {
                         coords: &coords,
                         embolden: synth.embolden(),
                         skew_degrees: synth.skew(),
+                        smooth: self.antialias,
                     };
                     if let Some(bm) = self.glyphs.get(&req) {
                         blit_alpha(
@@ -475,6 +497,9 @@ fn fill_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: [u8; 4], sc
     }
 }
 
+/// Mixed into a page's cache key when antialiasing is off.
+const HARD_EDGE_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// Most device pixels per point a watermark is rasterised at; larger scales enlarge it.
 const WATERMARK_MAX_RASTER_SCALE: f32 = 2.0;
 
@@ -486,10 +511,10 @@ const LEADER_DOT_PT: f32 = 0.9;
 
 /// A dot leader: small squares every [`LEADER_PITCH_PT`], right-aligned to `x1` so the dots
 /// line up from entry to entry, sitting on the baseline.
-fn draw_leader(pm: &mut Pixmap, x0: f32, x1: f32, baseline: f32, scale: f32) {
+fn draw_leader(pm: &mut Pixmap, x0: f32, x1: f32, baseline: f32, scale: f32, smooth: bool) {
     let mut paint = Paint::default();
     paint.set_color_rgba8(0, 0, 0, 255);
-    paint.anti_alias = true;
+    paint.anti_alias = smooth;
     let size = (LEADER_DOT_PT * scale).max(1.0);
     let mut x = x1 - LEADER_DOT_PT;
     while x >= x0 {

@@ -5,6 +5,7 @@
 //! carry (tables, drawings, fields, tracked changes) makes the import fail rather than
 //! silently dropping it on the next save.
 
+mod headers;
 mod package;
 mod read;
 mod watermark;

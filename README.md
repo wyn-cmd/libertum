@@ -56,8 +56,8 @@ The Linux build is shipped three ways, all unsigned: a `.deb`, an `.rpm`, and th
 attached; any green CI run has them in its `libertum-x86_64-unknown-linux-gnu` artifact.
 
 ```sh
-sudo apt install ./libertum_0.1.1_amd64.deb                  # Debian, Ubuntu, ...
-sudo dnf install ./libertum-0.1.1-1.x86_64.rpm               # Fedora, openSUSE, ...
+sudo apt install ./libertum_0.1.2_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.1.2-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
 The package puts `libertum` in `/usr/bin` and installs the desktop entry, the icon and a
@@ -73,8 +73,8 @@ There is also a portable AppImage, `Libertum-<version>-x86_64.AppImage`, which c
 font, input, Wayland and graphics libraries itself and needs only the host's X11/XCB and glibc:
 
 ```sh
-chmod +x Libertum-0.1.1-x86_64.AppImage
-./Libertum-0.1.1-x86_64.AppImage
+chmod +x Libertum-0.1.2-x86_64.AppImage
+./Libertum-0.1.2-x86_64.AppImage
 ```
 
 On macOS download `Libertum-<version>-macos-arm64.dmg` (Apple Silicon) or

@@ -354,7 +354,7 @@ fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -431,6 +431,8 @@ pub const SETTINGS_CHAPTER_H1: &str = "Heading 1";
 pub const SETTINGS_CHAPTER_H2: &str = "Heading 2";
 pub const SETTINGS_CHAPTER_H3: &str = "Heading 3";
 pub const SETTINGS_CHAPTER_H4: &str = "Heading 4";
+pub const SETTINGS_ANTIALIASING: &str = "Smooth text and shapes on the page";
+pub const SETTINGS_ANTIALIASING_HINT: &str = "Switch off for hard pixel edges on page text, lines and highlights. PDF export is not affected.";
 pub const SETTINGS_PERFORMANCE: &str = "Show performance overlay";
 pub const SETTINGS_PERFORMANCE_HINT: &str = "Frames per second and frame time in the top-right corner of the document view. It keeps the window redrawing while it is on.";
 pub const PERFORMANCE_MEASURING: &str = "measuring…";
@@ -517,6 +519,12 @@ pub const MARKDOWN_LOSS_TITLE: &str = "Saving as Markdown will lose some formatt
 pub const MARKDOWN_LOSS_MORE: &str = "and more";
 pub const SAVE_ANYWAY: &str = "Save Anyway";
 
+// Documents kept in a synced folder.
+pub const CHANGED_ON_DISK_TITLE: &str = "This file was changed somewhere else";
+pub const CHANGED_ON_DISK_DETAIL: &str = "Another device or program has saved a different version of this file since you opened it. Overwriting replaces that version (the replaced version is kept in the document's history). Saving a copy keeps both.";
+pub const OVERWRITE: &str = "Overwrite";
+pub const SAVE_A_COPY: &str = "Save a Copy\u{2026}";
+
 // Full screen and page thumbnails (View menu).
 pub const VIEW_ENTER_FULL_SCREEN: &str = "Enter Full Screen";
 pub const VIEW_EXIT_FULL_SCREEN: &str = "Exit Full Screen";
@@ -528,6 +536,34 @@ pub const WATERMARK_DIAGONAL: &str = "Diagonal";
 pub const WATERMARK_APPLY: &str = "Apply";
 pub const WATERMARK_REMOVE: &str = "Remove";
 pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page, and kept in Libertum (.lbtd), Word (.docx) and OpenDocument (.odt) files and in PDF exports. RTF and Markdown files do not keep it.";
+
+// Library, version history and sync conflicts
+pub const VIEW_LIBRARY: &str = "Library\u{2026}";
+pub const VIEW_HISTORY: &str = "Version History\u{2026}";
+pub const HOME_LIBRARY: &str = "Library\u{2026}";
+pub const LIBRARY_TITLE: &str = "Library";
+pub const LIBRARY_HINT: &str = "The documents in your library folder, newest first. Put the folder inside a synced folder to keep it on several devices.";
+pub const LIBRARY_NO_FOLDER: &str = "No library folder is chosen yet.";
+pub const LIBRARY_EMPTY: &str = "No documents were found in this folder.";
+pub const LIBRARY_CHOOSE: &str = "Choose Folder\u{2026}";
+pub const LIBRARY_CHANGE: &str = "Change Folder\u{2026}";
+pub const LIBRARY_CLOSE: &str = "Close";
+pub const LIBRARY_OPEN: &str = "Open";
+pub const LIBRARY_HISTORY: &str = "History";
+pub const LIBRARY_CONFLICT_OF: &str = "A sync conflict copy of";
+pub const LIBRARY_USE_COPY: &str = "Use This Copy";
+pub const LIBRARY_KEEP_ORIGINAL: &str = "Keep Original";
+pub const LIBRARY_CONFLICT_HINT: &str = "Use This Copy replaces the original with it. Keep Original puts the copy in the original's history. Either way nothing is lost.";
+pub const HISTORY_TITLE: &str = "Version history";
+pub const HISTORY_HINT: &str = "Earlier versions, kept when the document was saved over. Open one as a copy to look at it, or restore it (the current file is kept first).";
+pub const HISTORY_EMPTY: &str = "This document has no earlier versions yet.";
+pub const HISTORY_OPEN_COPY: &str = "Open Copy";
+pub const HISTORY_RESTORE: &str = "Restore";
+pub const HISTORY_BACK: &str = "Back";
+pub const HISTORY_SAVE_FIRST: &str =
+    "Save or close the document before restoring an earlier version of it.";
+pub const HISTORY_NO_FILE: &str = "Save the document first: only a saved file has a history.";
+pub const LIBRARY_ACTION_FAILED: &str = "That did not work:";
 
 #[cfg(test)]
 mod tests {

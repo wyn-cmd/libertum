@@ -47,6 +47,10 @@ const CT_ENDNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
 pub(crate) const CT_HEADER: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
+pub(crate) const CT_FOOTER: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
+pub(crate) const CT_SETTINGS: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
 const CT_CORE: &str = "application/vnd.openxmlformats-package.core-properties+xml";
 const CT_APP: &str = "application/vnd.openxmlformats-officedocument.extended-properties+xml";
 
@@ -62,7 +66,12 @@ pub(crate) fn build(
     // Watermarks live in the headers: work out their edits first, since new headers add
     // references to the sections' properties.
     let mut extras = extras.clone();
-    let header_edits = crate::watermark::plan(document, &mut extras, origin);
+    // Edited headers and footers first (they become parts the watermark is then added to).
+    let mut staged = origin.cloned().unwrap_or_default();
+    let furniture_edits = crate::headers::plan(document, &mut extras, origin);
+    furniture_edits.clone().apply(&mut staged);
+    let watermark_edits = crate::watermark::plan(document, &mut extras, Some(&staged));
+    let header_edits = furniture_edits.then(watermark_edits);
     let (document_part, media) = document_xml(document, &extras, &note_ids, &table_styles);
     let styles_part = styles_xml(&document.styles, &table_styles);
     let numbering_part = numbering_xml(document);
@@ -270,7 +279,7 @@ pub(crate) fn ensure_content_type(package: &mut Package, part: &str, content_typ
 }
 
 /// Adds a relationship from `document.xml` to `target` (a part beside it) if there is none.
-fn ensure_relationship(package: &mut Package, target: &str, kind: &str) {
+pub(crate) fn ensure_relationship(package: &mut Package, target: &str, kind: &str) {
     let name = "word/_rels/document.xml.rels";
     match package.text(name) {
         Some(text) => {
@@ -1153,50 +1162,50 @@ fn ppr_middle_xml(format: &ParaFormat, list: Option<(u32, u8)>) -> String {
             "<w:numPr><w:ilvl w:val=\"{level}\"/><w:numId w:val=\"{num_id}\"/></w:numPr>"
         ));
     }
-    if let Some(borders) = format.borders {
-        if borders.is_visible() {
-            out.push_str("<w:pBdr>");
-            let sides: [(&str, bool); 4] = [
-                ("top", borders.sides.top),
-                ("left", borders.sides.left),
-                ("bottom", borders.sides.bottom),
-                ("right", borders.sides.right),
-            ];
-            let [r, g, b, _] = borders.colour;
-            for (name, present) in sides {
-                if present {
-                    out.push_str(&format!(
+    if let Some(borders) = format.borders
+        && borders.is_visible()
+    {
+        out.push_str("<w:pBdr>");
+        let sides: [(&str, bool); 4] = [
+            ("top", borders.sides.top),
+            ("left", borders.sides.left),
+            ("bottom", borders.sides.bottom),
+            ("right", borders.sides.right),
+        ];
+        let [r, g, b, _] = borders.colour;
+        for (name, present) in sides {
+            if present {
+                out.push_str(&format!(
                         "<w:{name} w:val=\"single\" w:sz=\"{}\" w:space=\"{}\" w:color=\"{r:02X}{g:02X}{b:02X}\"/>",
                         (borders.width_pt * 8.0).round().clamp(2.0, 96.0) as u32,
                         (borders.space_pt * 20.0).round() as i32
                     ));
-                }
             }
-            out.push_str("</w:pBdr>");
         }
+        out.push_str("</w:pBdr>");
     }
-    if let Some(tabs) = format.tab_stops {
-        if !tabs.is_empty() {
-            out.push_str("<w:tabs>");
-            for stop in tabs.iter() {
-                let kind = match stop.kind {
-                    TabStopKind::Left => "left",
-                    TabStopKind::Centre => "center",
-                    TabStopKind::Right => "right",
-                    TabStopKind::Decimal => "decimal",
-                };
-                out.push_str(&format!(
-                    "<w:tab w:val=\"{kind}\" w:pos=\"{}\"/>",
-                    (stop.position_pt * 20.0).round() as i32
-                ));
-            }
-            out.push_str("</w:tabs>");
+    if let Some(tabs) = format.tab_stops
+        && !tabs.is_empty()
+    {
+        out.push_str("<w:tabs>");
+        for stop in tabs.iter() {
+            let kind = match stop.kind {
+                TabStopKind::Left => "left",
+                TabStopKind::Centre => "center",
+                TabStopKind::Right => "right",
+                TabStopKind::Decimal => "decimal",
+            };
+            out.push_str(&format!(
+                "<w:tab w:val=\"{kind}\" w:pos=\"{}\"/>",
+                (stop.position_pt * 20.0).round() as i32
+            ));
         }
+        out.push_str("</w:tabs>");
     }
-    if let Some(hyphenate) = format.hyphenate {
-        if !hyphenate {
-            out.push_str("<w:suppressAutoHyphens/>");
-        }
+    if let Some(hyphenate) = format.hyphenate
+        && !hyphenate
+    {
+        out.push_str("<w:suppressAutoHyphens/>");
     }
     out
 }

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::advanced::image::Handle;
 use iced::futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -43,6 +43,9 @@ const PAGINATE_CHUNK: usize = 4;
 /// Pages paginated synchronously on open and after a page-setup change, so the first
 /// screenful can be drawn before the background pass catches up.
 const FIRST_SCREEN_PAGES: usize = 4;
+/// A change to more paragraphs than this is not repaginated on the UI thread: the new
+/// snapshots go in at once and the background pass rebuilds the pages (about 20 pages' worth).
+const BULK_PARAGRAPHS: usize = 200;
 /// Pending render requests from the previous frame are kept when they are this many pages
 /// from the new visible range, so fast scrolling has a backlog the worker can chew through.
 const PENDING_MARGIN: usize = 8;
@@ -85,6 +88,20 @@ pub fn pageless_geometry(document: &Document) -> PageGeometry {
     geometry.margins.left = geometry.margins.left.min(side);
     geometry.margins.right = geometry.margins.right.min(side);
     geometry
+}
+
+/// Layout options for a document opened in the app. `LIBERTUM_LAYOUT_THREADS=<n>` sets how
+/// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 8; 1:
+/// none), for measuring.
+fn layout_options() -> LayoutOptions {
+    let threads = std::env::var("LIBERTUM_LAYOUT_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    LayoutOptions {
+        threads,
+        ..LayoutOptions::default()
+    }
 }
 
 /// Events from the worker threads to the UI.
@@ -131,6 +148,19 @@ impl PageMap {
 }
 
 // ---------------------------------------------------------------- strips
+
+static ANTIALIAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether page text and shapes are drawn antialiased (the Settings choice). Every page
+/// renderer follows it, and it is part of each strip's identity, so a change redraws the
+/// pages without clearing anything.
+pub fn antialias() -> bool {
+    ANTIALIAS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_antialias(on: bool) {
+    ANTIALIAS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Rows per strip for a page bitmap `width` pixels wide: as tall as possible below the
 /// synchronous-upload limit, capped at [`MAX_BAND_ROWS`].
@@ -189,7 +219,7 @@ pub fn plan_bands(state: &LayoutState, page: usize, scale: f32) -> Option<BandPl
         let r = rows.min(height - y0);
         let (top, bottom) = (y0 as f32 / scale, (y0 + r) as f32 / scale);
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (width, r, scale.to_bits()).hash(&mut h);
+        (width, r, scale.to_bits(), antialias()).hash(&mut h);
         let mut empty = true;
         for item in items
             .iter()
@@ -538,7 +568,7 @@ impl DocView {
 
     /// Opens `document` on the page setup its sections carry, with the default layout options.
     pub fn open(document: Document) -> (Self, UnboundedReceiver<DocEvent>) {
-        Self::open_with(document, LayoutOptions::default())
+        Self::open_with(document, layout_options())
     }
 
     /// Opens `document` with layout options (from a template). The page geometry comes from
@@ -563,7 +593,7 @@ impl DocView {
                 left: 120.0,
             },
         };
-        Self::open_with_mode(document, LayoutOptions::default(), Some(geometry))
+        Self::open_with_mode(document, layout_options(), Some(geometry))
     }
 
     /// Opens a document in the pageless view: one endless column as wide as its own paper
@@ -571,7 +601,7 @@ impl DocView {
     /// pages read as one long sheet.
     pub fn open_pageless(document: Document) -> (Self, UnboundedReceiver<DocEvent>) {
         let geometry = pageless_geometry(&document);
-        Self::open_with_mode(document, LayoutOptions::default(), Some(geometry))
+        Self::open_with_mode(document, layout_options(), Some(geometry))
     }
 
     fn open_with_mode(
@@ -706,6 +736,7 @@ impl DocView {
         }
         let geometry = layout.page_geometry(page);
         let scale = width_px.max(8) as f32 / geometry.width_pt.max(1.0);
+        self.thumbs.set_antialias(antialias());
         let pixmap = self.thumbs.render_page(&layout, page, scale)?;
         Some((pixmap.width(), pixmap.height(), pixmap.data().to_vec()))
     }
@@ -863,11 +894,11 @@ impl DocView {
                 // paragraphs, insert new blocks.
                 for (index, p) in doc.paragraphs().enumerate() {
                     let mut snapshot = snap(p);
-                    if let Some(old) = layout.paragraphs().get(index) {
-                        if old.id == snapshot.id {
-                            relabel |= old.list != snapshot.list;
-                            snapshot.list_label = old.list_label.clone();
-                        }
+                    if let Some(old) = layout.paragraphs().get(index)
+                        && old.id == snapshot.id
+                    {
+                        relabel |= old.list != snapshot.list;
+                        snapshot.list_label = old.list_label.clone();
                     }
                     let same = layout.paragraphs().get(index).map(|s| s.id) == Some(snapshot.id);
                     if same {
@@ -885,6 +916,22 @@ impl DocView {
                     layout.set_tables(tables);
                     relayout = true;
                 }
+            } else if change.dirty.len() > BULK_PARAGRAPHS {
+                // Select All then Bold, and the like: swap every snapshot in and leave the
+                // pagination to the background pass instead of repaginating once per paragraph
+                // on this thread (1.6 s at 500 pages, measured).
+                let mut items = Vec::with_capacity(change.dirty.len());
+                for id in &change.dirty {
+                    if let (Some(index), Some(p)) = (doc.index_of(*id), doc.paragraph(*id)) {
+                        let mut snapshot = snap(p);
+                        if let Some(old) = layout.paragraphs().get(index) {
+                            relabel |= old.list != snapshot.list;
+                            snapshot.list_label = old.list_label.clone();
+                        }
+                        items.push((index, snapshot));
+                    }
+                }
+                relayout |= layout.replace_paragraphs_deferred(items);
             } else {
                 for id in &change.dirty {
                     if let (Some(index), Some(p)) = (doc.index_of(*id), doc.paragraph(*id)) {
@@ -912,7 +959,7 @@ impl DocView {
                         (i, s)
                     })
                     .collect();
-                layout.replace_paragraphs(all);
+                relayout |= layout.replace_paragraphs_deferred(all);
             } else if !change.styles.is_empty() {
                 // Every paragraph using a changed style (or one based on it) re-resolves.
                 // O(paragraphs), but only for an explicit style change, never for typing.
@@ -928,7 +975,11 @@ impl DocView {
                     })
                     .map(|(i, p)| (i, snap(p)))
                     .collect();
-                layout.replace_paragraphs(restyled);
+                if restyled.len() > BULK_PARAGRAPHS {
+                    relayout |= layout.replace_paragraphs_deferred(restyled);
+                } else {
+                    layout.replace_paragraphs(restyled);
+                }
             }
             if relabel {
                 // One O(paragraphs) numbering pass, only after a structural or list change.
@@ -1117,6 +1168,17 @@ impl DocView {
 
     /// Selection highlight rectangles in page coordinates, one entry per visual line.
     pub fn selection_rects(&self) -> Vec<SelectionRect> {
+        self.selection_rects_within(None)
+    }
+
+    /// The highlight rectangles of the part of the selection on `pages` only. The canvas
+    /// asks for this every frame; with the whole of a long document selected, walking every
+    /// selected paragraph took a layout per paragraph each time (and starved the paginator).
+    pub fn selection_rects_on(&self, pages: std::ops::Range<usize>) -> Vec<SelectionRect> {
+        self.selection_rects_within(Some(pages))
+    }
+
+    fn selection_rects_within(&self, pages: Option<std::ops::Range<usize>>) -> Vec<SelectionRect> {
         let Some((start, end)) = self.editor.ordered_selection() else {
             return Vec::new();
         };
@@ -1128,8 +1190,36 @@ impl DocView {
             return Vec::new();
         };
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        let (mut first, mut last) = (si, ei);
+        if let Some(pages) = pages {
+            // Only the paragraphs that have a line on these pages (paginated so far).
+            let laid_out = layout.pages();
+            let (from, to) = (
+                pages.start.min(laid_out.len()),
+                pages.end.min(laid_out.len()),
+            );
+            if from >= to {
+                return Vec::new();
+            }
+            let lowest = laid_out[from]
+                .slices
+                .iter()
+                .map(|slice| slice.para)
+                .chain(std::iter::once(laid_out[from].start.para))
+                .min()
+                .unwrap_or(0);
+            let highest = laid_out[to - 1]
+                .slices
+                .iter()
+                .map(|slice| slice.para)
+                .chain(std::iter::once(laid_out[to - 1].start.para))
+                .max()
+                .unwrap_or(0);
+            first = first.max(lowest);
+            last = last.min(highest);
+        }
         let mut out = Vec::new();
-        for i in si..=ei {
+        for i in first..=last {
             let Some(snapshot) = layout.paragraphs().get(i) else {
                 break;
             };
@@ -1324,19 +1414,27 @@ fn spawn_paginator(
         .name("libertum-paginate".into())
         .spawn(move || {
             let started = Instant::now();
+            // Time spent waiting for readers (the UI, the page renderer) and doing the work,
+            // for the completion log: the gap between them and `elapsed_ms` is the rest.
+            let mut waited = Duration::ZERO;
+            let mut worked = Duration::ZERO;
             loop {
                 // A page-setup change bumped the epoch: this thread's document is gone.
                 if epoch.load(Ordering::Acquire) != mine {
                     return;
                 }
-                let (pages, complete) = {
+                let (pages, complete, built) = {
+                    let asked = Instant::now();
                     let mut st = layout
                         .write_in_background()
                         .unwrap_or_else(|e| e.into_inner());
+                    waited += asked.elapsed();
+                    let begun = Instant::now();
                     let have = st.page_count();
                     if !st.is_complete() {
                         st.paginate_until(have + PAGINATE_CHUNK);
                     }
+                    worked += begun.elapsed();
                     let mut m = lock(&map.0);
                     for i in m.hashes.len()..st.page_count() {
                         if let Some(h) = st.page_content_hash(i) {
@@ -1344,7 +1442,7 @@ fn spawn_paginator(
                         }
                     }
                     m.complete = st.is_complete();
-                    (m.hashes.len(), m.complete)
+                    (m.hashes.len(), m.complete, st.engine_stats().layouts_built)
                 };
                 if tx
                     .unbounded_send(DocEvent::Pagination { pages, complete })
@@ -1356,6 +1454,9 @@ fn spawn_paginator(
                     tracing::info!(
                         pages,
                         elapsed_ms = started.elapsed().as_millis() as u64,
+                        waited_ms = waited.as_millis() as u64,
+                        worked_ms = worked.as_millis() as u64,
+                        layouts_built = built,
                         "background pagination complete"
                     );
                     return;
@@ -1399,6 +1500,7 @@ fn spawn_render_worker(
                 }
                 let started = Instant::now();
                 let mut rendered = 0usize;
+                renderer.set_antialias(antialias());
                 {
                     let st = layout.read().unwrap_or_else(|e| e.into_inner());
                     let Some(plan) = plan_bands(&st, page, scale) else {
@@ -1424,6 +1526,9 @@ fn spawn_render_worker(
                 }
                 if rendered > 0 {
                     perf::render_done(started.elapsed());
+                    perf::event("raster", started.elapsed().as_secs_f64() * 1000.0, || {
+                        format!("{rendered} page(s)")
+                    });
                 }
                 if tx.unbounded_send(DocEvent::PageReady).is_err() {
                     return;
@@ -1467,9 +1572,9 @@ mod tests {
         let pm = PageRenderer::default()
             .render_page(&st, 0, 1.25)
             .expect("page 0");
-        assert!(pm.data().chunks_exact(4).all(|p| p[3] == 255));
+        assert!(pm.data().as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         // Some pixels are not white, so text really was drawn.
-        assert!(pm.data().chunks_exact(4).any(|p| p[0] < 200));
+        assert!(pm.data().as_chunks::<4>().0.iter().any(|p| p[0] < 200));
     }
 
     #[test]
@@ -1893,5 +1998,55 @@ mod tests {
         }
         // A point on the text, away from both, is not a picture.
         assert!(view.image_at(0, 5.0, 5.0).is_none());
+    }
+
+    /// Select All then Bold touches every paragraph: the layout is swapped in at once, the
+    /// pages are rebuilt afterwards, and the result matches a layout built from scratch.
+    #[test]
+    fn a_document_wide_edit_defers_pagination_and_still_matches_a_fresh_layout() {
+        let (mut view, _rx) = DocView::open(libertum_layout::spike::generate_model_document(40, 5));
+        view.paginate_everything();
+        let before = view.page_total();
+        view.select_all();
+        view.edit(|editor| editor.toggle_bold()).expect("bold");
+        // Whatever the background pass has done so far, finishing it gives the final layout.
+        view.paginate_everything();
+        let doc = view.document();
+        let geometry = PageGeometry::from_setup(&doc.page_setup());
+        let mut fresh = LayoutState::from_document(doc, geometry, LayoutOptions::default());
+        fresh.paginate_all();
+        assert_eq!(view.page_total(), fresh.page_count());
+        assert!(
+            view.page_total() >= before,
+            "bold text cannot shrink the document"
+        );
+        for page in 0..fresh.page_count() {
+            assert!(
+                view.page_content_hash(page).is_some(),
+                "page {page} has no hash"
+            );
+        }
+    }
+
+    /// Select All on a long document: the canvas asks for the highlight of the pages near the
+    /// view only, and what it gets is the same as the matching part of the full highlight.
+    #[test]
+    fn selection_rects_on_pages_match_the_full_selection_there() {
+        let (mut view, _rx) = DocView::open(libertum_layout::spike::generate_model_document(40, 5));
+        view.paginate_everything();
+        view.select_all();
+        let full = view.selection_rects();
+        let near = view.selection_rects_on(10..13);
+        assert!(!near.is_empty());
+        assert!(near.len() < full.len() / 4, "only a few pages' worth");
+        for page in 11..12 {
+            let expected: Vec<_> = full.iter().filter(|r| r.page == page).collect();
+            let got: Vec<_> = near.iter().filter(|r| r.page == page).collect();
+            assert_eq!(expected, got, "page {page}");
+        }
+        assert!(
+            view.selection_rects_on(500..510).is_empty(),
+            "beyond the pages"
+        );
     }
 }

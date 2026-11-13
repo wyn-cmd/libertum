@@ -180,18 +180,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install LibreOffice Writer and poppler
+      - name: Install LibreOffice Writer, poppler and the build libraries
         run: |
+          # The page-count tool is part of libertum-app, whose dependencies need
+          # fontconfig, X11, Wayland, xkbcommon and GTK headers at build time (the same
+          # set the platform matrix installs). Without them the build fails inside
+          # yeslogic-fontconfig-sys before LibreOffice is ever used.
           sudo apt-get update
           for attempt in 1 2 3; do
             if sudo apt-get install -y --no-install-recommends \
-                libreoffice-writer-nogui poppler-utils; then
+                libreoffice-writer-nogui poppler-utils \
+                pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev; then
               exit 0
             fi
             echo "apt install attempt $attempt failed; retrying in 20s"
             sleep 20
           done
-          echo "could not install LibreOffice" >&2
+          echo "could not install LibreOffice or the build libraries" >&2
           exit 1
       - name: Build the page-count tool and the acceptance document
         run: |

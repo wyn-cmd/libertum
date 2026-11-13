@@ -250,7 +250,26 @@ impl FileContext {
         }
     }
 
+    /// Saves safely for a synced folder: the file being replaced is first kept in the
+    /// document's history, and the new one is written beside it and renamed into place so a
+    /// sync client never sees a half-written file. (Markdown also writes pictures beside the
+    /// file, so it writes in place.)
     fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Err(error) = libertum_library::snapshot(path, std::time::SystemTime::now()) {
+            tracing::warn!(%error, path = %path.display(), "could not keep the earlier version");
+        }
+        if matches!(self, Self::Markdown(_)) {
+            return self.save_in_place(path);
+        }
+        libertum_library::save_atomic(path, |temporary| self.save_in_place(temporary)).map_err(
+            |error| match error {
+                libertum_library::SaveError::Write(message) => message,
+                libertum_library::SaveError::Replace(error) => error.to_string(),
+            },
+        )
+    }
+
+    fn save_in_place(&self, path: &std::path::Path) -> Result<(), String> {
         match self {
             Self::Docx(docx) => docx.save(path).map_err(|error| error.to_string()),
             Self::Odt(odt) => odt.save(path).map_err(|error| error.to_string()),
@@ -337,12 +356,25 @@ enum Modal {
     Unsaved { pending: Pending },
     /// An open or save failed. The message is already user-facing.
     Error(String),
+    /// The file at `path` changed on disk since it was opened (another device, a sync service);
+    /// Overwrite saves anyway, Save a Copy asks for another name.
+    ChangedOnDisk { path: PathBuf },
     /// Saving `path` as Markdown would drop the listed formatting; Save writes it anyway.
     MarkdownLoss { path: PathBuf, losses: Vec<String> },
     /// A snapshot from the last session is waiting: restore or discard it.
     Recovery,
     /// Documents are being picked and ordered for stitching.
     Stitch,
+    /// The library folder's documents, with their histories and any sync conflict copies.
+    Library {
+        entries: Vec<libertum_library::LibraryEntry>,
+    },
+    /// The earlier versions of the document at `path`; `from_library` returns to the Library.
+    History {
+        path: PathBuf,
+        versions: Vec<libertum_library::Version>,
+        from_library: bool,
+    },
     /// Choosing what to insert for Date & Time.
     DateTime {
         updated: bool,
@@ -410,6 +442,27 @@ pub enum Message {
     StitchRemove(usize),
     StitchGo,
     CloseStitch,
+    /// The Library window (chooses the folder first when none is set).
+    OpenLibrary,
+    ChooseLibraryFolder,
+    CloseLibrary,
+    /// Version history of a library document, or of the open document when `None`.
+    OpenHistory(Option<PathBuf>),
+    HistoryBack,
+    /// Opens a past version as an unsaved copy.
+    HistoryOpenCopy(PathBuf),
+    HistoryRestore {
+        original: PathBuf,
+        version: PathBuf,
+    },
+    UseConflictCopy {
+        original: PathBuf,
+        copy: PathBuf,
+    },
+    KeepOriginal {
+        original: PathBuf,
+        copy: PathBuf,
+    },
     /// A file dropped on the window.
     FileDropped(PathBuf),
     /// Clipboard commands, from the right-click menu (the keyboard has the same ones).
@@ -437,6 +490,7 @@ pub enum Message {
     SetUnits(UnitsPreference),
     /// Show or hide the frame-rate and frame-time overlay (Settings).
     SetShowPerformance(bool),
+    SetAntialiasing(bool),
     /// A frame was rendered.
     FpsFrame(Instant),
     /// The autosave timer fired.
@@ -727,6 +781,9 @@ pub struct App {
     bookmark_draft: Option<(libertum_model::BlockId, usize, String)>,
     /// Where autosave snapshots live (the platform data directory; tests point it elsewhere).
     recovery_dir: PathBuf,
+    /// What the open file looked like when it was opened or last saved, to notice a change made
+    /// by another device or program (a synced folder).
+    disk_stamp: Option<libertum_library::DiskStamp>,
     /// A snapshot waiting for the user's Restore or Discard choice.
     pending_recovery: Option<(libertum_model::Document, recovery::Meta)>,
     /// The Settings window is over the document.
@@ -828,6 +885,7 @@ impl App {
             find_generation: 0,
             thumb_scroll: (0.0, 0.0),
             recovery_dir: recovery::data_dir().unwrap_or_else(std::env::temp_dir),
+            disk_stamp: None,
             pending_recovery: None,
             settings_open: false,
             vocabulary_open: false,
@@ -858,6 +916,7 @@ impl App {
         path: Option<PathBuf>,
         open: Option<PathBuf>,
     ) -> (Self, Task<Message>) {
+        crate::docview::set_antialias(settings.antialiasing);
         // macOS ignores Iced's window icon and this build has no .app bundle: the Dock icon
         // is set here, once the event loop exists (see src/macos_icon.rs).
         #[cfg(all(target_os = "macos", not(test)))]
@@ -950,17 +1009,31 @@ impl App {
             self.state.open_menu = Some(Menu::Export);
         }
         // `LIBERTUM_AO3_PICK=<n>` opens that chapter's window at start-up.
-        if let Ok(index) = std::env::var("LIBERTUM_AO3_PICK") {
-            if let Ok(index) = index.parse::<usize>() {
-                self.state.ao3_chapters = self.doc.as_ref().map_or_else(Vec::new, |doc| {
-                    libertum_export::chapters(doc.document(), self.settings.chapter_headings)
-                });
-                tasks.push(self.update(Message::Ao3Chapter(index)));
-            }
+        if let Ok(index) = std::env::var("LIBERTUM_AO3_PICK")
+            && let Ok(index) = index.parse::<usize>()
+        {
+            self.state.ao3_chapters = self.doc.as_ref().map_or_else(Vec::new, |doc| {
+                libertum_export::chapters(doc.document(), self.settings.chapter_headings)
+            });
+            tasks.push(self.update(Message::Ao3Chapter(index)));
         }
         // `LIBERTUM_TAGS=1` opens the AO3 tag vocabulary window at start-up.
         if std::env::var("LIBERTUM_TAGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
             self.vocabulary_open = true;
+        }
+        // `LIBERTUM_LIBRARY=<folder>` opens the Library window on that folder at start-up
+        // (not saved as the setting unless another setting change writes the file), and
+        // `LIBERTUM_HISTORY=<file>` opens that document's version history.
+        if let Ok(folder) = std::env::var("LIBERTUM_LIBRARY")
+            && !folder.is_empty()
+        {
+            self.settings.library_folder = Some(PathBuf::from(folder));
+            self.show_library();
+        }
+        if let Ok(file) = std::env::var("LIBERTUM_HISTORY")
+            && !file.is_empty()
+        {
+            self.show_history(PathBuf::from(file), false);
         }
     }
 
@@ -1398,6 +1471,16 @@ impl App {
                 .map(DocView::page_used_heights)
                 .unwrap_or_default(),
         )
+    }
+
+    /// The pages on screen plus one either side: the part of a selection worth highlighting.
+    fn pages_near_view(&self) -> std::ops::Range<usize> {
+        if self.viewport.is_none() {
+            return 0..4;
+        }
+        let vp = self.viewport_physical();
+        let visible = self.metrics().visible_pages(self.scroll.1, vp.height);
+        visible.start.saturating_sub(1)..visible.end + 1
     }
 
     /// Canvas size in physical pixels.
@@ -2208,6 +2291,63 @@ impl App {
         self.open_path(path)
     }
 
+    /// Asks for the library folder and remembers it. False when the dialog was cancelled.
+    fn pick_library_folder(&mut self) -> bool {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title(s::LIBRARY_CHOOSE)
+            .pick_folder()
+        else {
+            return false;
+        };
+        self.settings.library_folder = Some(folder);
+        self.save_settings();
+        true
+    }
+
+    /// Lists the library folder (three folders deep) in the Library window.
+    fn show_library(&mut self) {
+        let entries = self
+            .settings
+            .library_folder
+            .as_deref()
+            .map(|folder| libertum_library::scan_library(folder, 3))
+            .unwrap_or_default();
+        self.modal = Some(Modal::Library { entries });
+    }
+
+    fn show_history(&mut self, path: PathBuf, from_library: bool) {
+        let versions = libertum_library::versions(&path);
+        self.modal = Some(Modal::History {
+            path,
+            versions,
+            from_library,
+        });
+    }
+
+    fn library_failed(&mut self, error: &std::io::Error) -> Task<Message> {
+        tracing::warn!(%error, "a library action failed");
+        self.modal = Some(Modal::Error(format!(
+            "{} {error}",
+            s::LIBRARY_ACTION_FAILED
+        )));
+        Task::none()
+    }
+
+    /// Opens a history version as a new, unsaved document: it has no file of its own, so Save
+    /// asks where to put it and the history copy is never written to.
+    fn open_version_copy(&mut self, version: PathBuf) -> Task<Message> {
+        let task = self.open_path(version.clone());
+        if self.file.as_ref() == Some(&version) {
+            self.settings
+                .recent_files
+                .retain(|recent| recent != &version);
+            self.save_settings();
+            self.file = None;
+            self.disk_stamp = None;
+        }
+        task
+    }
+
     /// Reads `path` and replaces the open document with it. Parsing runs on the UI thread;
     /// an ODT or DOCX opens in well under a second (the budget is in PLAN §2) and the dialog
     /// is already modal.
@@ -2241,6 +2381,7 @@ impl App {
         self.state.current_page = 1;
         self.doc = Some(doc);
         self.remember_recent(&path);
+        self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
         self.file = Some(path);
         self.file_context = Some(context);
         self.dirty = false;
@@ -2526,12 +2667,13 @@ impl App {
         self.state.find.notice = None;
         self.state.find.last = None;
         self.state.find.count = None;
-        if let Some(doc) = self.doc.as_ref() {
-            if let Some(text) = doc.editor().copy() {
-                if !text.is_empty() && !text.contains('\n') && text.len() <= 120 {
-                    self.state.find.query = text;
-                }
-            }
+        if let Some(doc) = self.doc.as_ref()
+            && let Some(text) = doc.editor().copy()
+            && !text.is_empty()
+            && !text.contains('\n')
+            && text.len() <= 120
+        {
+            self.state.find.query = text;
         }
         self.canvas_focused = false;
         let search = self.find_as_typed();
@@ -2781,8 +2923,22 @@ impl App {
         self.write_document(path)
     }
 
-    /// Writes the document to `path` on a background task, in the format its extension names.
+    /// Writes the document to `path`, unless the file on disk has changed since it was opened or
+    /// last saved here (another device, a sync service): then the user chooses first.
     fn write_document(&mut self, path: PathBuf) -> Task<Message> {
+        let changed = self.file.as_ref() == Some(&path)
+            && self
+                .disk_stamp
+                .is_some_and(|stamp| stamp.is_stale(&path).unwrap_or(false));
+        if changed {
+            self.modal = Some(Modal::ChangedOnDisk { path });
+            return Task::none();
+        }
+        self.write_document_forced(path)
+    }
+
+    /// Writes the document to `path` on a background task, in the format its extension names.
+    fn write_document_forced(&mut self, path: PathBuf) -> Task<Message> {
         // An "updated date and time" field shows this save, and the save time itself is part
         // of what a native document keeps.
         let now = now_seconds();
@@ -2846,6 +3002,7 @@ impl App {
                     self.file_context = Some(FileContext::new(format, document));
                 }
                 self.remember_recent(&path);
+                self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
                 self.file = Some(path);
                 self.dirty = false;
                 self.modal = None;
@@ -2899,12 +3056,19 @@ impl App {
                 Task::none()
             }
             (Modal::Stitch, _) => Task::none(),
+            (Modal::Library { .. } | Modal::History { .. }, _) => Task::none(),
             // The AO3 chapter window has its own Close button; it is not a choice.
             (Modal::Ao3Chapter { .. }, _) => Task::none(),
             (Modal::DateTime { .. }, _) => Task::none(),
             (Modal::Recovery, ModalChoice::Restore) => self.restore_recovery(),
             (Modal::Recovery, _) => {
                 self.discard_recovery();
+                Task::none()
+            }
+            (Modal::ChangedOnDisk { path }, ModalChoice::Save) => self.write_document_forced(path),
+            (Modal::ChangedOnDisk { .. }, ModalChoice::Discard) => self.save_document(true),
+            (Modal::ChangedOnDisk { .. }, _) => {
+                self.after_save = None;
                 Task::none()
             }
             (Modal::MarkdownLoss { path, .. }, ModalChoice::Save) => self.write_document(path),
@@ -3030,11 +3194,24 @@ impl App {
                 | Message::CreateDocument(_)
                 | Message::Canvas(CanvasEvent::Pointer { .. } | CanvasEvent::PointerDrag { .. })
         );
+        let mut kind = String::new();
+        if perf::enabled() {
+            let text = format!("{message:?}");
+            let end = text
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(text.len());
+            kind = text[..end].to_owned();
+            perf::message(kind.clone());
+        }
         let task = self.update_inner(message);
         if selection_may_change {
             self.refresh_format();
         }
-        perf::update_done(started.elapsed());
+        let elapsed = started.elapsed();
+        perf::update_done(elapsed);
+        if elapsed >= Duration::from_micros(300) {
+            perf::event("update", elapsed.as_secs_f64() * 1000.0, || kind);
+        }
         task
     }
 
@@ -3054,10 +3231,9 @@ impl App {
                 | Message::ScaleFactor(_)
                 | Message::SystemTheme(_)
                 | Message::WindowResized(_)
-        ) {
-            if let Some((field, _)) = self.state.editing.take() {
-                self.apply_field(field);
-            }
+        ) && let Some((field, _)) = self.state.editing.take()
+        {
+            self.apply_field(field);
         }
         // A context menu closes on the next user action (not on internal messages such as
         // the canvas reporting its size after a redraw, which would close it instantly).
@@ -3258,6 +3434,69 @@ impl App {
                 self.modal = None;
             }
             Message::StitchGo => return self.stitch_now(),
+            Message::OpenLibrary => {
+                self.state.open_menu = None;
+                if self.settings.library_folder.is_none() && !self.pick_library_folder() {
+                    return Task::none();
+                }
+                self.show_library();
+            }
+            Message::ChooseLibraryFolder => {
+                if self.pick_library_folder() {
+                    self.show_library();
+                }
+            }
+            Message::CloseLibrary => self.modal = None,
+            Message::OpenHistory(path) => {
+                self.state.open_menu = None;
+                let from_library = path.is_some();
+                let Some(path) = path.or_else(|| self.file.clone()) else {
+                    self.modal = Some(Modal::Error(s::HISTORY_NO_FILE.to_owned()));
+                    return Task::none();
+                };
+                self.show_history(path, from_library);
+            }
+            Message::HistoryBack => self.show_library(),
+            Message::HistoryOpenCopy(version) => {
+                if self.doc.is_some() && self.dirty {
+                    self.modal = Some(Modal::Error(s::HISTORY_SAVE_FIRST.to_owned()));
+                    return Task::none();
+                }
+                return self.open_version_copy(version);
+            }
+            Message::HistoryRestore { original, version } => {
+                if self.doc.is_some() && self.dirty && self.file.as_ref() == Some(&original) {
+                    self.modal = Some(Modal::Error(s::HISTORY_SAVE_FIRST.to_owned()));
+                    return Task::none();
+                }
+                let result =
+                    libertum_library::restore(&original, &version, std::time::SystemTime::now());
+                if let Err(error) = result {
+                    return self.library_failed(&error);
+                }
+                if self.file.as_ref() == Some(&original) {
+                    return self.open_path(original);
+                }
+                self.show_history(original, true);
+            }
+            Message::UseConflictCopy { original, copy } => {
+                if self.doc.is_some() && self.dirty && self.file.as_ref() == Some(&original) {
+                    self.modal = Some(Modal::Error(s::HISTORY_SAVE_FIRST.to_owned()));
+                    return Task::none();
+                }
+                if let Err(error) =
+                    libertum_library::use_copy(&original, &copy, std::time::SystemTime::now())
+                {
+                    return self.library_failed(&error);
+                }
+                self.show_library();
+            }
+            Message::KeepOriginal { original, copy } => {
+                if let Err(error) = libertum_library::archive_copy(&original, &copy) {
+                    return self.library_failed(&error);
+                }
+                self.show_library();
+            }
             Message::Shortcut(Shortcut::CloseDocument) => return self.request_home(),
             Message::OpenSettings => {
                 self.state.open_menu = None;
@@ -3325,6 +3564,13 @@ impl App {
                 self.fps = crate::fps::FrameCounter::default();
                 self.save_settings();
             }
+            Message::SetAntialiasing(on) => {
+                self.settings.antialiasing = on;
+                crate::docview::set_antialias(on);
+                // Thumbnails are keyed by page content, not by how they were drawn.
+                self.thumb_cache.clear();
+                self.save_settings();
+            }
             Message::SetUnits(preference) => {
                 self.settings.units = preference;
                 self.state.units = preference.to_units();
@@ -3356,19 +3602,19 @@ impl App {
                 self.fps.tick(now);
             }
             Message::AutosaveTick => {
-                if self.dirty {
-                    if let Some(doc) = self.doc.as_ref() {
-                        let document = doc.document().clone();
-                        let path = self.file.clone();
-                        let dir = self.recovery_dir.clone();
-                        return Task::perform(
-                            async move {
-                                recovery::write(&dir, &document, path.as_deref())
-                                    .map_err(|error| error.to_string())
-                            },
-                            Message::Autosaved,
-                        );
-                    }
+                if self.dirty
+                    && let Some(doc) = self.doc.as_ref()
+                {
+                    let document = doc.document().clone();
+                    let path = self.file.clone();
+                    let dir = self.recovery_dir.clone();
+                    return Task::perform(
+                        async move {
+                            recovery::write(&dir, &document, path.as_deref())
+                                .map_err(|error| error.to_string())
+                        },
+                        Message::Autosaved,
+                    );
                 }
             }
             Message::Autosaved(result) => {
@@ -3500,10 +3746,10 @@ impl App {
                 self.state.zoom_edit = Some(text);
             }
             Message::ZoomCommit => {
-                if let Some(text) = self.state.zoom_edit.take() {
-                    if let Some(value) = crate::widgets::stepper::parse(&text) {
-                        self.set_zoom_percent(value);
-                    }
+                if let Some(text) = self.state.zoom_edit.take()
+                    && let Some(value) = crate::widgets::stepper::parse(&text)
+                {
+                    self.set_zoom_percent(value);
                 }
             }
             Message::Canvas(event) => return self.on_canvas_event(event),
@@ -3640,13 +3886,12 @@ impl App {
             Message::Keyboard(event) => return self.on_keyboard(event),
             Message::Ime(event) => return self.on_ime(event),
             Message::PasteText(text) => {
-                if let Some(text) = text {
-                    if self.canvas_focused {
-                        if let Some(doc) = self.doc.as_mut() {
-                            let result = doc.edit(|ed| ed.paste(&text));
-                            return self.finish_edit(result);
-                        }
-                    }
+                if let Some(text) = text
+                    && self.canvas_focused
+                    && let Some(doc) = self.doc.as_mut()
+                {
+                    let result = doc.edit(|ed| ed.paste(&text));
+                    return self.finish_edit(result);
                 }
             }
             Message::ScaleFactor(sf) => self.set_scale_factor(sf),
@@ -4074,11 +4319,11 @@ impl App {
             if let Some(t) = toggle {
                 self.toggle_char(t);
             }
-            if matches!(msg, FormatMsg::ToggleStrike) {
-                if let Some(doc) = self.doc.as_mut() {
-                    let result = doc.edit(|ed| ed.toggle_strikethrough());
-                    let _ = self.finish_edit(result);
-                }
+            if matches!(msg, FormatMsg::ToggleStrike)
+                && let Some(doc) = self.doc.as_mut()
+            {
+                let result = doc.edit(|ed| ed.toggle_strikethrough());
+                let _ = self.finish_edit(result);
             }
             let character = matches!(
                 msg,
@@ -4742,6 +4987,16 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let started = Instant::now();
+        let element = self.view_inner();
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_micros(300) {
+            perf::event("view", elapsed.as_secs_f64() * 1000.0, String::new);
+        }
+        element
+    }
+
+    fn view_inner(&self) -> Element<'_, Message> {
         let t = Tokens::of(self.scheme());
         let Some(doc) = &self.doc else {
             // Prompts (the stitch dialog, an open error, crash recovery) belong on the home
@@ -4765,7 +5020,7 @@ impl App {
                 caret: doc.caret_rect().filter(|_| self.caret_on),
                 ime_enabled: self.canvas_focused && self.state.editing.is_none(),
                 ime_caret: doc.caret_rect(),
-                selection: doc.selection_rects(),
+                selection: doc.selection_rects_on(self.pages_near_view()),
                 find: self.find_match_rects(),
                 preedit: self.preedit_overlay(),
                 animate: self.autoscroll.as_ref().is_some_and(AutoScroll::active),
@@ -5065,6 +5320,273 @@ impl App {
         .into()
     }
 
+    /// One window card with a dimmed backdrop that closes it.
+    fn window_card<'a>(
+        &self,
+        t: Tokens,
+        width: f32,
+        content: Element<'a, Message>,
+        close: Message,
+    ) -> Element<'a, Message> {
+        let card = container(content)
+            .padding(18)
+            .width(Length::Fixed(width))
+            .style(move |_| container::Style {
+                background: Some(t.chrome.into()),
+                border: border::rounded(10),
+                ..container::Style::default()
+            });
+        stack![
+            mouse_area(space().width(Length::Fill).height(Length::Fill)).on_press(close),
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// The Library window: the documents under the library folder, newest first, each with
+    /// its history, and sync conflict copies with the choice of which side to keep.
+    fn library_layer<'a>(
+        &'a self,
+        entries: &'a [libertum_library::LibraryEntry],
+        t: Tokens,
+    ) -> Element<'a, Message> {
+        use crate::widgets::controls::{bold, caption};
+        let plain = |label: &'static str, message: Message| -> Element<'a, Message> {
+            button(text(label).size(12))
+                .padding([3, 8])
+                .style(move |_, status| flat(t, status))
+                .on_press(message)
+                .into()
+        };
+        let root = self.settings.library_folder.as_deref();
+        let when = |secs: u64| {
+            libertum_editor::format_date_time(
+                i64::try_from(secs).unwrap_or(0),
+                DateTimeFormat::DateTimeMedium,
+            )
+        };
+        let mut list = column![].spacing(6);
+        for entry in entries {
+            let name = entry
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.path.display().to_string());
+            let folder = entry
+                .path
+                .parent()
+                .and_then(|parent| root.and_then(|root| parent.strip_prefix(root).ok()))
+                .map(|relative| relative.display().to_string())
+                .filter(|relative| !relative.is_empty());
+            let mut details = when(entry.modified);
+            if let Some(folder) = folder {
+                details = format!("{folder}  \u{b7}  {details}");
+            }
+            let mut buttons = row![].spacing(2).align_y(Center);
+            let original = entry.conflict_of.as_ref().map(|original| {
+                entry
+                    .path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(original)
+            });
+            if entry.versions > 0 {
+                buttons = buttons.push(plain(
+                    s::LIBRARY_HISTORY,
+                    Message::OpenHistory(Some(entry.path.clone())),
+                ));
+            }
+            buttons = buttons.push(plain(
+                s::LIBRARY_OPEN,
+                Message::OpenRecent(entry.path.clone()),
+            ));
+            let mut item = column![
+                row![
+                    column![
+                        text(name).size(13).color(t.text),
+                        text(details).size(11).color(t.text_secondary),
+                    ]
+                    .spacing(1)
+                    .width(Length::Fill),
+                    buttons,
+                ]
+                .align_y(Center),
+            ]
+            .spacing(3);
+            if let (Some(of), Some(original)) = (&entry.conflict_of, original) {
+                item = item.push(
+                    text(format!("{} {of}", s::LIBRARY_CONFLICT_OF))
+                        .size(11)
+                        .color(t.accent),
+                );
+                item = item.push(
+                    row![
+                        plain(
+                            s::LIBRARY_USE_COPY,
+                            Message::UseConflictCopy {
+                                original: original.clone(),
+                                copy: entry.path.clone(),
+                            },
+                        ),
+                        plain(
+                            s::LIBRARY_KEEP_ORIGINAL,
+                            Message::KeepOriginal {
+                                original,
+                                copy: entry.path.clone(),
+                            },
+                        ),
+                    ]
+                    .spacing(4),
+                );
+            }
+            list = list.push(container(item).padding([6, 8]).width(Length::Fill).style(
+                move |_| container::Style {
+                    background: Some(t.control.into()),
+                    border: border::rounded(6),
+                    ..container::Style::default()
+                },
+            ));
+        }
+        let body: Element<'a, Message> = if root.is_none() {
+            caption(t, s::LIBRARY_NO_FOLDER)
+        } else if entries.is_empty() {
+            caption(t, s::LIBRARY_EMPTY)
+        } else {
+            iced::widget::scrollable(list)
+                .height(Length::Fixed(320.0))
+                .into()
+        };
+        // A long path keeps its tail, which is the part that tells folders apart.
+        let location = root
+            .map(|root| {
+                const KEEP: usize = 64;
+                let full = root.display().to_string();
+                let count = full.chars().count();
+                if count > KEEP {
+                    let tail: String = full.chars().skip(count - KEEP).collect();
+                    format!("\u{2026}{tail}")
+                } else {
+                    full
+                }
+            })
+            .unwrap_or_default();
+        let footer = row![
+            plain(
+                if root.is_some() {
+                    s::LIBRARY_CHANGE
+                } else {
+                    s::LIBRARY_CHOOSE
+                },
+                Message::ChooseLibraryFolder,
+            ),
+            space::horizontal(),
+            plain(s::LIBRARY_CLOSE, Message::CloseLibrary),
+        ]
+        .align_y(Center);
+        let mut content = column![
+            text(s::LIBRARY_TITLE).size(16).font(bold()).color(t.text),
+            caption(t, s::LIBRARY_HINT),
+        ]
+        .spacing(10);
+        if !location.is_empty() {
+            content = content.push(text(location).size(11).color(t.text_secondary));
+        }
+        if entries.iter().any(|entry| entry.conflict_of.is_some()) {
+            content = content.push(caption(t, s::LIBRARY_CONFLICT_HINT));
+        }
+        let content = content.push(body).push(footer);
+        self.window_card(t, 560.0, content.into(), Message::CloseLibrary)
+    }
+
+    /// The version history window for one document.
+    fn history_layer<'a>(
+        &'a self,
+        path: &'a std::path::Path,
+        versions: &'a [libertum_library::Version],
+        from_library: bool,
+        t: Tokens,
+    ) -> Element<'a, Message> {
+        use crate::widgets::controls::{bold, caption};
+        let plain = |label: &'static str, message: Message| -> Element<'a, Message> {
+            button(text(label).size(12))
+                .padding([3, 8])
+                .style(move |_, status| flat(t, status))
+                .on_press(message)
+                .into()
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut list = column![].spacing(6);
+        for version in versions {
+            let when = libertum_editor::format_date_time(
+                i64::try_from(version.taken).unwrap_or(0),
+                DateTimeFormat::DateTimeMedium,
+            );
+            let kib = version.size.div_ceil(1024);
+            list = list.push(
+                container(
+                    row![
+                        column![
+                            text(when).size(13).color(t.text),
+                            text(format!("{kib} KB")).size(11).color(t.text_secondary),
+                        ]
+                        .spacing(1)
+                        .width(Length::Fill),
+                        plain(
+                            s::HISTORY_OPEN_COPY,
+                            Message::HistoryOpenCopy(version.path.clone()),
+                        ),
+                        plain(
+                            s::HISTORY_RESTORE,
+                            Message::HistoryRestore {
+                                original: path.to_path_buf(),
+                                version: version.path.clone(),
+                            },
+                        ),
+                    ]
+                    .spacing(4)
+                    .align_y(Center),
+                )
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(t.control.into()),
+                    border: border::rounded(6),
+                    ..container::Style::default()
+                }),
+            );
+        }
+        let body: Element<'a, Message> = if versions.is_empty() {
+            caption(t, s::HISTORY_EMPTY)
+        } else {
+            iced::widget::scrollable(list)
+                .height(Length::Fixed(320.0))
+                .into()
+        };
+        let mut footer = row![].align_y(Center);
+        if from_library {
+            footer = footer.push(plain(s::HISTORY_BACK, Message::HistoryBack));
+        }
+        footer = footer
+            .push(space::horizontal())
+            .push(plain(s::LIBRARY_CLOSE, Message::CloseLibrary));
+        let content = column![
+            text(s::HISTORY_TITLE).size(16).font(bold()).color(t.text),
+            text(name).size(12).color(t.text_secondary),
+            caption(t, s::HISTORY_HINT),
+            body,
+            footer,
+        ]
+        .spacing(10);
+        self.window_card(t, 520.0, content.into(), Message::CloseLibrary)
+    }
+
     /// The Settings window: a card over the canvas. Every change applies at once and is
     /// written to the settings file.
     fn settings_layer(&self, t: Tokens) -> Element<'_, Message> {
@@ -5201,6 +5723,17 @@ impl App {
                     .spacing(6)
                     .into(),
                 ),
+                column![
+                    controls::checkbox_row(
+                        t,
+                        s::SETTINGS_ANTIALIASING,
+                        self.settings.antialiasing,
+                        false,
+                        Message::SetAntialiasing,
+                    ),
+                    controls::caption(t, s::SETTINGS_ANTIALIASING_HINT),
+                ]
+                .spacing(4),
                 column![
                     controls::checkbox_row(
                         t,
@@ -5651,6 +6184,17 @@ impl App {
         if matches!(modal, Modal::Stitch) {
             return self.stitch_layer(t);
         }
+        if let Modal::Library { entries } = modal {
+            return self.library_layer(entries, t);
+        }
+        if let Modal::History {
+            path,
+            versions,
+            from_library,
+        } = modal
+        {
+            return self.history_layer(path, versions, *from_library, t);
+        }
         if let Modal::Ao3Chapter {
             title,
             html,
@@ -5678,6 +6222,7 @@ impl App {
             Modal::Unsaved { .. } => (s::UNSAVED_TITLE.to_owned(), s::UNSAVED_DETAIL.to_owned()),
             Modal::Error(message) => (message.clone(), String::new()),
             Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
+            Modal::Library { .. } | Modal::History { .. } => (String::new(), String::new()),
             Modal::DateTime { .. } => (s::DATE_TIME_TITLE.to_owned(), String::new()),
             Modal::Ao3Chapter { .. } => (String::new(), String::new()),
             Modal::Recovery => {
@@ -5696,6 +6241,10 @@ impl App {
                 };
                 (s::RECOVERY_TITLE.to_owned(), detail)
             }
+            Modal::ChangedOnDisk { .. } => (
+                s::CHANGED_ON_DISK_TITLE.to_owned(),
+                s::CHANGED_ON_DISK_DETAIL.to_owned(),
+            ),
             Modal::MarkdownLoss { losses, .. } => {
                 // The first few kinds; a long list would not fit the prompt.
                 const SHOWN: usize = 8;
@@ -5719,11 +6268,20 @@ impl App {
                 self.modal_button(s::CANCEL, false, ModalChoice::Cancel),
             ],
             Modal::Error(_) => vec![self.modal_button(s::OK, true, ModalChoice::Cancel)],
+            Modal::ChangedOnDisk { .. } => vec![
+                self.modal_button(s::OVERWRITE, false, ModalChoice::Save),
+                self.modal_button(s::SAVE_A_COPY, true, ModalChoice::Discard),
+                self.modal_button(s::CANCEL, false, ModalChoice::Cancel),
+            ],
             Modal::MarkdownLoss { .. } => vec![
                 self.modal_button(s::SAVE_ANYWAY, true, ModalChoice::Save),
                 self.modal_button(s::CANCEL, false, ModalChoice::Cancel),
             ],
-            Modal::Stitch | Modal::DateTime { .. } | Modal::Ao3Chapter { .. } => Vec::new(),
+            Modal::Stitch
+            | Modal::Library { .. }
+            | Modal::History { .. }
+            | Modal::DateTime { .. }
+            | Modal::Ao3Chapter { .. } => Vec::new(),
             Modal::Recovery => vec![
                 self.modal_button(s::RECOVERY_RESTORE, true, ModalChoice::Restore),
                 self.modal_button(s::RECOVERY_DISCARD, false, ModalChoice::Discard),
@@ -7705,6 +8263,185 @@ mod tests {
         assert!(app.dirty, "a failed save leaves the document edited");
     }
 
+    fn synced_folder(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("libertum-app-sync-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the folder");
+        dir
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_asks_before_it_is_overwritten() {
+        let dir = synced_folder("changed");
+        let path = dir.join("book.docx");
+        let mut app = app();
+        let doc = app.doc.as_ref().expect("doc").document().clone();
+        std::fs::write(&path, Docx::new(doc).to_bytes().expect("docx")).expect("write");
+        app.file = Some(path.clone());
+        app.disk_stamp = libertum_library::DiskStamp::of(&path).expect("stamp");
+        // Untouched: the save goes ahead without a prompt.
+        let _ = app.write_document(path.clone());
+        assert!(app.modal.is_none(), "no change, no prompt");
+        // Another device saves a different version.
+        std::fs::write(&path, b"somebody else's version").expect("write");
+        let _ = app.write_document(path.clone());
+        assert!(
+            matches!(app.modal, Some(Modal::ChangedOnDisk { .. })),
+            "the user chooses first"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            b"somebody else's version",
+            "nothing was overwritten"
+        );
+    }
+
+    #[test]
+    fn saving_keeps_the_replaced_version_in_the_history_without_leftovers() {
+        let dir = synced_folder("history");
+        let path = dir.join("book.lbtd");
+        let app = app();
+        let doc = app.doc.as_ref().expect("doc").document().clone();
+        let context = FileContext::new(Format::Native, doc);
+        context.save(&path).expect("first save");
+        let first = std::fs::read(&path).expect("read");
+        context.save(&path).expect("second save");
+        let kept = libertum_library::versions(&path);
+        assert_eq!(kept.len(), 1, "the replaced file is kept");
+        assert_eq!(std::fs::read(&kept[0].path).expect("read"), first);
+        let visible: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with(".libertum"))
+            .collect();
+        assert_eq!(visible.len(), 1, "no temporary file is left: {visible:?}");
+    }
+
+    /// A native document with `text` as its only paragraph, saved to `path`.
+    fn write_native(path: &std::path::Path, text: &str) {
+        let doc = libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+            libertum_model::BlockId(1),
+            text,
+        )]);
+        FileContext::new(Format::Native, doc)
+            .save(path)
+            .expect("save");
+    }
+
+    #[test]
+    fn the_library_lists_documents_and_settles_a_conflict_either_way() {
+        let dir = synced_folder("library");
+        let original = dir.join("novel.lbtd");
+        let copy = dir.join("novel (1).lbtd");
+        write_native(&original, "mine");
+        write_native(&copy, "theirs");
+        let mut app = app();
+        app.settings.library_folder = Some(dir.clone());
+        let _ = app.update(Message::OpenLibrary);
+        match &app.modal {
+            Some(Modal::Library { entries }) => {
+                assert_eq!(entries.len(), 2);
+                let found = entries.iter().find(|e| e.path == copy).expect("the copy");
+                assert_eq!(found.conflict_of.as_deref(), Some("novel.lbtd"));
+            }
+            other => panic!("expected the library, got {other:?}"),
+        }
+        let before = std::fs::read(&copy).expect("read");
+        let _ = app.update(Message::UseConflictCopy {
+            original: original.clone(),
+            copy: copy.clone(),
+        });
+        assert!(!copy.exists(), "the copy is gone");
+        assert_eq!(std::fs::read(&original).expect("read"), before);
+        assert_eq!(
+            libertum_library::versions(&original).len(),
+            1,
+            "the replaced original is kept"
+        );
+        assert!(matches!(&app.modal, Some(Modal::Library { entries }) if entries.len() == 1));
+
+        write_native(&copy, "another");
+        let _ = app.update(Message::KeepOriginal {
+            original: original.clone(),
+            copy: copy.clone(),
+        });
+        assert!(!copy.exists());
+        assert_eq!(std::fs::read(&original).expect("read"), before);
+        assert_eq!(libertum_library::versions(&original).len(), 2);
+        let _ = app.update(Message::CloseLibrary);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn a_past_version_opens_as_an_unsaved_copy_and_can_be_restored() {
+        let dir = synced_folder("restore");
+        let path = dir.join("book.lbtd");
+        write_native(&path, "first");
+        let first = std::fs::read(&path).expect("read");
+        let old = libertum_library::snapshot(&path, std::time::SystemTime::now())
+            .expect("snapshot")
+            .expect("taken")
+            .path;
+        write_native(&path, "second, longer");
+        let mut app = app();
+        // A document with no file has no history to show.
+        app.file = None;
+        let _ = app.update(Message::OpenHistory(None));
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        app.modal = None;
+
+        let _ = app.update(Message::OpenHistory(Some(path.clone())));
+        assert!(matches!(&app.modal, Some(Modal::History { versions, .. }) if versions.len() == 1));
+        let _ = app.update(Message::HistoryOpenCopy(old.clone()));
+        assert!(app.file.is_none(), "a copy has no file of its own");
+        assert!(app.modal.is_none());
+        assert!(!app.settings.recent_files.contains(&old));
+        assert_eq!(
+            app.doc
+                .as_ref()
+                .expect("doc")
+                .document()
+                .paragraph_at(0)
+                .expect("p")
+                .text(),
+            "first"
+        );
+
+        let _ = app.update(Message::HistoryRestore {
+            original: path.clone(),
+            version: old,
+        });
+        assert_eq!(std::fs::read(&path).expect("read"), first);
+        assert_eq!(
+            libertum_library::versions(&path).len(),
+            2,
+            "the file it replaced is kept"
+        );
+    }
+
+    #[test]
+    fn restoring_over_an_open_document_with_unsaved_edits_is_refused() {
+        let dir = synced_folder("restore-dirty");
+        let path = dir.join("book.lbtd");
+        write_native(&path, "first");
+        let old = libertum_library::snapshot(&path, std::time::SystemTime::now())
+            .expect("snapshot")
+            .expect("taken")
+            .path;
+        write_native(&path, "second, longer");
+        let on_disk = std::fs::read(&path).expect("read");
+        let mut app = app();
+        app.file = Some(path.clone());
+        app.dirty = true;
+        let _ = app.update(Message::HistoryRestore {
+            original: path.clone(),
+            version: old,
+        });
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        assert_eq!(std::fs::read(&path).expect("read"), on_disk, "untouched");
+    }
+
     #[test]
     fn saving_round_trips_the_open_document() {
         let app = app();
@@ -8795,6 +9532,33 @@ mod tests {
         let _ = app.view();
         let _ = app.update(Message::SetShowPerformance(false));
         assert!(!app.settings.show_performance);
+    }
+
+    #[test]
+    fn antialiasing_is_a_setting_that_changes_how_strips_are_keyed() {
+        let mut app = app();
+        assert!(app.settings.antialiasing);
+        assert!(crate::docview::antialias());
+        let doc = libertum_layout::spike::generate_model_document(2, 3);
+        let mut st = libertum_layout::LayoutState::from_document(
+            &doc,
+            libertum_layout::PageGeometry::a4(),
+            libertum_layout::LayoutOptions::default(),
+        );
+        st.paginate_until(1);
+        let smooth = crate::docview::plan_bands(&st, 0, 1.0).expect("plan");
+        let _ = app.update(Message::SetAntialiasing(false));
+        assert!(!app.settings.antialiasing);
+        assert!(!crate::docview::antialias());
+        let hard = crate::docview::plan_bands(&st, 0, 1.0).expect("plan");
+        assert_ne!(smooth.keys, hard.keys, "pages are redrawn when it changes");
+        let _ = app.view();
+        let _ = app.update(Message::SetAntialiasing(true));
+        assert!(crate::docview::antialias());
+        assert_eq!(
+            crate::docview::plan_bands(&st, 0, 1.0).expect("plan").keys,
+            smooth.keys
+        );
     }
 
     #[test]

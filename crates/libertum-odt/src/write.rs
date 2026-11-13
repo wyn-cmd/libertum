@@ -1339,12 +1339,11 @@ fn watermark_shape(watermark: &libertum_model::Watermark, section: &Section, sal
 /// A header block with the watermark shape anchored in its first paragraph (or in a new one
 /// when the block has none).
 fn with_shape(block: &str, shape: &str) -> String {
-    if let Some(start) = block.find("<text:p") {
-        if let Some(close) = block[start..].find('>').map(|offset| start + offset) {
-            if !block[..close].ends_with('/') {
-                return format!("{}{shape}{}", &block[..=close], &block[close + 1..]);
-            }
-        }
+    if let Some(start) = block.find("<text:p")
+        && let Some(close) = block[start..].find('>').map(|offset| start + offset)
+        && !block[..close].ends_with('/')
+    {
+        return format!("{}{shape}{}", &block[..=close], &block[close + 1..]);
     }
     format!("{block}<text:p text:style-name=\"Header\">{shape}</text:p>")
 }

@@ -195,17 +195,17 @@ fn take_watermark(node: &mut XmlNode) -> Option<Watermark> {
                     && child.attr("name").is_some_and(|name| name.contains(WATERMARK_MARKER))
         );
         if is_shape {
-            if let XmlContent::Element(shape) = node.content.remove(index) {
-                if found.is_none() {
-                    found = shape_watermark(&shape);
-                }
+            if let XmlContent::Element(shape) = node.content.remove(index)
+                && found.is_none()
+            {
+                found = shape_watermark(&shape);
             }
             continue;
         }
-        if let XmlContent::Element(child) = &mut node.content[index] {
-            if let Some(inner) = take_watermark(child) {
-                found.get_or_insert(inner);
-            }
+        if let XmlContent::Element(child) = &mut node.content[index]
+            && let Some(inner) = take_watermark(child)
+        {
+            found.get_or_insert(inner);
         }
         index += 1;
     }
@@ -357,12 +357,12 @@ impl Styles {
                             let part = raw.format(&base);
                             self.sheet.defaults = base.apply(&part);
                         }
-                        if family == "paragraph" {
-                            if let Some(props) = child.child("paragraph-properties") {
-                                self.default_para = parse_para_format(props);
-                                let defaults = self.sheet.para_defaults;
-                                self.sheet.para_defaults = defaults.apply(&self.default_para);
-                            }
+                        if family == "paragraph"
+                            && let Some(props) = child.child("paragraph-properties")
+                        {
+                            self.default_para = parse_para_format(props);
+                            let defaults = self.sheet.para_defaults;
+                            self.sheet.para_defaults = defaults.apply(&self.default_para);
                         }
                     }
                 }
@@ -449,13 +449,13 @@ impl Styles {
         if style.name.is_empty() {
             return;
         }
-        if let Some(previous) = self.raw.get(&style.name) {
-            if previous.automatic != style.automatic {
-                warnings.push(format!(
-                    "style {:?} is defined in both styles.xml and content.xml; the later one wins",
-                    style.name
-                ));
-            }
+        if let Some(previous) = self.raw.get(&style.name)
+            && previous.automatic != style.automatic
+        {
+            warnings.push(format!(
+                "style {:?} is defined in both styles.xml and content.xml; the later one wins",
+                style.name
+            ));
         }
         self.raw.insert(style.name.clone(), style);
     }
@@ -531,10 +531,10 @@ impl Styles {
         } else if let Some(kind) = node.attr("text-line-through-type") {
             raw.strikethrough = Some(!kind.trim().eq_ignore_ascii_case("none"));
         }
-        if let Some(value) = node.attr("color") {
-            if !colour::is_auto(value) {
-                raw.colour = colour::parse(value);
-            }
+        if let Some(value) = node.attr("color")
+            && !colour::is_auto(value)
+        {
+            raw.colour = colour::parse(value);
         }
         if let Some(value) = node.attr("background-color") {
             raw.highlight = Some(if colour::is_auto(value) {
@@ -555,10 +555,10 @@ impl Styles {
                 None
             };
         }
-        if let Some(value) = node.attr("letter-spacing") {
-            if !value.trim().eq_ignore_ascii_case("normal") {
-                raw.letter_spacing_pt = units::parse(value);
-            }
+        if let Some(value) = node.attr("letter-spacing")
+            && !value.trim().eq_ignore_ascii_case("normal")
+        {
+            raw.letter_spacing_pt = units::parse(value);
         }
         raw
     }
@@ -621,18 +621,16 @@ impl Styles {
         if let Some(header) = node
             .child("header-style")
             .and_then(|style| style.child("header-footer-properties"))
+            && let Some(value) = header.attr("margin-top").and_then(units::parse)
         {
-            if let Some(value) = header.attr("margin-top").and_then(units::parse) {
-                layout.header_distance_pt = value.max(0.0);
-            }
+            layout.header_distance_pt = value.max(0.0);
         }
         if let Some(footer) = node
             .child("footer-style")
             .and_then(|style| style.child("header-footer-properties"))
+            && let Some(value) = footer.attr("margin-bottom").and_then(units::parse)
         {
-            if let Some(value) = footer.attr("margin-bottom").and_then(units::parse) {
-                layout.footer_distance_pt = value.max(0.0);
-            }
+            layout.footer_distance_pt = value.max(0.0);
         }
         layout
     }
@@ -753,10 +751,10 @@ impl Styles {
             _ => self.sheet.defaults.clone(),
         };
         let part = style.char.format(&base);
-        if let Some(&id) = self.ids.get(name) {
-            if let Some(slot) = self.sheet.paragraph.get_mut(id.0 as usize) {
-                slot.char = part.clone();
-            }
+        if let Some(&id) = self.ids.get(name)
+            && let Some(slot) = self.sheet.paragraph.get_mut(id.0 as usize)
+        {
+            slot.char = part.clone();
         }
         let next = base.apply(&part);
         resolved.insert(name.to_owned(), next.clone());
@@ -856,15 +854,15 @@ impl Styles {
     pub fn section_for(&self, master_name: &str) -> Section {
         let master = self.masters.get(master_name);
         let mut section = Section::default();
-        if let Some(master) = master {
-            if let Some(layout) = self.layouts.get(&master.layout) {
-                section.page = layout.page;
-                section.first_page_number = layout.first_page_number;
-                section.set_columns(layout.columns);
-                section.set_column_gutter(layout.column_gutter_pt);
-                section.header_distance_pt = layout.header_distance_pt;
-                section.footer_distance_pt = layout.footer_distance_pt;
-            }
+        if let Some(master) = master
+            && let Some(layout) = self.layouts.get(&master.layout)
+        {
+            section.page = layout.page;
+            section.first_page_number = layout.first_page_number;
+            section.set_columns(layout.columns);
+            section.set_column_gutter(layout.column_gutter_pt);
+            section.header_distance_pt = layout.header_distance_pt;
+            section.footer_distance_pt = layout.footer_distance_pt;
         }
         section
     }
