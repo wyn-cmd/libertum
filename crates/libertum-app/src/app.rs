@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use iced::advanced::input_method;
+use iced::advanced::text::Wrapping;
 use iced::futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::{button, column, container, mouse_area, row, space, stack, text};
 use iced::{
@@ -5852,7 +5853,7 @@ impl App {
                 .color(t.text_secondary)
                 .into(),
         };
-        let close = button(text(s::SETTINGS_CLOSE).size(13))
+        let close = button(text(s::SETTINGS_CLOSE).size(13).wrapping(Wrapping::None))
             .padding([6, 18])
             .style(move |_, _| button::Style {
                 background: Some(t.accent.into()),
@@ -5910,7 +5911,7 @@ impl App {
                 t,
                 s::SETTINGS_TAGS,
                 column![
-                    button(text(s::AO3_TAGS_EDIT).size(13))
+                    button(text(s::AO3_TAGS_EDIT).size(13).wrapping(Wrapping::None))
                         .padding([6, 14])
                         .style(move |_, status| controls::flat(t, status))
                         .on_press(Message::OpenTagVocabulary),
@@ -5951,10 +5952,14 @@ impl App {
                 ),
                 controls::caption(t, s::SETTINGS_UPDATES_HINT),
                 row![
-                    button(text(s::SETTINGS_CHECK_NOW).size(13))
-                        .padding([6, 14])
-                        .style(move |_, status| controls::flat(t, status))
-                        .on_press(Message::CheckForUpdatesNow),
+                    button(
+                        text(s::SETTINGS_CHECK_NOW)
+                            .size(13)
+                            .wrapping(Wrapping::None)
+                    )
+                    .padding([6, 14])
+                    .style(move |_, status| controls::flat(t, status))
+                    .on_press(Message::CheckForUpdatesNow),
                     update_status,
                 ]
                 .spacing(10)
@@ -6585,7 +6590,7 @@ impl App {
         message: Message,
     ) -> Element<'_, Message> {
         let t = Tokens::of(self.scheme());
-        button(text(label).size(13))
+        button(text(label).size(13).wrapping(Wrapping::None))
             .padding(Padding::from([6.0, 16.0]))
             .on_press(message)
             .style(move |_, status| {
@@ -6638,7 +6643,7 @@ impl App {
             self.action_button(s::UPDATES_MUTE_VERSION, false, Message::MuteUpdateVersion),
             self.action_button(s::UPDATES_DISABLE, false, Message::DisableUpdates),
         ]
-        .spacing(8);
+        .spacing(6);
         let card = container(
             column![
                 text(s::UPDATES_TITLE).size(15).color(t.text),
@@ -6649,7 +6654,7 @@ impl App {
             .spacing(10),
         )
         .padding(24)
-        .width(Length::Fixed(600.0))
+        .width(Length::Fixed(640.0))
         .style(move |_| container::Style {
             background: Some(t.inspector.into()),
             border: iced::Border {

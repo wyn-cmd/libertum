@@ -446,8 +446,8 @@ pub const UPDATES_HINT: &str =
     "Open the release page to download it. Your documents and settings are not affected.";
 pub const UPDATES_UPDATE: &str = "Update now";
 pub const UPDATES_LATER: &str = "Remind me later";
-pub const UPDATES_MUTE_WEEK: &str = "Mute for a week";
-pub const UPDATES_MUTE_MONTH: &str = "Mute for a month";
+pub const UPDATES_MUTE_WEEK: &str = "Mute 1 week";
+pub const UPDATES_MUTE_MONTH: &str = "Mute 1 month";
 pub const UPDATES_MUTE_VERSION: &str = "Skip this version";
 pub const UPDATES_DISABLE: &str = "Turn off checks";
 pub const UPDATES_OPEN_FAILED: &str = "Could not open the release page.";
