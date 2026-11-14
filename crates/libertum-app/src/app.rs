@@ -4810,7 +4810,13 @@ impl App {
                 }),
                 FormatMsg::BorderSides(sides) => {
                     self.state.format.border_sides = *sides;
-                    let width = self.state.format.border_style.value().map_or(0.5, BorderStyle::width).max(0.5);
+                    let width = self
+                        .state
+                        .format
+                        .border_style
+                        .value()
+                        .map_or(0.5, BorderStyle::width)
+                        .max(0.5);
                     Some(ParaFormat {
                         borders: Some(libertum_model::Borders {
                             sides: *sides,
@@ -4823,7 +4829,13 @@ impl App {
                 }
                 FormatMsg::BorderColour(colour) => {
                     self.state.format.border_colour = *colour;
-                    let width = self.state.format.border_style.value().map_or(0.5, BorderStyle::width).max(0.5);
+                    let width = self
+                        .state
+                        .format
+                        .border_style
+                        .value()
+                        .map_or(0.5, BorderStyle::width)
+                        .max(0.5);
                     Some(ParaFormat {
                         borders: Some(libertum_model::Borders {
                             sides: self.state.format.border_sides,

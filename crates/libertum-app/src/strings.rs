@@ -610,7 +610,6 @@ pub const HISTORY_SAVE_FIRST: &str =
 pub const HISTORY_NO_FILE: &str = "Save the document first: only a saved file has a history.";
 pub const LIBRARY_ACTION_FAILED: &str = "That did not work:";
 
-
 pub const BORDER_TOP: &str = "Top";
 pub const BORDER_RIGHT: &str = "Right";
 pub const BORDER_BOTTOM: &str = "Bottom";

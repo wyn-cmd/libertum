@@ -137,7 +137,12 @@ pub fn build_epub(
     let cover_meta = cover
         .as_ref()
         .and_then(|name| images.keys().position(|other| other == name))
-        .map(|index| format!("    <meta name=\"cover\" content=\"image-{}\"/>\n", index + 1))
+        .map(|index| {
+            format!(
+                "    <meta name=\"cover\" content=\"image-{}\"/>\n",
+                index + 1
+            )
+        })
         .unwrap_or_default();
     let package = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
