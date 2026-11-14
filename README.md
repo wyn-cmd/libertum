@@ -22,8 +22,8 @@ cross-references.
   shows as mixed.
 - Pages: page size, orientation, margins, per-section layout, headers and footers with first
   page and even page variants, page numbers, text watermarks, booklet view, page thumbnails,
-  full screen and zoom. There is also a pageless mode that shows the document as one long
-  column.
+  full screen and zoom, including a trackpad pinch on Wayland and macOS. There is also a
+  pageless mode that shows the document as one long column.
 - Long documents: a table of contents that updates itself, footnotes and endnotes, bookmarks
   and cross-references, inline images, and tables that split across pages with repeating header
   rows and editable merged cells.
@@ -33,6 +33,9 @@ cross-references.
 - Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text and Markdown. A chapter
   can also be exported as HTML for AO3, with tag suggestions ranked locally from your own tag
   list.
+- Updates: asks GitHub at most once a day whether a newer release exists and offers to open
+  its download page. It never installs anything by itself; the check can be turned off in
+  Settings, and updates then stay manual.
 
 `docs/STATUS.md` has the current state and the open items. `PLAN.md` covers the architecture,
 the performance budgets and the phase list. Of the planned work, the main pieces still missing
@@ -57,8 +60,8 @@ A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain bin
 all unsigned.
 
 ```sh
-sudo apt install ./libertum_0.1.2_amd64.deb                  # Debian, Ubuntu, ...
-sudo dnf install ./libertum-0.1.2-1.x86_64.rpm               # Fedora, openSUSE, ...
+sudo apt install ./libertum_0.1.3_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.1.3-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
 The packages put `libertum` in `/usr/bin` and install a desktop entry, the icon and a MIME
@@ -74,9 +77,13 @@ The AppImage carries its own font, input, Wayland and graphics libraries, and on
 host's X11/XCB and glibc:
 
 ```sh
-chmod +x Libertum-0.1.2-x86_64.AppImage
-./Libertum-0.1.2-x86_64.AppImage
+chmod +x Libertum-0.1.3-x86_64.AppImage
+./Libertum-0.1.3-x86_64.AppImage
 ```
+
+Pinch-to-zoom needs a Wayland session. On X11, Ctrl + two-finger scroll zooms.
+Update checks use the system `curl` (the packages recommend it); without it the rest of
+the app is unaffected and updates stay manual.
 
 ## Install on macOS
 

@@ -24,6 +24,7 @@ mod strings;
 mod templates;
 mod theme;
 mod toolbar;
+mod update;
 mod widgets;
 
 use iced::{Font, Size, window};

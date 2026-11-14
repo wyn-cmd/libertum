@@ -31,7 +31,7 @@ use crate::inspector::headers::HeadingEntry;
 use crate::inspector::notes::NoteEntry;
 use crate::perf;
 use crate::recovery;
-use crate::settings::{DefaultFormat, Settings, ThemePreference, UnitsPreference};
+use crate::settings::{DefaultFormat, Settings, ThemePreference, UnitsPreference, UpdateMute};
 use crate::shortcuts::{self, Shortcut};
 use crate::state::{
     Alignment, AppState, Baseline, BorderStyle, DocumentPane, Field, FontName, FontWeight,
@@ -43,6 +43,7 @@ use crate::strings as s;
 use crate::templates::TemplateId;
 use crate::theme::{self as look, Scheme, Tokens};
 use crate::toolbar;
+use crate::update::CHECK_INTERVAL_SECS;
 use crate::widgets::controls::flat;
 use crate::widgets::segmented::{self, Content, Look};
 
@@ -255,18 +256,30 @@ impl FileContext {
     /// sync client never sees a half-written file. (Markdown also writes pictures beside the
     /// file, so it writes in place.)
     fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        let started = Instant::now();
         if let Err(error) = libertum_library::snapshot(path, std::time::SystemTime::now()) {
             tracing::warn!(%error, path = %path.display(), "could not keep the earlier version");
         }
-        if matches!(self, Self::Markdown(_)) {
-            return self.save_in_place(path);
-        }
-        libertum_library::save_atomic(path, |temporary| self.save_in_place(temporary)).map_err(
-            |error| match error {
-                libertum_library::SaveError::Write(message) => message,
-                libertum_library::SaveError::Replace(error) => error.to_string(),
-            },
-        )
+        let snapshot_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let write_started = Instant::now();
+        let result = if matches!(self, Self::Markdown(_)) {
+            self.save_in_place(path)
+        } else {
+            libertum_library::save_atomic(path, |temporary| self.save_in_place(temporary)).map_err(
+                |error| match error {
+                    libertum_library::SaveError::Write(message) => message,
+                    libertum_library::SaveError::Permissions(error) => error.to_string(),
+                    libertum_library::SaveError::Replace(error) => error.to_string(),
+                },
+            )
+        };
+        tracing::debug!(
+            snapshot_ms,
+            save_ms = write_started.elapsed().as_secs_f64() * 1000.0,
+            path = %path.display(),
+            "document saved"
+        );
+        result
     }
 
     fn save_in_place(&self, path: &std::path::Path) -> Result<(), String> {
@@ -356,6 +369,8 @@ enum Modal {
     Unsaved { pending: Pending },
     /// An open or save failed. The message is already user-facing.
     Error(String),
+    /// A newer release exists; `url` is its GitHub release page.
+    UpdateAvailable { version: String, url: String },
     /// The file at `path` changed on disk since it was opened (another device, a sync service);
     /// Overwrite saves anyway, Save a Copy asks for another name.
     ChangedOnDisk { path: PathBuf },
@@ -401,6 +416,16 @@ pub enum ModalChoice {
     Cancel,
     /// Put the recovered document back.
     Restore,
+}
+
+/// The state of the last update check, for the Settings window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UpdateCheck {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -491,6 +516,26 @@ pub enum Message {
     /// Show or hide the frame-rate and frame-time overlay (Settings).
     SetShowPerformance(bool),
     SetAntialiasing(bool),
+    /// Automatic update checks on or off (Settings).
+    SetCheckForUpdates(bool),
+    /// "Check now" in Settings, even while automatic checks are off.
+    CheckForUpdatesNow,
+    /// The background update check finished.
+    UpdateChecked {
+        /// True when the writer asked for it in Settings; false for the daily check.
+        manual: bool,
+        result: Result<Option<crate::update::Release>, String>,
+    },
+    /// Open the available release's page in the browser.
+    UpdateNow,
+    /// Close the update prompt without changing anything.
+    DismissUpdate,
+    /// Ignore this release for the given number of seconds.
+    MuteUpdate(u64),
+    /// Ignore this release until a newer one appears.
+    MuteUpdateVersion,
+    /// Turn automatic update checks off from the prompt.
+    DisableUpdates,
     /// A frame was rendered.
     FpsFrame(Instant),
     /// The autosave timer fired.
@@ -733,6 +778,8 @@ pub struct App {
     theme_preference: ThemePreference,
     /// Window width in logical pixels (anchors the toolbar menus).
     window_width: f32,
+    /// Window height in logical pixels (sizes the scrollable Settings card).
+    window_height: f32,
     /// The open document; `None` while the home screen (template chooser) is shown.
     doc: Option<DocView>,
     /// The template selected on the home screen.
@@ -788,6 +835,8 @@ pub struct App {
     pending_recovery: Option<(libertum_model::Document, recovery::Meta)>,
     /// The Settings window is over the document.
     settings_open: bool,
+    /// The state of the last update check, shown in Settings.
+    update_check: UpdateCheck,
     /// The AO3 tag vocabulary window is over the document (from Settings or a chapter).
     vocabulary_open: bool,
     /// The tag name being typed in that window.
@@ -861,6 +910,7 @@ impl App {
             system_mode: theme::Mode::None,
             theme_preference,
             window_width: 1200.0,
+            window_height: 680.0,
             doc,
             home_selection: TemplateId::default(),
             scroll: (0.0, 0.0),
@@ -888,6 +938,7 @@ impl App {
             disk_stamp: None,
             pending_recovery: None,
             settings_open: false,
+            update_check: UpdateCheck::Idle,
             vocabulary_open: false,
             tag_draft: String::new(),
             tag_category: TagCategory::Freeform,
@@ -955,12 +1006,14 @@ impl App {
                     app.refresh_format();
                     app.refresh_section();
                     app.apply_start_hooks(&mut tasks);
+                    tasks.push(app.update_check_task());
                     (app, Task::batch(tasks))
                 }
                 Err(error) => {
                     tracing::warn!(%error, path = %open.display(), "LIBERTUM_OPEN failed");
                     let mut app = Self::with_doc(settings, path, None);
                     app.modal = Some(Modal::Error(format!("{} {error}", s::OPEN_FAILED)));
+                    tasks.push(app.update_check_task());
                     (app, Task::batch(tasks))
                 }
             };
@@ -981,7 +1034,31 @@ impl App {
         // A crash snapshot is offered on the home screen only (see `check_recovery`).
         app.check_recovery();
         app.apply_start_hooks(&mut tasks);
+        tasks.push(app.update_check_task());
         (app, Task::batch(tasks))
+    }
+
+    /// Schedules the once-a-day update check when automatic checks are on and it is due.
+    fn update_check_task(&mut self) -> Task<Message> {
+        if !self.settings.check_for_updates {
+            return Task::none();
+        }
+        let now = now_seconds().max(0) as u64;
+        if self
+            .settings
+            .last_update_check
+            .is_some_and(|last| now.saturating_sub(last) < CHECK_INTERVAL_SECS)
+        {
+            return Task::none();
+        }
+        self.settings.last_update_check = Some(now);
+        self.save_settings();
+        Task::perform(async { crate::update::check() }, |result| {
+            Message::UpdateChecked {
+                manual: false,
+                result: result.map_err(|error| error.to_string()),
+            }
+        })
     }
 
     /// The start-up screenshot hooks, shared by every way `boot` can finish so they also work
@@ -1020,6 +1097,19 @@ impl App {
         // `LIBERTUM_TAGS=1` opens the AO3 tag vocabulary window at start-up.
         if std::env::var("LIBERTUM_TAGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
             self.vocabulary_open = true;
+        }
+        // `LIBERTUM_SETTINGS=1` opens the Settings window at start-up (for screenshots).
+        if std::env::var("LIBERTUM_SETTINGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
+            self.settings_open = true;
+        }
+        // `LIBERTUM_UPDATE=<version>` shows the update prompt at start-up (for screenshots).
+        if let Ok(version) = std::env::var("LIBERTUM_UPDATE")
+            && !version.is_empty()
+        {
+            self.modal = Some(Modal::UpdateAvailable {
+                version,
+                url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.4".to_owned(),
+            });
         }
         // `LIBERTUM_LIBRARY=<folder>` opens the Library window on that folder at start-up
         // (not saved as the setting unless another setting change writes the file), and
@@ -3060,6 +3150,8 @@ impl App {
             // The AO3 chapter window has its own Close button; it is not a choice.
             (Modal::Ao3Chapter { .. }, _) => Task::none(),
             (Modal::DateTime { .. }, _) => Task::none(),
+            // The update prompt has its own buttons; an Escape or backdrop click dismisses it.
+            (Modal::UpdateAvailable { .. }, _) => Task::none(),
             (Modal::Recovery, ModalChoice::Restore) => self.restore_recovery(),
             (Modal::Recovery, _) => {
                 self.discard_recovery();
@@ -3571,6 +3663,97 @@ impl App {
                 self.thumb_cache.clear();
                 self.save_settings();
             }
+            Message::SetCheckForUpdates(on) => {
+                self.settings.check_for_updates = on;
+                if !on {
+                    if matches!(self.modal, Some(Modal::UpdateAvailable { .. })) {
+                        self.modal = None;
+                    }
+                    self.save_settings();
+                    return Task::none();
+                }
+                self.save_settings();
+                return self.update_check_task();
+            }
+            Message::CheckForUpdatesNow => {
+                if self.update_check == UpdateCheck::Checking {
+                    return Task::none();
+                }
+                self.update_check = UpdateCheck::Checking;
+                return Task::perform(async { crate::update::check() }, |result| {
+                    Message::UpdateChecked {
+                        manual: true,
+                        result: result.map_err(|error| error.to_string()),
+                    }
+                });
+            }
+            Message::UpdateChecked { manual, result } => {
+                let now = now_seconds().max(0) as u64;
+                self.settings.last_update_check = Some(now);
+                self.save_settings();
+                match result {
+                    Ok(Some(release)) => {
+                        self.update_check = UpdateCheck::Idle;
+                        let show = manual
+                            || (self.modal.is_none()
+                                && self.settings.wants_update_prompt(&release.version, now));
+                        if show {
+                            self.modal = Some(Modal::UpdateAvailable {
+                                version: release.version,
+                                url: release.url,
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        if manual {
+                            self.update_check = UpdateCheck::UpToDate;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "update check failed");
+                        if manual {
+                            self.update_check = UpdateCheck::Failed;
+                        }
+                    }
+                }
+            }
+            Message::UpdateNow => {
+                if let Some(Modal::UpdateAvailable { url, .. }) = self.modal.take()
+                    && let Err(error) = crate::update::open_release_page(&url)
+                {
+                    tracing::warn!(%error, "could not open the release page");
+                    self.modal = Some(Modal::Error(format!("{} {error}", s::UPDATES_OPEN_FAILED)));
+                }
+            }
+            Message::DismissUpdate => {
+                if matches!(self.modal, Some(Modal::UpdateAvailable { .. })) {
+                    self.modal = None;
+                }
+            }
+            Message::MuteUpdate(seconds) => {
+                if let Some(Modal::UpdateAvailable { version, .. }) = self.modal.take() {
+                    let until = now_seconds().max(0) as u64 + seconds;
+                    self.settings.update_mute = Some(UpdateMute {
+                        version,
+                        until: Some(until),
+                    });
+                    self.save_settings();
+                }
+            }
+            Message::MuteUpdateVersion => {
+                if let Some(Modal::UpdateAvailable { version, .. }) = self.modal.take() {
+                    self.settings.update_mute = Some(UpdateMute {
+                        version,
+                        until: None,
+                    });
+                    self.save_settings();
+                }
+            }
+            Message::DisableUpdates => {
+                self.settings.check_for_updates = false;
+                self.modal = None;
+                self.save_settings();
+            }
             Message::SetUnits(preference) => {
                 self.settings.units = preference;
                 self.state.units = preference.to_units();
@@ -3895,7 +4078,10 @@ impl App {
                 }
             }
             Message::ScaleFactor(sf) => self.set_scale_factor(sf),
-            Message::WindowResized(size) => self.window_width = size.width,
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                self.window_height = size.height;
+            }
             Message::BlinkTick(now) => self.on_blink_tick(now),
             Message::Frame(now) => {
                 self.state.tick_sidebar(now);
@@ -5651,6 +5837,21 @@ impl App {
             Some(self.settings.units),
             Message::SetUnits,
         );
+        let update_status: Element<'_, Message> = match self.update_check {
+            UpdateCheck::Idle => space().into(),
+            UpdateCheck::Checking => text(s::UPDATES_CHECKING)
+                .size(12)
+                .color(t.text_secondary)
+                .into(),
+            UpdateCheck::UpToDate => text(s::UPDATES_UP_TO_DATE)
+                .size(12)
+                .color(t.text_secondary)
+                .into(),
+            UpdateCheck::Failed => text(s::UPDATES_FAILED)
+                .size(12)
+                .color(t.text_secondary)
+                .into(),
+        };
         let close = button(text(s::SETTINGS_CLOSE).size(13))
             .padding([6, 18])
             .style(move |_, _| button::Style {
@@ -5660,91 +5861,120 @@ impl App {
                 ..button::Style::default()
             })
             .on_press(Message::CloseSettings);
+        let sections = column![
+            labelled(t, s::SETTINGS_THEME, theme),
+            labelled(t, s::SETTINGS_FORMAT, format),
+            labelled(t, s::SETTINGS_AUTOSAVE, autosave),
+            labelled(t, s::SETTINGS_UNITS, units),
+            labelled(
+                t,
+                s::SETTINGS_CHAPTERS,
+                column![
+                    row![
+                        controls::checkbox_row(
+                            t,
+                            s::SETTINGS_CHAPTER_H1,
+                            self.settings.chapter_headings.h1,
+                            false,
+                            |on| Message::SetChapterHeading(1, on),
+                        ),
+                        controls::checkbox_row(
+                            t,
+                            s::SETTINGS_CHAPTER_H2,
+                            self.settings.chapter_headings.h2,
+                            false,
+                            |on| Message::SetChapterHeading(2, on),
+                        ),
+                        controls::checkbox_row(
+                            t,
+                            s::SETTINGS_CHAPTER_H3,
+                            self.settings.chapter_headings.h3,
+                            false,
+                            |on| Message::SetChapterHeading(3, on),
+                        ),
+                        controls::checkbox_row(
+                            t,
+                            s::SETTINGS_CHAPTER_H4,
+                            self.settings.chapter_headings.h4,
+                            false,
+                            |on| Message::SetChapterHeading(4, on),
+                        ),
+                    ]
+                    .spacing(10),
+                    controls::caption(t, s::SETTINGS_CHAPTERS_HINT),
+                ]
+                .spacing(4)
+                .into(),
+            ),
+            labelled(
+                t,
+                s::SETTINGS_TAGS,
+                column![
+                    button(text(s::AO3_TAGS_EDIT).size(13))
+                        .padding([6, 14])
+                        .style(move |_, status| controls::flat(t, status))
+                        .on_press(Message::OpenTagVocabulary),
+                    controls::caption(t, s::SETTINGS_TAGS_HINT),
+                ]
+                .spacing(6)
+                .into(),
+            ),
+            column![
+                controls::checkbox_row(
+                    t,
+                    s::SETTINGS_ANTIALIASING,
+                    self.settings.antialiasing,
+                    false,
+                    Message::SetAntialiasing,
+                ),
+                controls::caption(t, s::SETTINGS_ANTIALIASING_HINT),
+            ]
+            .spacing(4),
+            column![
+                controls::checkbox_row(
+                    t,
+                    s::SETTINGS_PERFORMANCE,
+                    self.settings.show_performance,
+                    false,
+                    Message::SetShowPerformance,
+                ),
+                controls::caption(t, s::SETTINGS_PERFORMANCE_HINT),
+            ]
+            .spacing(4),
+            column![
+                controls::checkbox_row(
+                    t,
+                    s::SETTINGS_UPDATES,
+                    self.settings.check_for_updates,
+                    false,
+                    Message::SetCheckForUpdates,
+                ),
+                controls::caption(t, s::SETTINGS_UPDATES_HINT),
+                row![
+                    button(text(s::SETTINGS_CHECK_NOW).size(13))
+                        .padding([6, 14])
+                        .style(move |_, status| controls::flat(t, status))
+                        .on_press(Message::CheckForUpdatesNow),
+                    update_status,
+                ]
+                .spacing(10)
+                .align_y(Center),
+            ]
+            .spacing(4),
+        ]
+        .spacing(16)
+        .width(Length::Fixed(400.0));
+        let body_height = (self.window_height - 160.0).max(240.0);
+        let body = iced::widget::scrollable(sections)
+            .height(Length::Fixed(body_height))
+            .width(Length::Fill);
         let card = container(
             column![
                 text(s::SETTINGS_TITLE)
                     .size(16)
                     .font(controls::bold())
                     .color(t.text),
-                labelled(t, s::SETTINGS_THEME, theme),
-                labelled(t, s::SETTINGS_FORMAT, format),
-                labelled(t, s::SETTINGS_AUTOSAVE, autosave),
-                labelled(t, s::SETTINGS_UNITS, units),
-                labelled(
-                    t,
-                    s::SETTINGS_CHAPTERS,
-                    column![
-                        row![
-                            controls::checkbox_row(
-                                t,
-                                s::SETTINGS_CHAPTER_H1,
-                                self.settings.chapter_headings.h1,
-                                false,
-                                |on| Message::SetChapterHeading(1, on),
-                            ),
-                            controls::checkbox_row(
-                                t,
-                                s::SETTINGS_CHAPTER_H2,
-                                self.settings.chapter_headings.h2,
-                                false,
-                                |on| Message::SetChapterHeading(2, on),
-                            ),
-                            controls::checkbox_row(
-                                t,
-                                s::SETTINGS_CHAPTER_H3,
-                                self.settings.chapter_headings.h3,
-                                false,
-                                |on| Message::SetChapterHeading(3, on),
-                            ),
-                            controls::checkbox_row(
-                                t,
-                                s::SETTINGS_CHAPTER_H4,
-                                self.settings.chapter_headings.h4,
-                                false,
-                                |on| Message::SetChapterHeading(4, on),
-                            ),
-                        ]
-                        .spacing(10),
-                        controls::caption(t, s::SETTINGS_CHAPTERS_HINT),
-                    ]
-                    .spacing(4)
-                    .into(),
-                ),
-                labelled(
-                    t,
-                    s::SETTINGS_TAGS,
-                    column![
-                        button(text(s::AO3_TAGS_EDIT).size(13))
-                            .padding([6, 14])
-                            .style(move |_, status| controls::flat(t, status))
-                            .on_press(Message::OpenTagVocabulary),
-                        controls::caption(t, s::SETTINGS_TAGS_HINT),
-                    ]
-                    .spacing(6)
-                    .into(),
-                ),
-                column![
-                    controls::checkbox_row(
-                        t,
-                        s::SETTINGS_ANTIALIASING,
-                        self.settings.antialiasing,
-                        false,
-                        Message::SetAntialiasing,
-                    ),
-                    controls::caption(t, s::SETTINGS_ANTIALIASING_HINT),
-                ]
-                .spacing(4),
-                column![
-                    controls::checkbox_row(
-                        t,
-                        s::SETTINGS_PERFORMANCE,
-                        self.settings.show_performance,
-                        false,
-                        Message::SetShowPerformance,
-                    ),
-                    controls::caption(t, s::SETTINGS_PERFORMANCE_HINT),
-                ]
-                .spacing(4),
+                body,
                 row![space::horizontal(), close],
             ]
             .spacing(16),
@@ -6218,6 +6448,9 @@ impl App {
         if let Modal::DateTime { updated, format } = modal {
             return self.date_time_layer(*updated, *format, t);
         }
+        if let Modal::UpdateAvailable { version, .. } = modal {
+            return self.update_layer(version, t);
+        }
         let (title, detail): (String, String) = match modal {
             Modal::Unsaved { .. } => (s::UNSAVED_TITLE.to_owned(), s::UNSAVED_DETAIL.to_owned()),
             Modal::Error(message) => (message.clone(), String::new()),
@@ -6225,6 +6458,7 @@ impl App {
             Modal::Library { .. } | Modal::History { .. } => (String::new(), String::new()),
             Modal::DateTime { .. } => (s::DATE_TIME_TITLE.to_owned(), String::new()),
             Modal::Ao3Chapter { .. } => (String::new(), String::new()),
+            Modal::UpdateAvailable { .. } => (String::new(), String::new()),
             Modal::Recovery => {
                 let detail = match self
                     .pending_recovery
@@ -6281,7 +6515,8 @@ impl App {
             | Modal::Library { .. }
             | Modal::History { .. }
             | Modal::DateTime { .. }
-            | Modal::Ao3Chapter { .. } => Vec::new(),
+            | Modal::Ao3Chapter { .. }
+            | Modal::UpdateAvailable { .. } => Vec::new(),
             Modal::Recovery => vec![
                 self.modal_button(s::RECOVERY_RESTORE, true, ModalChoice::Restore),
                 self.modal_button(s::RECOVERY_DISCARD, false, ModalChoice::Discard),
@@ -6338,10 +6573,21 @@ impl App {
         primary: bool,
         choice: ModalChoice,
     ) -> Element<'_, Message> {
+        self.action_button(label, primary, Message::ModalChoice(choice))
+    }
+
+    /// A prompt button with an arbitrary message (the update prompt has more choices than
+    /// [`ModalChoice`]).
+    fn action_button(
+        &self,
+        label: &'static str,
+        primary: bool,
+        message: Message,
+    ) -> Element<'_, Message> {
         let t = Tokens::of(self.scheme());
         button(text(label).size(13))
             .padding(Padding::from([6.0, 16.0]))
-            .on_press(Message::ModalChoice(choice))
+            .on_press(message)
             .style(move |_, status| {
                 let background = if primary {
                     match status {
@@ -6368,6 +6614,74 @@ impl App {
                 }
             })
             .into()
+    }
+
+    /// The prompt for a newer release: update, remind later, mute it, or turn checks off.
+    fn update_layer(&self, version: &str, t: Tokens) -> Element<'_, Message> {
+        let detail = format!(
+            "Libertum {version} is available. You have {}. {}",
+            crate::update::current_version(),
+            s::UPDATES_HINT
+        );
+        let primary = row![
+            self.action_button(s::UPDATES_UPDATE, true, Message::UpdateNow),
+            self.action_button(s::UPDATES_LATER, false, Message::DismissUpdate),
+        ]
+        .spacing(8);
+        let quiet = row![
+            self.action_button(s::UPDATES_MUTE_WEEK, false, Message::MuteUpdate(7 * 86_400)),
+            self.action_button(
+                s::UPDATES_MUTE_MONTH,
+                false,
+                Message::MuteUpdate(30 * 86_400)
+            ),
+            self.action_button(s::UPDATES_MUTE_VERSION, false, Message::MuteUpdateVersion),
+            self.action_button(s::UPDATES_DISABLE, false, Message::DisableUpdates),
+        ]
+        .spacing(8);
+        let card = container(
+            column![
+                text(s::UPDATES_TITLE).size(15).color(t.text),
+                text(detail).size(13).color(t.text_secondary),
+                primary,
+                quiet,
+            ]
+            .spacing(10),
+        )
+        .padding(24)
+        .width(Length::Fixed(600.0))
+        .style(move |_| container::Style {
+            background: Some(t.inspector.into()),
+            border: iced::Border {
+                color: t.divider,
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: t.shadow,
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
+            ..container::Style::default()
+        });
+        let backdrop = mouse_area(
+            container(space().width(Length::Fill).height(Length::Fill)).style(move |_| {
+                container::Style {
+                    background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.28).into()),
+                    ..container::Style::default()
+                }
+            }),
+        )
+        .on_press(Message::DismissUpdate);
+        stack![
+            backdrop,
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .into()
     }
 
     /// The floating "Page 1 of 506 · 288,323 words" pill at the bottom centre of the canvas.
@@ -9043,6 +9357,41 @@ mod tests {
             (app.state.column_width_pt.expect("width") - widths[0]).abs() < 0.01,
             "the pane reads the width back"
         );
+    }
+
+    #[test]
+    fn update_settings_are_saved_and_muting_keeps_the_version() {
+        let dir = std::env::temp_dir().join(format!("libertum-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let path = dir.join("settings.toml");
+        let mut app = App::new(Settings::default(), Some(path.clone()));
+
+        let _ = app.update(Message::SetCheckForUpdates(false));
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(!saved.check_for_updates, "the switch is persisted");
+
+        app.modal = Some(Modal::UpdateAvailable {
+            version: "0.1.3".to_owned(),
+            url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+        });
+        let _ = app.update(Message::MuteUpdate(7 * 86_400));
+        assert!(app.modal.is_none(), "the prompt closes");
+        let saved = Settings::load_from(&path).expect("settings");
+        let mute = saved.update_mute.expect("a mute is stored");
+        assert_eq!(mute.version, "0.1.3");
+        assert!(mute.until.is_some(), "a week is a deadline, not forever");
+
+        app.modal = Some(Modal::UpdateAvailable {
+            version: "0.1.3".to_owned(),
+            url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+        });
+        let _ = app.update(Message::DisableUpdates);
+        assert!(app.modal.is_none());
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(!saved.check_for_updates);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

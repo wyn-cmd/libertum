@@ -144,7 +144,11 @@ pub fn checkbox_row<'a, M: Clone + 'a>(
 
 /// A secondary-colour caption above or beside a control.
 pub fn caption<'a, M: 'a>(t: Tokens, label: impl text::IntoFragment<'a>) -> Element<'a, M> {
-    text(label).size(12).color(t.text_secondary).into()
+    text(label)
+        .size(12)
+        .color(t.text_secondary)
+        .width(Length::Fill)
+        .into()
 }
 
 /// A caption and a control stacked.

@@ -79,7 +79,7 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 - **Rendering has two layers** (see PLAN §4.5):
   - The Iced window compositor is always wgpu, with tiny-skia only as an automatic fallback (it measured 15 fps vs 60 fps).
   - Pages are always rendered on the CPU (tiny-skia + swash); there is no Graphics acceleration setting (removed 2026-11-13: vello measured slower per page than the CPU renderer, and the setting never did anything). The vello code stays behind the `gpu` feature as an experiment.
-- **Pinned versions with reasons:** iced 0.14, parley 0.12, vello **0.7** (iced_wgpu 0.14 needs wgpu 27; vello 0.11 needs wgpu 30), wgpu 27.0.1, peniko 0.6. Do not bump vello or Iced independently. They must share one wgpu version, so check with `cargo tree -i wgpu`.
+- **Pinned versions with reasons:** iced 0.14, parley 0.12, vello **0.7** (iced_wgpu 0.14 needs wgpu 27; vello 0.11 needs wgpu 30), wgpu 27.0.1, peniko 0.6. Do not bump vello or Iced independently. They must share one wgpu version, so check with `cargo tree -i wgpu`. winit 0.30.13, iced_core 0.14.0 and iced_winit 0.14.1 are vendored under `vendor/` for Wayland touchpad pinch; re-apply the patches before bumping them (`docs/decisions.md`, 2026-11-14).
 - **GPU safety:** vello is only started after `gpu::caps::check_caps` passes (Vulkan, DX12 or Metal; OpenGL refused by default). Initialisation runs in the background (`init_in_background`), and failure falls back to CPU pages. Never introduce a code path that can panic on an unsupported GPU.
 - **Known vello 0.7 issue:** embedded bitmap strikes (for example in Cambria) render invisibly. `gpu.rs` works around this by renaming the `EBLC` table.
 - **Default format** for new documents is ODT, and the user can switch it to DOCX in Settings.
@@ -108,6 +108,7 @@ A release is cut from a green CI run on `main`: download the run's artifacts (`g
 - **A running app locks `target\release\libertum.exe` on Windows**, so a release build silently leaves the old exe in place (cargo reports "Access is denied"). The fresh binary is `target\release\deps\libertum.exe`. When the user reports that something "doesn't work", compare exe timestamps first: twice so far the report came from a stale build.
 - **parley 0.12 limits:** no tab stops, no hyphenation (Libertum adds break opportunities through `RangedBuilder::set_line_break_override`, whose callback is called once per character pair in order; a test guards this), and no hyphen glyph at a break (drawn as a decoration). Line `metrics().advance` is measured before justification; use the positioned glyphs for where a justified line really ends.
 - **iced_wgpu uploads images of 2 MiB or more asynchronously** and draws nothing until done; that is why page bitmaps are split into strips (`docview.rs`).
+- **Wayland sends zero-delta wheel events** for `axis_source` and `axis_stop`. The canvas ignores them; treating one as movement zeroes the fling velocity as the fingers lift, which made Linux scrolling stop dead.
 - **Inspector bindings:** a control is "working" only when its message reaches the editor (`App::apply_format`, `App::apply_field`, `App::apply_document`) and `App::refresh_format` reads the value back from `Editor::char_summary` / `para_summary`. Add an app test for each new control.
 - UI changes need screenshots in both themes. Driving the app with `SendKeys` and `mouse_event` (screenshot recipe below) works; inspector coordinates depend on DPI and zoom, so capture once to find them.
 
@@ -133,6 +134,8 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_AO3=1` | Open the Export menu's AO3 chapter list at start (for screenshots) |
 | `LIBERTUM_AO3_PICK=<n>` | With `LIBERTUM_AO3=1`, open that chapter's HTML window at start |
 | `LIBERTUM_TAGS=1` | Open the AO3 tag vocabulary window at start (for screenshots) |
+| `LIBERTUM_SETTINGS=1` | Open the Settings window at start (for screenshots) |
+| `LIBERTUM_UPDATE=<version>` | Show the update prompt for that version at start (for screenshots; no network call) |
 | `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
 | `LIBERTUM_LIBRARY=<folder>` | Open the Library window on that folder at start (for screenshots) |
 | `LIBERTUM_HISTORY=<file>` | Open that document's version history window at start (for screenshots) |

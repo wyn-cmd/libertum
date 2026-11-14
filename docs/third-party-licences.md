@@ -36,3 +36,11 @@ No embedded data files were added, so the notices this application must ship are
 the user's system and are embedded (subset) in the exported PDF only, and the sRGB profile used
 for PDF/A's output intent is generated in `crates/libertum-render/src/pdf.rs`, so there is no
 third-party profile licence to carry.
+
+## Vendored crates (2026-11-14)
+
+For Wayland touchpad pinch zoom, three crates are vendored under `vendor/` with the small patches
+described in `docs/decisions.md`: `winit` 0.30.13 (Apache-2.0 OR MIT, licence in
+`vendor/winit/LICENSE`), `iced_core` 0.14.0 and `iced_winit` 0.14.1 (MIT, licence in
+`vendor/iced_core/LICENSE` and `vendor/iced_winit/LICENSE`). The patches do not change the licence
+terms.

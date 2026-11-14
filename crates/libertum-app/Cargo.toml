@@ -25,6 +25,7 @@ libertum-library = { workspace = true }
 libertum-formats-common = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 toml = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }

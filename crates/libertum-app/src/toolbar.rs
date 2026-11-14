@@ -834,8 +834,24 @@ fn context_entries(target: &ContextMenuTarget) -> Vec<Entry> {
     }
 }
 
+/// Roughly how tall the menu's contents are. A row is about 24 logical pixels (13 px text
+/// with 3 px of vertical padding) and a separator about 9. This only decides whether the
+/// list scrolls; counting every row as 30 px pushed the View menu over the limit, so it
+/// reserved 420 px and left a quarter of the panel empty below the last item.
+fn natural_height(entries: &[Entry]) -> f32 {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Separator => 9.0,
+            Entry::Item { .. } => 24.0,
+        })
+        .sum::<f32>()
+        + 10.0
+}
+
 /// The menu panel: its rows, paper, border and shadow.
 fn panel<'a>(entries: Vec<Entry>, t: Tokens) -> Element<'a, Message> {
+    let natural = natural_height(&entries);
     let rows: Vec<Element<'a, Message>> = entries
         .into_iter()
         .map(|entry| match entry {
@@ -878,7 +894,6 @@ fn panel<'a>(entries: Vec<Entry>, t: Tokens) -> Element<'a, Message> {
         })
         .collect();
     // A table adds about fifteen rows to the Insert menu; keep it inside the window.
-    let natural = rows.len() as f32 * 30.0 + 10.0;
     let list: Element<'a, Message> = if natural > MENU_MAX_HEIGHT {
         scrollable(column(rows).spacing(0).padding(5))
             .height(Length::Fixed(MENU_MAX_HEIGHT))
@@ -1076,5 +1091,20 @@ mod tests {
             .find(|entry| matches!(entry, Entry::Item { label, .. } if label == s::VIEW_BOOKMARKS))
             .expect("a Bookmarks item");
         assert!(matches!(bookmark, Entry::Item { checked: true, .. }));
+    }
+
+    #[test]
+    fn only_a_long_menu_scrolls() {
+        // The View menu used to be treated as a 420 px scroll area and showed a large
+        // blank strip under its last item; its contents are shorter than that.
+        let state = AppState::default();
+        assert!(natural_height(&entries(Menu::View, &state)) < MENU_MAX_HEIGHT);
+
+        // The Insert menu with a table's commands is the case the limit exists for.
+        let in_table = AppState {
+            in_table: true,
+            ..AppState::default()
+        };
+        assert!(natural_height(&entries(Menu::Insert, &in_table)) > MENU_MAX_HEIGHT);
     }
 }

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.92"
 license = "UNLICENSED"
@@ -80,6 +80,13 @@ directories = "6"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1"
 insta = "1"
+
+# Vendored for Wayland touchpad pinch zoom: winit 0.30 has no Linux gesture support and
+# iced 0.14 does not surface `PinchGesture`. See docs/decisions.md (2026-11-14).
+[patch.crates-io]
+winit = { path = "vendor/winit" }
+iced_winit = { path = "vendor/iced_winit" }
+iced_core = { path = "vendor/iced_core" }
 
 [profile.release]
 lto = "thin"

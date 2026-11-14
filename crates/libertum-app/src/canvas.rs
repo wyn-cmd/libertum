@@ -54,6 +54,16 @@ fn wheel_is_stepped(delta: &mouse::ScrollDelta) -> bool {
         mouse::ScrollDelta::Pixels { .. } => false,
     }
 }
+
+/// Whether a wheel event carries no movement. Wayland sends an axis-source and an axis-stop
+/// event around every touchpad gesture as zero-delta wheels; treating one as movement would
+/// zero the fling velocity just as the fingers lift.
+fn wheel_is_empty(delta: &mouse::ScrollDelta) -> bool {
+    match *delta {
+        mouse::ScrollDelta::Lines { x, y } => x == 0.0 && y == 0.0,
+        mouse::ScrollDelta::Pixels { x, y } => x == 0.0 && y == 0.0,
+    }
+}
 /// Logical px per point at 100% zoom (CSS 96 dpi over 72 pt per inch).
 const PX_PER_PT: f32 = 96.0 / 72.0;
 /// Scrollbar thickness and minimum thumb length, logical pixels.
@@ -494,7 +504,8 @@ pub enum CanvasEvent {
     /// keystrokes must stop until the canvas is clicked again. iced 0.14's `text_input` has
     /// no focus event, and it captures the click, so the canvas reports it instead.
     Blur,
-    /// Ctrl/Cmd + wheel (a trackpad pinch on Windows): zoom by `factor` around a page point.
+    /// Ctrl/Cmd + wheel (a trackpad pinch on Windows) or a Wayland pinch gesture: zoom by
+    /// `factor` around a page point.
     Zoom {
         factor: f32,
         page: usize,
@@ -509,6 +520,12 @@ pub enum CanvasEvent {
 /// the canvas `bounds` and not above them (the toolbar is above and keeps document focus).
 pub fn press_is_in_inspector(bounds: Rectangle, p: Point) -> bool {
     p.x >= bounds.x + bounds.width && p.y >= bounds.y
+}
+
+/// Zoom factor for one pinch update. The gesture reports its scale from the start, and winit
+/// gives the change since the previous update, so the new factor is `1 + delta`.
+fn pinch_zoom_factor(delta: f32) -> f32 {
+    (1.0 + delta).clamp(0.8, 1.25)
 }
 
 /// Zoom factor for one wheel event used as Ctrl/Cmd + wheel (a Windows trackpad pinch):
@@ -852,8 +869,13 @@ where
                 state.command = m.command();
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                if wheel_is_empty(delta) {
+                    shell.capture_event();
+                    return;
+                }
                 // Ctrl/Cmd + wheel zooms around the pointer. Windows trackpads report a pinch
-                // as Ctrl+wheel, so this is also the trackpad pinch path there.
+                // as Ctrl+wheel, so this is also the trackpad pinch path there; Wayland
+                // pinches arrive as `mouse::Event::Pinch` below.
                 if state.command
                     && let Some(p) = cursor.position_in(bounds)
                 {
@@ -880,6 +902,23 @@ where
                 }
                 shell.publish((self.on_event)(CanvasEvent::Wheel { dx, dy, stepped }));
                 shell.capture_event();
+            }
+            Event::Mouse(mouse::Event::Pinch { delta }) if cursor.is_over(bounds) => {
+                // A Wayland touchpad pinch. Each event carries the change in scale since the
+                // previous update, so it zooms like Ctrl/Cmd + wheel does on other platforms.
+                if let Some(p) = cursor.position_in(bounds) {
+                    let m = self.metrics(bounds);
+                    let (page, x_pt, y_pt) = self.page_point(bounds, p);
+                    let factor = pinch_zoom_factor(*delta);
+                    shell.publish((self.on_event)(CanvasEvent::Zoom {
+                        factor,
+                        page,
+                        x_pt,
+                        y_pt,
+                        cursor: Point::new(p.x * m.sf, p.y * m.sf),
+                    }));
+                    shell.capture_event();
+                }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 let (Some(window), Some(inside)) = (cursor.position(), cursor.position_in(bounds))
@@ -1576,5 +1615,31 @@ mod wheel_tests {
             x: 0.0,
             y: 40.0
         }));
+    }
+
+    #[test]
+    fn zero_wheel_events_are_not_movement() {
+        assert!(wheel_is_empty(&mouse::ScrollDelta::Lines {
+            x: 0.0,
+            y: 0.0
+        }));
+        assert!(wheel_is_empty(&mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: 0.0
+        }));
+        assert!(!wheel_is_empty(&mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: 0.5
+        }));
+    }
+
+    #[test]
+    fn pinch_up_zooms_in_and_down_zooms_out() {
+        assert!(pinch_zoom_factor(0.05) > 1.0);
+        assert!(pinch_zoom_factor(-0.05) < 1.0);
+        assert_eq!(pinch_zoom_factor(0.0), 1.0);
+        // One update cannot jump the zoom; the same limits apply as for pixel wheel deltas.
+        assert_eq!(pinch_zoom_factor(10.0), 1.25);
+        assert_eq!(pinch_zoom_factor(-10.0), 0.8);
     }
 }

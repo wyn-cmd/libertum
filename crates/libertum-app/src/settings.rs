@@ -56,6 +56,14 @@ pub enum UnitsPreference {
     Inches,
 }
 
+/// A version the writer asked not to be told about. `until` is `None` for "skip this
+/// version", or a Unix time after which the prompt may appear again.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateMute {
+    pub version: String,
+    pub until: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -84,6 +92,15 @@ pub struct Settings {
     /// The local AO3 tag vocabulary: what suggested tags are ranked against. Nothing
     /// leaves this file; see `libertum_export::tags`.
     pub tags: Vec<libertum_export::Tag>,
+    /// Ask GitHub once a day whether a newer release exists. On by default; the check only
+    /// reads the public releases API and never installs anything.
+    pub check_for_updates: bool,
+    /// When the last update check was attempted (Unix seconds), so launches do not check
+    /// more than once a day.
+    pub last_update_check: Option<u64>,
+    /// A release version the writer muted, with the time the mute ends (`None` = forever
+    /// for that version; a newer version still prompts).
+    pub update_mute: Option<UpdateMute>,
 }
 
 impl UnitsPreference {
@@ -101,6 +118,18 @@ impl Settings {
     /// The measurement units the inspector should use.
     pub fn units(&self) -> Units {
         self.units.to_units()
+    }
+
+    /// Whether a prompt for `version` should be shown now. A mute for another version does
+    /// not silence a newer one, and turning automatic checks off silences all of them.
+    pub fn wants_update_prompt(&self, version: &str, now: u64) -> bool {
+        if !self.check_for_updates {
+            return false;
+        }
+        match &self.update_mute {
+            Some(mute) if mute.version == version => mute.until.is_some_and(|until| now >= until),
+            _ => true,
+        }
     }
 }
 
@@ -121,6 +150,9 @@ impl Default for Settings {
             units: UnitsPreference::Auto,
             chapter_headings: libertum_export::ChapterLevels::default(),
             tags: Vec::new(),
+            check_for_updates: true,
+            last_update_check: None,
+            update_mute: None,
         }
     }
 }
@@ -198,6 +230,10 @@ mod tests {
         assert!(!s.show_performance, "the overlay is off until asked for");
         assert!(s.antialiasing, "page text is smooth until switched off");
         assert_eq!(s.theme, ThemePreference::System);
+        assert!(
+            s.check_for_updates,
+            "updates are checked until switched off"
+        );
     }
 
     #[test]
@@ -231,9 +267,39 @@ mod tests {
                     libertum_export::TagCategory::Relationship,
                 ),
             ],
+            check_for_updates: false,
+            last_update_check: Some(1_700_000_000),
+            update_mute: Some(UpdateMute {
+                version: "0.1.3".to_owned(),
+                until: Some(1_700_086_400),
+            }),
         };
         let text = original.to_toml().expect("serialise");
         assert_eq!(Settings::from_toml(&text).expect("parse"), original);
+    }
+
+    #[test]
+    fn update_prompts_respect_the_mute() {
+        let mut s = Settings::default();
+        assert!(s.wants_update_prompt("0.1.3", 100));
+
+        s.update_mute = Some(UpdateMute {
+            version: "0.1.3".to_owned(),
+            until: Some(200),
+        });
+        assert!(!s.wants_update_prompt("0.1.3", 100), "muted until 200");
+        assert!(s.wants_update_prompt("0.1.3", 200), "the mute has ended");
+        assert!(s.wants_update_prompt("0.1.4", 100), "a newer release");
+
+        s.update_mute = Some(UpdateMute {
+            version: "0.1.3".to_owned(),
+            until: None,
+        });
+        assert!(!s.wants_update_prompt("0.1.3", 10_000));
+        assert!(s.wants_update_prompt("0.2.0", 10_000));
+
+        s.check_for_updates = false;
+        assert!(!s.wants_update_prompt("0.2.0", 10_000));
     }
 
     #[test]

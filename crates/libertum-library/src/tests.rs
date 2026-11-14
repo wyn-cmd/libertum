@@ -39,6 +39,20 @@ fn a_save_replaces_the_file_in_one_step() {
     assert_eq!(fs::read_dir(&dir).expect("list").count(), 1);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_save_keeps_the_files_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = folder("atomic-permissions");
+    let file = dir.join("book.odt");
+    fs::write(&file, b"old").expect("write");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("make it private");
+    save_atomic::<io::Error>(&file, |temporary| fs::write(temporary, b"new")).expect("save");
+    let mode = fs::metadata(&file).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "a save must not widen access to the document");
+}
+
 #[test]
 fn a_stamp_notices_changed_content_but_not_a_touch() {
     let dir = folder("stamp");

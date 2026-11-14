@@ -77,6 +77,7 @@ libertum/
 Check each crate's current version and API on docs.rs before use. **Do not rely on remembered APIs.** Iced and parley in particular change between releases.
 
 - UI: `iced`, `rfd` (native file dialogs), `arboard` (clipboard)
+- Input gestures: `winit` 0.30.13, `iced_core` 0.14.0 and `iced_winit` 0.14.1 are vendored in `vendor/` with a small Wayland pinch patch (`docs/decisions.md`, 2026-11-14). Re-apply the patch when any of them is bumped.
 - Text: `parley`, `swash`, `fontique` (font discovery, parley's companion), `unicode-segmentation`
 - Rendering: `tiny-skia` (CPU path), `vello` (GPU path, Linebender's GPU 2D renderer that pairs with parley; must be wgpu-version-compatible with Iced, see §4.5)
 - Formats: `zip`, `quick-xml`, `comrak` (CommonMark + GFM, with source positions), `image`; for RTF code pages, `encoding_rs` (Apache-2.0 OR MIT) rather than hand-written tables
@@ -171,6 +172,9 @@ Decided after the Phase 0 measurements in docs/spikes.md, and revised on 2026-11
 ## 5. User interface (`libertum-app`)
 
 Visual reference: Apple Pages. It should be clean, roomy, and use neutral greys. Follow the OS light/dark preference, with a manual override.
+
+- **Input gestures:** Ctrl/Cmd + wheel zooms around the pointer on every platform. A native touchpad pinch also zooms: winit reports it on macOS, and the vendored winit carries a `zwp_pointer_gestures_v1` implementation for Wayland. X11 delivers no pinch, and it is not a target for gestures.
+- **Update checks:** Settings can ask the GitHub releases API once a day for a newer version and prompt to open its download page. The app never installs an update itself; checks are on by default and can be switched off, leaving the manual **Check now**.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐

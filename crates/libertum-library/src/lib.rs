@@ -62,9 +62,20 @@ pub fn save_atomic<E>(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "document".to_owned());
     let temporary = path.with_file_name(format!(".{name}.{}.saving", std::process::id()));
+    // A rename replaces the file's mode as well as its bytes. Give the new file the mode of
+    // the one it replaces, or a private document (0600) would become world-readable (0644).
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
     if let Err(error) = write(&temporary) {
         let _ = fs::remove_file(&temporary);
         return Err(SaveError::Write(error));
+    }
+    if let Some(permissions) = permissions
+        && let Err(error) = fs::set_permissions(&temporary, permissions)
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(SaveError::Permissions(error));
     }
     // A sync client may hold the file for a moment: try a few times before giving up.
     let mut last = None;
@@ -88,6 +99,9 @@ pub fn save_atomic<E>(
 pub enum SaveError<E> {
     /// The caller's writer failed; the original file is untouched.
     Write(E),
+    /// The new file could not be given the original's permissions; it was removed and the
+    /// original is untouched.
+    Permissions(io::Error),
     /// The finished temporary file could not be moved into place.
     Replace(io::Error),
 }
@@ -187,18 +201,22 @@ pub fn snapshot(path: &Path, now: SystemTime) -> io::Result<Option<Version>> {
 }
 
 fn snapshot_after(path: &Path, now: SystemTime, gap: u64) -> io::Result<Option<Version>> {
+    // The gap check comes first: on most saves a recent version exists, and hashing the
+    // whole document just to discard the snapshot would make every save read the file twice.
+    let existing = versions(path);
+    let now_secs = seconds(now);
+    if let Some(newest) = existing.first()
+        && now_secs.saturating_sub(newest.taken) < gap
+    {
+        return Ok(None);
+    }
     let Some(stamp) = DiskStamp::of(path)? else {
         return Ok(None);
     };
-    let existing = versions(path);
-    let now_secs = seconds(now);
-    if let Some(newest) = existing.first() {
-        if now_secs.saturating_sub(newest.taken) < gap {
-            return Ok(None);
-        }
-        if fs::read(&newest.path).is_ok_and(|bytes| fnv1a(&bytes) == stamp.hash) {
-            return Ok(None);
-        }
+    if let Some(newest) = existing.first()
+        && fs::read(&newest.path).is_ok_and(|bytes| fnv1a(&bytes) == stamp.hash)
+    {
+        return Ok(None);
     }
     let dir = history_dir(path);
     fs::create_dir_all(&dir)?;
@@ -250,7 +268,9 @@ pub fn restore(path: &Path, version: &Path, now: SystemTime) -> io::Result<()> {
     keep_current(path, now)?;
     save_atomic(path, |temporary| fs::copy(version, temporary).map(|_| ())).map_err(|error| {
         match error {
-            SaveError::Write(error) | SaveError::Replace(error) => error,
+            SaveError::Write(error) | SaveError::Permissions(error) | SaveError::Replace(error) => {
+                error
+            }
         }
     })
 }
