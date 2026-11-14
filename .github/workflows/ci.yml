@@ -195,12 +195,16 @@ jobs:
           # The page-count tool is part of libertum-app, whose dependencies need
           # fontconfig, X11, Wayland, xkbcommon and GTK headers at build time (the same
           # set the platform matrix installs). Without them the build fails inside
-          # yeslogic-fontconfig-sys before LibreOffice is ever used.
+          # yeslogic-fontconfig-sys before LibreOffice is ever used. Caladea is the
+          # metric-compatible stand-in for Cambria, the acceptance document's font:
+          # fontconfig and LibreOffice both substitute it, so both engines lay out the
+          # same text with the same metrics.
           sudo apt-get update
           for attempt in 1 2 3; do
             if sudo apt-get install -y --no-install-recommends \
                 libreoffice-writer-nogui poppler-utils \
-                pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev; then
+                pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev \
+                fonts-crosextra-caladea; then
               exit 0
             fi
             echo "apt install attempt $attempt failed; retrying in 20s"

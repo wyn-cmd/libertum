@@ -159,8 +159,8 @@ printf 'build-appimage: staging %s\n' "$appdir" >&2
     "${library_args[@]}" || die "linuxdeploy failed"
 
 # The notices belong with the program, as in the .deb and the .rpm.
-install -m 644 "$root_dir/README.md" "$appdir/usr/share/doc/libertum/README.md"
-install -m 644 "$root_dir/docs/third-party-licences.md" \
+install -Dm644 "$root_dir/README.md" "$appdir/usr/share/doc/libertum/README.md"
+install -Dm644 "$root_dir/docs/third-party-licences.md" \
     "$appdir/usr/share/doc/libertum/third-party-licences.md"
 
 appimage="$out_dir/Libertum-${version}-${appimage_arch}.AppImage"
