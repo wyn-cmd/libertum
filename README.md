@@ -2,93 +2,94 @@
 
 [![CI](https://github.com/wyn-cmd/libertum/actions/workflows/ci.yml/badge.svg)](https://github.com/wyn-cmd/libertum/actions/workflows/ci.yml)
 
-A cross-platform desktop word processor for long documents — novels, mostly — built in Rust.
-It edits ODT and DOCX natively, reads and writes RTF and Markdown, and has its own lossless
-format for documents that need everything the interchange formats cannot hold.
+Libertum is a desktop word processor for long manuscripts. It runs on Windows, macOS and
+Linux, and it is written in Rust.
 
-The interface follows Pages: the document sits on the left, a collapsible inspector on the
-right, and the Format and Document buttons switch between them.
+It opens and saves ODT and DOCX directly, reads and writes RTF and Markdown, and keeps its own
+format (`.lbtd`) for documents that need more than the interchange formats can hold. The window
+follows Pages: the page sits on the left and the inspector on the right, with the Format and
+Document buttons switching between the formatting and document panes.
 
-## Status
+The main acceptance document is a 343-page novel with footnotes, images, a table of contents
+and cross-references, so long documents are the point rather than an afterthought.
 
-Working today:
+## What works
 
-- **Editing**: caret, selection (mouse, keyboard, double and triple click), undo and redo,
-  plain-text clipboard, IME input.
-- **Formatting**: character and paragraph formatting, paragraph styles, lists, borders, tabs,
-  columns, hyphenation and ligatures, all bound to the selection with mixed states.
-- **Pages**: page size, orientation, margins, per-section geometry, headers and footers (first
-  and even variants, `{page}` and `{pages}`), page numbers, text watermarks, booklet view,
-  page thumbnails, full screen, zoom, and a **pageless** reading view that shows the document
-  as one endless A4-wide column.
-- **Long documents**: an automatically updated table of contents, footnotes and endnotes,
-  bookmarks and cross-references, inline images, and tables that split across pages with
-  repeating header rows and editable merged cells.
-- **Files**: ODT, DOCX, RTF and Markdown, plus the native `.lbtd` format. Find and replace,
-  autosave with crash recovery, recent files, drag and drop, right-click menus and a Settings
-  window.
-- **Export**: PDF (searchable text), PDF Archival (PDF/A-2b), EPUB 3, RTF, plain text and
-  Markdown, or a single AO3 chapter as HTML ready to paste into AO3's editor, with tag
-  suggestions ranked locally from your own tag list.
+- Editing: caret and selection by mouse or keyboard, undo and redo, plain-text clipboard, IME
+  input.
+- Formatting: character and paragraph formatting, paragraph styles, lists, borders, tab stops,
+  columns, hyphenation and ligatures. Changes apply to the selection, and mixed states show as
+  mixed.
+- Pages: page size, orientation, margins, per-section layout, headers and footers with first
+  page and even page variants, page numbers, text watermarks, booklet view, page thumbnails,
+  full screen and zoom. There is also a pageless mode that shows the document as one long
+  column.
+- Long documents: a table of contents that updates itself, footnotes and endnotes, bookmarks
+  and cross-references, inline images, and tables that split across pages with repeating header
+  rows and editable merged cells.
+- Files: ODT, DOCX, RTF, Markdown and `.lbtd`, with find and replace, autosave and crash
+  recovery, recent files, drag and drop, right-click menus, a settings window, version history
+  and a library view.
+- Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text and Markdown. A chapter
+  can also be exported as HTML for AO3, with tag suggestions ranked locally from your own tag
+  list.
 
-`docs/STATUS.md` has the current detail and the open items. `PLAN.md` has the architecture,
-the performance budgets and the phases: document stitching and the AO3 chapter export with
-local tag suggestions are done, and the writing tool still to come is proofreading and AO3 sync.
+`docs/STATUS.md` has the current state and the open items. `PLAN.md` covers the architecture,
+the performance budgets and the phase list. Of the planned work, the main pieces still missing
+are proofreading and AO3 sync.
 
 ## Install on Windows
 
-Download `Libertum-Setup.exe` from the repository's **Releases** page (or a CI run's
-`libertum-x86_64-pc-windows-msvc` artifact, or build it as below) and double-click it. It installs for the current user, with no
-administrator rights: the program goes in `%LOCALAPPDATA%\Libertum`, with Start menu and
-desktop shortcuts, and Libertum is offered in "Open with" (and Settings > Apps > Default apps)
-for `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` files. Running it again updates an installed
-copy; close Libertum first. An uninstaller, `Libertum-Uninstall.ps1`, is written beside the
-program.
+Download `Libertum-Setup.exe` from the [Releases](https://github.com/wyn-cmd/libertum/releases)
+page, or take it from a CI artifact, or build it yourself. Double-click it and it installs for
+the current user, with no administrator rights. The program goes in `%LOCALAPPDATA%\Libertum`,
+with Start menu and desktop shortcuts, and Libertum is registered in "Open with" for `.lbtd`,
+`.odt`, `.docx`, `.rtf` and `.md`. Running the installer again updates an installed copy, so
+close Libertum first. It also writes `Libertum-Uninstall.ps1` beside the program.
 
-The installer and the program are not code-signed, so Windows SmartScreen may warn the first
-time: choose "More info", then "Run anyway". Double-clicking a document that Libertum is set to
-open starts it straight in that document.
+Nothing is code-signed, so SmartScreen may warn you the first time. Choose "More info", then
+"Run anyway". Once Libertum is the default handler for a document type, double-clicking one of
+those files opens it straight in the editor.
 
 ## Install on Linux
 
-The Linux build is shipped three ways, all unsigned: a `.deb`, an `.rpm`, and the plain
-`libertum` program inside `Libertum-<version>-linux-x64.zip`. A release has the packages
-attached; any green CI run has them in its `libertum-x86_64-unknown-linux-gnu` artifact.
+A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain binary. None of
+them are signed.
 
 ```sh
 sudo apt install ./libertum_0.1.2_amd64.deb                  # Debian, Ubuntu, ...
 sudo dnf install ./libertum-0.1.2-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
-The package puts `libertum` in `/usr/bin` and installs the desktop entry, the icon and a
-shared-mime-info entry for `.lbtd` files, so Libertum appears in the application menu and in
-"Open with". `sudo apt remove libertum` (or `sudo dnf remove libertum`) takes it away again.
+The packages put `libertum` in `/usr/bin` and install a desktop entry, the icon and a MIME
+entry for `.lbtd` files, so the app appears in the application menu and in "Open with". Remove
+it with `sudo apt remove libertum` or `sudo dnf remove libertum`.
 
-The packages are built on Ubuntu 24.04, so they need glibc 2.39 or newer: Debian 13, Ubuntu
-24.04, Fedora 41 and later. Older distributions can run a build of their own (see below). The
-runtime libraries are declared as dependencies — fontconfig, X11, Wayland, `libxkbcommon`,
-Vulkan and EGL/GLES — because the fonts, the window and the compositor are chosen at run time.
+They are built on Ubuntu 24.04 and need glibc 2.39 or newer: Debian 13, Ubuntu 24.04, Fedora 41
+and later. The packages depend on fontconfig, X11, Wayland, `libxkbcommon`, Vulkan and EGL/GLES
+because the fonts, the window system and the compositor are chosen at run time. If your
+distribution is older, build Libertum from source.
 
-There is also a portable AppImage, `Libertum-<version>-x86_64.AppImage`, which carries the
-font, input, Wayland and graphics libraries itself and needs only the host's X11/XCB and glibc:
+The AppImage carries its own font, input, Wayland and graphics libraries, and only needs the
+host's X11/XCB and glibc:
 
 ```sh
 chmod +x Libertum-0.1.2-x86_64.AppImage
 ./Libertum-0.1.2-x86_64.AppImage
 ```
 
-On macOS download `Libertum-<version>-macos-arm64.dmg` (Apple Silicon) or
-`Libertum-<version>-macos-x64.dmg` (Intel), open it and drag **Libertum** to Applications. The
-app is signed ad hoc, not notarised, so the first launch needs Finder > right-click Libertum >
-**Open** and then Open again. It opens `.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` from Finder.
+## Install on macOS
 
-To build the installer: `powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1`
-(it writes `dist\Libertum-Setup-<version>.exe`). The same install can be done by hand by running
-`packaging\windows\install.ps1` from a folder that holds `libertum.exe`.
+Download `Libertum-<version>-macos-arm64.dmg` for Apple Silicon or
+`Libertum-<version>-macos-x64.dmg` for Intel, open the disk image and drag **Libertum** to
+Applications. The app is signed ad hoc rather than notarised, so Gatekeeper will complain the
+first time: right-click Libertum in Finder, choose **Open**, then **Open** again. It handles
+`.lbtd`, `.odt`, `.docx`, `.rtf` and `.md` from Finder.
 
-## Build and run
+## Building from source
 
-Rust stable (developed on 1.99, edition 2024). On Windows the toolchain is MSVC.
+Rust stable. The workspace declares 1.92, CI builds with stable, and development happens on
+1.100. On Windows the toolchain is MSVC.
 
 ```sh
 cargo run --release -p libertum-app          # the binary is named `libertum`
@@ -98,24 +99,24 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 packaging/linux/build-packages.sh             # dist/libertum_<version>_amd64.deb and .rpm
 ```
 
-The release profile matters for anything you judge by feel: a debug build pages far slower, and
+Use a release build for anything you judge by feel. A debug build pages much more slowly, and
 the performance budgets in `PLAN.md` §2 are all release numbers.
 
-### Frame-rate counter
+The Windows installer is packed with `powershell -ExecutionPolicy Bypass -File
+packaging\windows\build-installer.ps1`, which writes `dist\Libertum-Setup-<version>.exe`.
+`packaging\windows\install.ps1` performs the same install by hand from a folder that holds
+`libertum.exe`. The Linux packages and the AppImage have scripts under `packaging/linux/`; the
+macOS bundle and disk image are built by `packaging/macos/build-app.sh` on a Mac.
 
-A build-time counter that draws the current frame rate and frame time in the top-right corner:
+### Frame times
 
-```sh
-cargo run --release -p libertum-app --features fps
-```
+Settings has a **Show performance overlay** switch that draws frame rate and frame time in the
+top-right corner while it is on. It is off by default. The window redraws every frame while the
+overlay is shown, so turn it off after measuring.
 
-It is off by default and is not part of any official build, so release and CI binaries carry
-neither the counter nor the continuous redraw it needs. While it is on, the window redraws
-every frame; compare runs at the same zoom, window size and document.
+### Environment variables
 
-### Debug hooks
-
-A few environment variables help with screenshots and measurements:
+A few variables are handy for screenshots and measurements:
 
 | Variable | Effect |
 |---|---|
@@ -136,7 +137,10 @@ The full list is in `AGENTS.md`.
 | `crates/libertum-render` | Page rendering: tiny-skia on the CPU, optionally vello on the GPU |
 | `crates/libertum-editor` | Cursor, selection, typing, formatting commands, find and replace |
 | `crates/libertum-docx`, `-odt`, `-rtf`, `-markdown`, `-native` | Format import and export |
+| `crates/libertum-export` | Chapter splitting, AO3 HTML, EPUB and plain text |
+| `crates/libertum-library` | Atomic saves, change detection and version history on disk |
 | `crates/libertum-formats-common` | Code the format crates share |
+| `crates/libertum-installer` | The single-file Windows installer |
 | `crates/libertum-app` | The Iced application: window, canvas, inspector, toolbar |
 | `docs/` | Current status, decisions, measurements, the native format specification, accessibility notes |
 | `tests/fixtures/` | Round-trip fixtures for every format |
@@ -145,12 +149,13 @@ The full list is in `AGENTS.md`.
 
 - Every document change is an `Operation` with an exact inverse, and the model tests check each
   one with a property test. Undo is the same machinery running backwards.
-- The keystroke path is kept independent of document size: layout is cached per paragraph,
+- Nothing on the keystroke path may grow with document size. Layout is cached per paragraph,
   pagination is incremental, and only visible pages are rendered.
-- Third-party versions are pinned together on purpose (iced 0.14, wgpu 27, vello 0.7); see
+- Third-party versions are pinned together on purpose (iced 0.14, wgpu 27, vello 0.7). Read
   `PLAN.md` §4.5 before bumping any of them.
 
 ## Licence
 
-Private project; no licence has been chosen yet. Dependencies and embedded data are listed with
-their licences in `docs/third-party-licences.md`.
+No licence has been chosen yet. The source is public, but that is not a grant to reuse it.
+Dependencies and embedded data are listed with their licences in
+`docs/third-party-licences.md`.
