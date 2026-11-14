@@ -8,6 +8,20 @@ pub const UNTITLED: &str = "Untitled";
 pub const HOME_TITLE: &str = "Choose a Template";
 pub const HOME_SUBTITLE: &str = "Start a new document or story.";
 pub const HOME_CREATE: &str = "Create";
+pub const HOME_YOUR_TEMPLATES: &str = "Your templates";
+pub const HOME_ADD_TEMPLATE: &str = "Add template…";
+pub const HOME_ADD_TEMPLATE_HINT: &str = "Start from an ODT, DOCX or Libertum document.";
+pub const HOME_REMOVE_TEMPLATE: &str = "Remove template";
+pub const TEMPLATE_FORMAT_ODT: &str = "ODT template";
+pub const TEMPLATE_FORMAT_DOCX: &str = "DOCX template";
+pub const TEMPLATE_FORMAT_NATIVE: &str = "Libertum template";
+pub const TEMPLATE_ADD_TITLE: &str = "Add a document template";
+pub const TEMPLATE_FILTER: &str = "Document templates";
+pub const TEMPLATE_ADD_FAILED: &str = "Could not add the template.";
+pub const TEMPLATE_OPEN_FAILED: &str = "Could not open the template.";
+pub const TEMPLATE_REMOVE_FAILED: &str = "Could not remove the template.";
+pub const TEMPLATE_UNSUPPORTED: &str =
+    "Only ODT, DOCX and Libertum (.lbtd) documents can be templates.";
 pub const HOME_OPEN: &str = "Open…";
 pub const TEMPLATE_BLANK: &str = "Blank";
 pub const TEMPLATE_BLANK_DESC: &str = "An empty page.";
@@ -342,11 +356,17 @@ pub fn window_title(name: &str, extension: &str, edited: bool) -> String {
     format!("{name}.{extension} — {state}")
 }
 
-/// "Page 12 of 486 · 104,233 words"
-pub fn word_count_pill(page: usize, pages: usize, words: usize) -> String {
+/// "Page 12 of 486 · 104,233 words", or the selected part when there is a selection.
+pub fn word_count_pill(page: usize, pages: usize, words: usize, selected: Option<usize>) -> String {
     let noun = if words == 1 { "word" } else { "words" };
     let words = group_thousands(words);
-    format!("Page {page} of {pages} · {words} {noun}")
+    match selected {
+        Some(selected) => {
+            let selected = group_thousands(selected);
+            format!("Page {page} of {pages} · {selected} selected of {words} {noun}")
+        }
+        None => format!("Page {page} of {pages} · {words} {noun}"),
+    }
 }
 
 /// 104233 becomes "104,233".
@@ -411,6 +431,11 @@ pub const CONTEXT_CUT: &str = "Cut";
 pub const CONTEXT_COPY: &str = "Copy";
 pub const CONTEXT_PASTE: &str = "Paste";
 pub const CONTEXT_SELECT_ALL: &str = "Select All";
+pub const SPELL_SUGGESTIONS: &str = "Suggestions";
+pub const SPELL_NO_SUGGESTIONS: &str = "No suggestions";
+pub const SPELL_ADD_DICTIONARY: &str = "Add to dictionary";
+pub const SPELL_IGNORE_ONCE: &str = "Ignore once";
+pub const SPELL_IGNORE_DOCUMENT: &str = "Ignore in this document";
 pub const CONTEXT_BOLD: &str = "Bold";
 pub const CONTEXT_ITALIC: &str = "Italic";
 pub const CONTEXT_UNDERLINE: &str = "Underline";
@@ -436,6 +461,10 @@ pub const SETTINGS_ANTIALIASING_HINT: &str = "Switch off for hard pixel edges on
 pub const SETTINGS_PERFORMANCE: &str = "Show performance overlay";
 pub const SETTINGS_PERFORMANCE_HINT: &str = "Frames per second and frame time in the top-right corner of the document view. It keeps the window redrawing while it is on.";
 pub const SETTINGS_UPDATES: &str = "Check for updates automatically";
+pub const SETTINGS_SPELLING: &str = "Spelling";
+pub const SETTINGS_SPELLCHECK: &str = "Check spelling as you type";
+pub const SETTINGS_SPELL_LANGUAGE: &str = "Dictionary";
+pub const SETTINGS_SPELL_HINT: &str = "Underlines are checked on this machine. Right-click a word for suggestions, to add it to your dictionary, or to ignore it.";
 pub const SETTINGS_UPDATES_HINT: &str = "Ask GitHub once a day whether a newer release exists. Libertum only opens the release page; nothing is installed without you. No document or account information is sent.";
 pub const SETTINGS_CHECK_NOW: &str = "Check now";
 pub const UPDATES_CHECKING: &str = "Checking…";
@@ -581,6 +610,12 @@ pub const HISTORY_SAVE_FIRST: &str =
 pub const HISTORY_NO_FILE: &str = "Save the document first: only a saved file has a history.";
 pub const LIBRARY_ACTION_FAILED: &str = "That did not work:";
 
+
+pub const BORDER_TOP: &str = "Top";
+pub const BORDER_RIGHT: &str = "Right";
+pub const BORDER_BOTTOM: &str = "Bottom";
+pub const BORDER_LEFT: &str = "Left";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,10 +627,14 @@ mod tests {
         assert_eq!(group_thousands(1000), "1,000");
         assert_eq!(group_thousands(104_233), "104,233");
         assert_eq!(
-            word_count_pill(12, 486, 104_233),
+            word_count_pill(12, 486, 104_233, None),
             "Page 12 of 486 · 104,233 words"
         );
-        assert_eq!(word_count_pill(1, 1, 1), "Page 1 of 1 · 1 word");
+        assert_eq!(word_count_pill(1, 1, 1, None), "Page 1 of 1 · 1 word");
+        assert_eq!(
+            word_count_pill(12, 486, 104_233, Some(1_234)),
+            "Page 12 of 486 · 1,234 selected of 104,233 words"
+        );
     }
 
     #[test]

@@ -728,9 +728,19 @@ pub fn ao3_layer<'a>(state: &AppState, window_width: f32, t: Tokens) -> Element<
         .into()
 }
 
+/// A misspelt word under the pointer and the suggestions offered for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpellingMenu {
+    pub span: crate::spell::Span,
+    pub suggestions: Vec<String>,
+}
+
 /// What a right-click menu offers: the thing under the pointer decides.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ContextMenuTarget {
-    Text,
+    Text {
+        spelling: Option<SpellingMenu>,
+    },
     Table {
         merge_right: bool,
         merge_below: bool,
@@ -767,22 +777,56 @@ pub fn context_layer<'a>(
 fn context_entries(target: &ContextMenuTarget) -> Vec<Entry> {
     let cmd = shortcuts::command_key_label;
     match target {
-        ContextMenuTarget::Text => vec![
-            Entry::item(s::CONTEXT_CUT, Message::Cut).shortcut(cmd("X")),
-            Entry::item(s::CONTEXT_COPY, Message::Copy).shortcut(cmd("C")),
-            Entry::item(s::CONTEXT_PASTE, Message::Paste).shortcut(cmd("V")),
-            Entry::Separator,
-            Entry::item(s::CONTEXT_SELECT_ALL, Message::SelectAll).shortcut(cmd("A")),
-            Entry::Separator,
-            Entry::item(s::CONTEXT_BOLD, Message::Shortcut(Shortcut::Bold))
-                .shortcut(shortcuts::label(Shortcut::Bold)),
-            Entry::item(s::CONTEXT_ITALIC, Message::Shortcut(Shortcut::Italic))
-                .shortcut(shortcuts::label(Shortcut::Italic)),
-            Entry::item(s::CONTEXT_UNDERLINE, Message::Shortcut(Shortcut::Underline))
-                .shortcut(shortcuts::label(Shortcut::Underline)),
-            Entry::Separator,
-            Entry::item(s::VIEW_FIND, Message::OpenFind).shortcut(shortcuts::label(Shortcut::Find)),
-        ],
+        ContextMenuTarget::Text { spelling } => {
+            let mut entries = Vec::new();
+            if let Some(menu) = spelling {
+                entries.push(Entry::disabled(s::SPELL_SUGGESTIONS));
+                for suggestion in &menu.suggestions {
+                    entries.push(Entry::item(
+                        suggestion.clone(),
+                        Message::SpellReplace {
+                            span: menu.span.clone(),
+                            replacement: suggestion.clone(),
+                        },
+                    ));
+                }
+                if menu.suggestions.is_empty() {
+                    entries.push(Entry::disabled(s::SPELL_NO_SUGGESTIONS));
+                }
+                entries.push(Entry::Separator);
+                entries.push(Entry::item(
+                    s::SPELL_ADD_DICTIONARY,
+                    Message::SpellAddWord(menu.span.word.clone()),
+                ));
+                entries.push(Entry::item(
+                    s::SPELL_IGNORE_ONCE,
+                    Message::SpellIgnoreOnce(menu.span.clone()),
+                ));
+                entries.push(Entry::item(
+                    s::SPELL_IGNORE_DOCUMENT,
+                    Message::SpellIgnoreDocument(menu.span.word.clone()),
+                ));
+                entries.push(Entry::Separator);
+            }
+            entries.extend([
+                Entry::item(s::CONTEXT_CUT, Message::Cut).shortcut(cmd("X")),
+                Entry::item(s::CONTEXT_COPY, Message::Copy).shortcut(cmd("C")),
+                Entry::item(s::CONTEXT_PASTE, Message::Paste).shortcut(cmd("V")),
+                Entry::Separator,
+                Entry::item(s::CONTEXT_SELECT_ALL, Message::SelectAll).shortcut(cmd("A")),
+                Entry::Separator,
+                Entry::item(s::CONTEXT_BOLD, Message::Shortcut(Shortcut::Bold))
+                    .shortcut(shortcuts::label(Shortcut::Bold)),
+                Entry::item(s::CONTEXT_ITALIC, Message::Shortcut(Shortcut::Italic))
+                    .shortcut(shortcuts::label(Shortcut::Italic)),
+                Entry::item(s::CONTEXT_UNDERLINE, Message::Shortcut(Shortcut::Underline))
+                    .shortcut(shortcuts::label(Shortcut::Underline)),
+                Entry::Separator,
+                Entry::item(s::VIEW_FIND, Message::OpenFind)
+                    .shortcut(shortcuts::label(Shortcut::Find)),
+            ]);
+            entries
+        }
         ContextMenuTarget::Table {
             merge_right,
             merge_below,

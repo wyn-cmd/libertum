@@ -79,6 +79,13 @@ const FIND_MATCH_COLOUR: iced::Color = iced::Color {
     b: 0.0,
     a: 0.5,
 };
+/// Misspelling underline; readable on white paper in both themes.
+const SPELL_COLOUR: iced::Color = iced::Color {
+    r: 0.82,
+    g: 0.16,
+    b: 0.16,
+    a: 1.0,
+};
 
 /// Drag-selection auto-scroll: minimum step and cap per pointer move, logical pixels.
 const DRAG_SCROLL_MIN: f32 = 10.0;
@@ -439,6 +446,8 @@ pub struct CanvasProps {
     /// The text Find found last, in page coordinates: drawn in a stronger colour over the
     /// selection so the match stands out exactly.
     pub find: Vec<SelectionRect>,
+    /// Misspelling underline rectangles, page coordinates.
+    pub spell: Vec<SelectionRect>,
     /// IME composition text, drawn inline at the caret until it is committed.
     pub preedit: Option<PreeditOverlay>,
     /// Keep requesting a redraw every frame (autoscroll test; `App` ticks on `window::frames`).
@@ -1196,6 +1205,25 @@ where
                 }
             }
 
+            // Misspellings: a thin red underline at the bottom of each word's line boxes.
+            for s in &self.props.spell {
+                if let Some(rect) = page_point_rect(
+                    &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
+                ) && rect.intersects(&bounds)
+                {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds: Rectangle::new(
+                                Point::new(rect.x, rect.y + rect.height - 1.5),
+                                Size::new(rect.width, 1.5),
+                            ),
+                            ..Quad::default()
+                        },
+                        SPELL_COLOUR,
+                    );
+                }
+            }
+
             if let Some(caret) = self.props.caret
                 && let Some(rect) = page_point_rect(
                     &m,
@@ -1395,6 +1423,7 @@ mod tests {
             caret,
             selection: Vec::new(),
             find: Vec::new(),
+            spell: Vec::new(),
             preedit: None,
             animate: false,
             booklet: false,

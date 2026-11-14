@@ -1112,6 +1112,45 @@ impl DocView {
             .collect()
     }
 
+    /// The paragraphs that have a line on `pages`, plus the caret's paragraph. Spelling
+    /// checks these only, so a 500-page document never pays for the whole text on a keystroke.
+    pub fn visible_paragraphs(&self, pages: std::ops::Range<usize>) -> Vec<(BlockId, String)> {
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut push = |index: usize, seen: &mut std::collections::HashSet<usize>| {
+            if seen.insert(index)
+                && let Some(snapshot) = layout.paragraphs().get(index)
+            {
+                out.push((BlockId(snapshot.id), snapshot.text.clone()));
+            }
+        };
+        for page in pages {
+            let Some(page) = layout.pages().get(page) else {
+                continue;
+            };
+            push(page.start.para, &mut seen);
+            for slice in &page.slices {
+                push(slice.para, &mut seen);
+            }
+        }
+        let caret = self.editor.caret().block;
+        if let Some(index) = self.editor.document().index_of(caret) {
+            push(index, &mut seen);
+        }
+        out
+    }
+
+    /// The line rectangles covered by a byte range in one paragraph, for overlays such as
+    /// spelling underlines.
+    pub fn range_rects(&self, block: BlockId, start: usize, end: usize) -> Vec<SelectionRect> {
+        let Some(index) = self.editor.document().index_of(block) else {
+            return Vec::new();
+        };
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.selection_rects(index, start..end)
+    }
+
     /// The image under a page point, with the paragraph that holds it and its index there:
     /// for the context menu, so rights-clicking a picture acts on that picture rather than
     /// on the first one in the paragraph.

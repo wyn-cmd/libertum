@@ -30,6 +30,9 @@ cross-references.
 - Files: ODT, DOCX, RTF, Markdown and `.lbtd`, with find and replace, autosave and crash
   recovery, recent files, drag and drop, right-click menus, a settings window, version history
   and a library view.
+- Templates: Blank, Manuscript and Book are built in. Add your own from an ODT, DOCX or
+  Libertum (`.lbtd`) document on the home screen; the template is a copy in Libertum's data
+  folder, and removing it leaves the original alone.
 - Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text and Markdown. A chapter
   can also be exported as HTML for AO3, with tag suggestions ranked locally from your own tag
   list.

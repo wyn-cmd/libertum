@@ -2377,3 +2377,36 @@ fn the_toc_lists_every_heading_level_and_updates_with_the_document() {
         "level 1 has no indent"
     );
 }
+
+#[test]
+fn page_setup_at_the_caret_changes_only_its_section() {
+    let mut ed = book();
+    assert_eq!(ed.document().sections.len(), 2);
+    let second = ed
+        .document()
+        .paragraphs()
+        .find(|p| {
+            ed.document()
+                .index_of(p.id)
+                .is_some_and(|index| ed.document().section_of(index) == 1)
+        })
+        .map(|p| p.id)
+        .expect("a paragraph in the second section");
+    ed.set_caret(
+        DocPosition {
+            block: second,
+            offset: 0,
+        },
+        false,
+    );
+    let letter = PageSetup {
+        paper: PaperSize::Letter,
+        orientation: Orientation::Portrait,
+        margins: Margins::uniform(54.0),
+    };
+    ed.set_page_setup_at_caret(letter).expect("section setup");
+    assert_eq!(ed.document().sections[0].page, PageSetup::a4());
+    assert_eq!(ed.document().sections[1].page, letter);
+    ed.undo().expect("undo");
+    assert_eq!(ed.document().sections[1].page, PageSetup::a4());
+}

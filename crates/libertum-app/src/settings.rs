@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::spell::Language as SpellLanguage;
 use crate::state::{Inspector, Units};
 
 pub const SIDEBAR_MIN_WIDTH: f32 = 240.0;
@@ -95,6 +96,10 @@ pub struct Settings {
     /// Ask GitHub once a day whether a newer release exists. On by default; the check only
     /// reads the public releases API and never installs anything.
     pub check_for_updates: bool,
+    /// Underline misspellings while typing. On by default; nothing leaves the machine.
+    pub spellcheck: bool,
+    /// The dictionary used for the open document's spelling checks.
+    pub spellcheck_language: SpellLanguage,
     /// When the last update check was attempted (Unix seconds), so launches do not check
     /// more than once a day.
     pub last_update_check: Option<u64>,
@@ -151,6 +156,8 @@ impl Default for Settings {
             chapter_headings: libertum_export::ChapterLevels::default(),
             tags: Vec::new(),
             check_for_updates: true,
+            spellcheck: true,
+            spellcheck_language: SpellLanguage::British,
             last_update_check: None,
             update_mute: None,
         }
@@ -268,6 +275,8 @@ mod tests {
                 ),
             ],
             check_for_updates: false,
+            spellcheck: false,
+            spellcheck_language: crate::spell::Language::American,
             last_update_check: Some(1_700_000_000),
             update_mute: Some(UpdateMute {
                 version: "0.1.3".to_owned(),

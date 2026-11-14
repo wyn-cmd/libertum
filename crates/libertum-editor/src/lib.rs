@@ -1473,6 +1473,44 @@ impl Editor {
         Ok(b.dirty)
     }
 
+    /// The page setup of the section the caret is in.
+    pub fn page_setup_at_caret(&self) -> PageSetup {
+        let Some(index) = self.doc.index_of(self.caret().block) else {
+            return self.doc.page_setup();
+        };
+        let section = self.doc.section_of(index);
+        self.doc
+            .sections
+            .get(section)
+            .map_or_else(|| self.doc.page_setup(), |section| section.page)
+    }
+
+    /// Applies a page setup to the caret's section only; other sections keep their own.
+    pub fn set_page_setup_at_caret(&mut self, setup: PageSetup) -> Result<ChangeSet, EditorError> {
+        let Some(index) = self.doc.index_of(self.caret().block) else {
+            return Ok(ChangeSet::default());
+        };
+        let section_index = self.doc.section_of(index);
+        let Some(section) = self.doc.sections.get(section_index).cloned() else {
+            return Ok(ChangeSet::default());
+        };
+        if section.page == setup {
+            return Ok(ChangeSet::default());
+        }
+        let mut updated = section;
+        updated.page = setup;
+        let mut b = EditBuilder::default();
+        b.apply(
+            &mut self.doc,
+            Operation::SetSection {
+                index: section_index,
+                section: updated,
+            },
+        )?;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
     /// The document's watermark (the first section's; the app sets them all together).
     pub fn watermark(&self) -> Option<&libertum_model::Watermark> {
         self.doc.sections.first().and_then(|s| s.watermark.as_ref())

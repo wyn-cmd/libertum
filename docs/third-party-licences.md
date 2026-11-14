@@ -44,3 +44,17 @@ described in `docs/decisions.md`: `winit` 0.30.13 (Apache-2.0 OR MIT, licence in
 `vendor/winit/LICENSE`), `iced_core` 0.14.0 and `iced_winit` 0.14.1 (MIT, licence in
 `vendor/iced_core/LICENSE` and `vendor/iced_winit/LICENSE`). The patches do not change the licence
 terms.
+
+## Spellchecking (2026-11-15)
+
+`zspell` 0.5.5 is Apache-2.0 (its Apache licence text and copyright notice must ship with the
+application). Its transitive crates are permissive.
+
+The bundled dictionaries:
+
+| Dictionary | Source | Licence | Files |
+|---|---|---|---|
+| English (British) | `wooorm/dictionaries` `en-GB` | MIT AND BSD | `crates/libertum-app/assets/dictionaries/en_GB.{aff,dic}`, `LICENSE_en_GB.txt` |
+| English (American) | SCOWL `en_US` via LibreOffice dictionaries | SCOWL permission (with BSD, WordNet and UKACD notices) | `crates/libertum-app/assets/dictionaries/en_US.{aff,dic}`, `LICENSE_en_US.txt` |
+
+Both licence files are kept beside the dictionaries and must be included in packaged notices.

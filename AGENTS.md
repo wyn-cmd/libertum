@@ -139,6 +139,7 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
 | `LIBERTUM_LIBRARY=<folder>` | Open the Library window on that folder at start (for screenshots) |
 | `LIBERTUM_HISTORY=<file>` | Open that document's version history window at start (for screenshots) |
+| `LIBERTUM_TEMPLATES=<folder>` | Use that folder for added templates instead of the platform data folder (for screenshots and tests) |
 | `LIBERTUM_ZOOM=<percent>\|fit` | Initial zoom |
 | `LIBERTUM_UNITS=cm\|in` | Measurement units |
 | `LIBERTUM_FILTER=linear` | Linear instead of nearest filtering for page images |

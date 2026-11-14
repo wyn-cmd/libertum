@@ -18,6 +18,7 @@ mod perf;
 mod recovery;
 mod settings;
 mod shortcuts;
+mod spell;
 mod state;
 mod stitch;
 mod strings;

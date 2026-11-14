@@ -373,6 +373,16 @@ impl BorderStyle {
         }
     }
 
+    /// The line width this preset draws; zero for none.
+    pub fn width(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Thin => 0.5,
+            Self::Medium => 1.0,
+            Self::Thick => 2.0,
+        }
+    }
+
     /// Nearest preset for a resolved border box (including no box at all).
     pub fn from_borders(borders: Option<libertum_model::Borders>) -> Self {
         let Some(borders) = borders.filter(|b| b.is_visible()) else {
@@ -599,6 +609,9 @@ pub struct FormatState {
     pub ligatures: Mixed<Ligature>,
     /// Border box around the selected paragraphs (Layout pane).
     pub border_style: Mixed<BorderStyle>,
+    /// Which sides the border style draws, and its colour.
+    pub border_sides: libertum_model::BorderSides,
+    pub border_colour: [u8; 4],
 }
 
 impl Default for FormatState {
@@ -636,6 +649,8 @@ impl Default for FormatState {
             remove_hyphenation: Mixed::Value(false),
             ligatures: Mixed::Value(Ligature::Default),
             border_style: Mixed::Value(BorderStyle::None),
+            border_sides: libertum_model::BorderSides::ALL,
+            border_colour: [0, 0, 0, 255],
         }
     }
 }
@@ -1097,6 +1112,8 @@ pub struct AppState {
     pub page_count: usize,
     pub current_page: usize,
     pub word_count: usize,
+    /// Words in the current selection, when there is one.
+    pub selection_words: Option<usize>,
 }
 
 impl Default for AppState {
@@ -1141,6 +1158,7 @@ impl Default for AppState {
             page_count: 5,
             current_page: 1,
             word_count: 0,
+            selection_words: None,
         }
     }
 }

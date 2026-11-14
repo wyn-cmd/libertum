@@ -92,12 +92,21 @@ pub fn build_epub(
     } else {
         language.trim()
     };
+    // EPUB 3 cover art: the first image in the book becomes the cover. The package marks
+    // it with properties="cover-image" and a legacy meta name="cover" for readers that
+    // still look for the EPUB 2 form.
+    let cover = images.keys().next().cloned();
 
     let mut manifest = String::new();
     manifest.push_str(
         "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
     );
     manifest.push_str("    <item id=\"css\" href=\"style.css\" media-type=\"text/css\"/>\n");
+    if cover.is_some() {
+        manifest.push_str(
+            "    <item id=\"cover\" href=\"text/cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
+        );
+    }
     for (index, (name, _, _)) in documents.iter().enumerate() {
         manifest.push_str(&format!(
             "    <item id=\"text-{}\" href=\"{}\" media-type=\"application/xhtml+xml\"/>\n",
@@ -106,17 +115,30 @@ pub fn build_epub(
         ));
     }
     for (index, (name, image)) in images.iter().enumerate() {
+        let properties = if cover.as_deref() == Some(name.as_str()) {
+            " properties=\"cover-image\""
+        } else {
+            ""
+        };
         manifest.push_str(&format!(
-            "    <item id=\"image-{}\" href=\"images/{}\" media-type=\"{}\"/>\n",
+            "    <item id=\"image-{}\" href=\"images/{}\" media-type=\"{}\"{properties}/>\n",
             index + 1,
             escape_attr(name),
             image.mime
         ));
     }
     let mut spine = String::new();
+    if cover.is_some() {
+        spine.push_str("    <itemref idref=\"cover\"/>\n");
+    }
     for index in 0..documents.len() {
         spine.push_str(&format!("    <itemref idref=\"text-{}\"/>\n", index + 1));
     }
+    let cover_meta = cover
+        .as_ref()
+        .and_then(|name| images.keys().position(|other| other == name))
+        .map(|index| format!("    <meta name=\"cover\" content=\"image-{}\"/>\n", index + 1))
+        .unwrap_or_default();
     let package = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
 <package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"bookid\" xml:lang=\"{language}\">\n\
@@ -125,7 +147,7 @@ pub fn build_epub(
     <dc:title>{title}</dc:title>\n\
     <dc:language>{language}</dc:language>\n\
     <meta property=\"dcterms:modified\">{modified}</meta>\n\
-  </metadata>\n\
+{cover_meta}  </metadata>\n\
   <manifest>\n{manifest}  </manifest>\n\
   <spine>\n{spine}  </spine>\n\
 </package>\n",
@@ -170,6 +192,20 @@ pub fn build_epub(
         zip.write_all(package.as_bytes())?;
         zip.start_file("OEBPS/nav.xhtml", deflated)?;
         zip.write_all(nav.as_bytes())?;
+        if let Some(cover) = &cover {
+            let page = format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<!DOCTYPE html>\n\
+<html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"{language}\" xml:lang=\"{language}\">\n\
+<head><meta charset=\"utf-8\"/><title>{title}</title><link rel=\"stylesheet\" type=\"text/css\" href=\"../style.css\"/></head>\n\
+<body><img src=\"../images/{cover}\" alt=\"Cover\"/></body>\n\
+</html>\n",
+                title = escape(&title),
+                cover = escape_attr(cover),
+            );
+            zip.start_file("OEBPS/text/cover.xhtml", deflated)?;
+            zip.write_all(page.as_bytes())?;
+        }
         zip.start_file("OEBPS/style.css", deflated)?;
         zip.write_all(STYLE.as_bytes())?;
         for (name, chapter_title, body) in &documents {

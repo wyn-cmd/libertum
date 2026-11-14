@@ -25,6 +25,7 @@ use crate::widgets::stepper;
 pub fn view<'a>(
     state: &'a AppState,
     headings: &'a [HeadingEntry],
+    collapsed_headings: &'a std::collections::HashSet<libertum_model::BlockId>,
     notes: &'a [NoteEntry],
     bookmarks: &'a [BookmarkEntry],
     draft: Option<(libertum_model::BlockId, usize, &'a str)>,
@@ -37,7 +38,10 @@ pub fn view<'a>(
     let (header, body) = match state.inspector {
         Inspector::Format => (format::header(state, t), format::body(state, t)),
         Inspector::Document => (document::header(state, t), document::body(state, t)),
-        Inspector::Headers => (headers::header(t), headers::body(headings, t)),
+        Inspector::Headers => (
+            headers::header(t),
+            headers::body(headings, collapsed_headings, t),
+        ),
         Inspector::Notes => (notes::header(t), notes::body(notes, t)),
         Inspector::Bookmarks => (bookmarks::header(t), bookmarks::body(bookmarks, draft, t)),
     };

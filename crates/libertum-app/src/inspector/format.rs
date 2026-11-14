@@ -17,6 +17,7 @@ use crate::widgets::controls::{
     PAD_X, caption, checkbox_row, chip, divider, flat, labelled, popup, section,
 };
 use crate::widgets::segmented::{self, Content, Look, Segment};
+use libertum_model::BorderSides;
 
 const STEPPER_W: f32 = 80.0;
 
@@ -619,6 +620,57 @@ fn layout_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
                 s::MIXED,
                 |v| Message::Format(FormatMsg::BorderStyle(v))
             ),
+            {
+                let sides = state.format.border_sides;
+                row![
+                    checkbox_row(t, s::BORDER_TOP, sides.top, false, move |on| {
+                        Message::Format(FormatMsg::BorderSides(BorderSides { top: on, ..sides }))
+                    }),
+                    checkbox_row(t, s::BORDER_RIGHT, sides.right, false, move |on| {
+                        Message::Format(FormatMsg::BorderSides(BorderSides { right: on, ..sides }))
+                    }),
+                    checkbox_row(t, s::BORDER_BOTTOM, sides.bottom, false, move |on| {
+                        Message::Format(FormatMsg::BorderSides(BorderSides {
+                            bottom: on,
+                            ..sides
+                        }))
+                    }),
+                    checkbox_row(t, s::BORDER_LEFT, sides.left, false, move |on| {
+                        Message::Format(FormatMsg::BorderSides(BorderSides { left: on, ..sides }))
+                    }),
+                ]
+                .spacing(4)
+            },
+            {
+                let mut swatches = row![].spacing(6);
+                for colour in [
+                    [0u8, 0, 0, 255],
+                    [200, 30, 30, 255],
+                    [30, 80, 200, 255],
+                    [30, 120, 60, 255],
+                    [180, 120, 20, 255],
+                    [110, 110, 110, 255],
+                ] {
+                    let selected = state.format.border_colour == colour;
+                    swatches = swatches.push(
+                        button(space().width(18.0).height(18.0))
+                            .padding(0)
+                            .style(move |_, _| button::Style {
+                                background: Some(
+                                    Color::from_rgba8(colour[0], colour[1], colour[2], 1.0).into(),
+                                ),
+                                border: Border {
+                                    color: if selected { t.accent } else { t.chrome_border },
+                                    width: if selected { 2.0 } else { 1.0 },
+                                    radius: 3.0.into(),
+                                },
+                                ..button::Style::default()
+                            })
+                            .on_press(Message::Format(FormatMsg::BorderColour(colour))),
+                    );
+                }
+                swatches
+            },
             caption(t, s::BORDERS_HINT),
         ]
         .spacing(6),

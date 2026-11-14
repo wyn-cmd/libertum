@@ -3,12 +3,14 @@
 //! Create / Enter) to start a document from it. Open is shown but disabled until the DOCX,
 //! ODT and Markdown importers land (Phases 3, 4 and 7).
 
-use iced::widget::{button, column, container, mouse_area, row, space, text};
+use iced::widget::{
+    button, column, container, mouse_area, responsive, row, scrollable, space, text,
+};
 use iced::{Border, Center, Element, Length, Padding, Shadow, Vector, mouse};
 
 use crate::app::Message;
 use crate::strings as s;
-use crate::templates::TemplateId;
+use crate::templates::{TemplateId, UserTemplate};
 use crate::theme::Tokens;
 use crate::widgets::controls::{self, bold};
 
@@ -22,22 +24,33 @@ const RING: f32 = 3.0;
 
 pub fn view<'a>(
     selected: TemplateId,
+    selected_user: Option<usize>,
+    user_templates: &'a [UserTemplate],
     recents: &[std::path::PathBuf],
     t: Tokens,
 ) -> Element<'a, Message> {
-    let cards = TemplateId::ALL.iter().fold(row![].spacing(32), |r, &id| {
-        r.push(card(id, id == selected, t))
-    });
-
     let header = column![
         text(s::HOME_TITLE).size(22).font(bold()).color(t.text),
         text(s::HOME_SUBTITLE).size(13).color(t.text_secondary),
     ]
     .spacing(4);
 
-    let mut gallery = column![header, cards]
+    // Built-in and added templates sit side by side when there is room; a narrow window
+    // stacks them and the gallery scrolls.
+    let body = responsive(move |size| {
+        let cards = builtin_cards(selected, selected_user, t);
+        let yours = user_templates_section(selected_user, user_templates, t);
+        if size.width >= 1100.0 {
+            row![cards, yours].spacing(48).into()
+        } else {
+            column![cards, yours].spacing(28).into()
+        }
+    });
+
+    let mut gallery = column![header, body]
         .spacing(28)
-        .padding(Padding::from([40.0, 48.0]));
+        .padding(Padding::from([40.0, 48.0]))
+        .width(Length::Fill);
     if !recents.is_empty() {
         gallery = gallery.push(recent_list(recents, t));
     }
@@ -57,21 +70,33 @@ pub fn view<'a>(
         .on_press(Message::OpenLibrary)
         .style(move |_, status| secondary_button(t, status));
 
+    let mut footer_row = row![space().width(Length::Fill), library, stitch, open]
+        .spacing(10)
+        .align_y(Center);
+
+    if selected_user.is_some() {
+        let remove = button(text(s::HOME_REMOVE_TEMPLATE).size(13))
+            .padding(Padding::from([6.0, 16.0]))
+            .on_press(Message::RemoveSelectedTemplate)
+            .style(move |_, status| secondary_button(t, status));
+        footer_row = footer_row.push(remove);
+    }
+
     let create = button(text(s::HOME_CREATE).size(13).font(bold()))
         .padding(Padding::from([6.0, 20.0]))
-        .on_press(Message::CreateDocument(selected))
+        .on_press(match selected_user {
+            Some(index) => Message::CreateUserTemplate(index),
+            None => Message::CreateDocument(selected),
+        })
         .style(move |_, status| primary_button(t, status));
+    footer_row = footer_row.push(create);
 
-    let footer = container(
-        row![space().width(Length::Fill), library, stitch, open, create]
-            .spacing(10)
-            .align_y(Center),
-    )
-    .padding(Padding::from([12.0, 20.0]))
-    .style(move |_| container::background(t.chrome));
+    let footer = container(footer_row)
+        .padding(Padding::from([12.0, 20.0]))
+        .style(move |_| container::background(t.chrome));
 
     container(column![
-        container(gallery).width(Length::Fill).height(Length::Fill),
+        scrollable(gallery).height(Length::Fill).width(Length::Fill),
         controls::hairline(t.chrome_border),
         footer,
     ])
@@ -79,6 +104,135 @@ pub fn view<'a>(
     .height(Length::Fill)
     .style(move |_| container::background(t.canvas))
     .into()
+}
+
+/// The three built-in template cards.
+fn builtin_cards<'a>(
+    selected: TemplateId,
+    selected_user: Option<usize>,
+    t: Tokens,
+) -> Element<'a, Message> {
+    TemplateId::ALL
+        .iter()
+        .fold(row![].spacing(32), |r, &id| {
+            r.push(card(id, selected_user.is_none() && id == selected, t))
+        })
+        .into()
+}
+
+/// The writer's own templates, in rows of three, with an Add card at the end.
+fn user_templates_section<'a>(
+    selected: Option<usize>,
+    templates: &'a [UserTemplate],
+    t: Tokens,
+) -> Element<'a, Message> {
+    let mut grid = column![].spacing(24);
+    for (row_index, chunk) in templates.chunks(3).enumerate() {
+        let mut line = row![].spacing(32);
+        for (offset, template) in chunk.iter().enumerate() {
+            let index = row_index * 3 + offset;
+            line = line.push(user_card(template, index, selected == Some(index), t));
+        }
+        if chunk.len() < 3 {
+            line = line.push(add_card(t));
+        }
+        grid = grid.push(line);
+    }
+    if templates.is_empty() || templates.len().is_multiple_of(3) {
+        grid = grid.push(row![add_card(t)].spacing(32));
+    }
+    column![
+        text(s::HOME_YOUR_TEMPLATES)
+            .size(13)
+            .font(bold())
+            .color(t.text),
+        grid,
+        text(s::HOME_ADD_TEMPLATE_HINT)
+            .size(11)
+            .color(t.text_secondary),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// One added template: a generic page preview, its name and its format.
+fn user_card<'a>(
+    template: &UserTemplate,
+    index: usize,
+    selected: bool,
+    t: Tokens,
+) -> Element<'a, Message> {
+    let ring = container(user_thumbnail(t))
+        .padding(RING + 2.0)
+        .style(move |_| container::Style {
+            border: Border {
+                color: if selected { t.accent } else { t.canvas },
+                width: RING,
+                radius: 8.0.into(),
+            },
+            ..container::Style::default()
+        });
+    let name = text(template.name.clone())
+        .size(13)
+        .font(bold())
+        .color(if selected { t.accent } else { t.text })
+        .width(THUMB_W + 2.0 * (RING + 2.0))
+        .align_x(Center);
+    let description = text(template.format.label())
+        .size(11)
+        .color(t.text_secondary)
+        .width(THUMB_W + 2.0 * (RING + 2.0))
+        .align_x(Center);
+    mouse_area(column![ring, name, description].spacing(6).align_x(Center))
+        .on_press(Message::SelectUserTemplate(index))
+        .on_double_click(Message::CreateUserTemplate(index))
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+/// The "Add template" card at the end of the writer's templates.
+fn add_card<'a>(t: Tokens) -> Element<'a, Message> {
+    let card = container(
+        column![text("+").size(38).color(t.text_secondary)]
+            .align_x(Center)
+            .width(Length::Fill),
+    )
+    .width(THUMB_W)
+    .height(THUMB_H)
+    .align_x(Center)
+    .align_y(Center)
+    .style(move |_| container::Style {
+        background: Some(t.control.into()),
+        border: Border {
+            color: t.control_border,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        ..container::Style::default()
+    });
+    let name = text(s::HOME_ADD_TEMPLATE)
+        .size(13)
+        .font(bold())
+        .color(t.text);
+    mouse_area(column![card, name].spacing(6).align_x(Center))
+        .on_press(Message::AddTemplate)
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+/// A generic preview for an added template: title and body lines.
+fn user_thumbnail<'a>(t: Tokens) -> Element<'a, Message> {
+    let body_w = THUMB_W - 2.0 * THUMB_MARGIN;
+    let content = column![
+        line(body_w * 0.55, 3.0, t.paper_ink_strong),
+        line(body_w * 0.85, 2.0, t.paper_ink),
+        line(body_w * 0.9, 2.0, t.paper_ink),
+        line(body_w * 0.7, 2.0, t.paper_ink),
+        line(body_w * 0.88, 2.0, t.paper_ink),
+        line(body_w * 0.8, 2.0, t.paper_ink),
+    ]
+    .spacing(6);
+    paper(content, t)
 }
 
 /// Recently opened files, newest first: the file name with its folder underneath.
@@ -177,7 +331,12 @@ fn thumbnail<'a>(id: TemplateId, t: Tokens) -> Element<'a, Message> {
             lines.into()
         }
     };
-    container(content)
+    paper(content, t)
+}
+
+/// A page-shaped white card with its shadow, shared by the template previews.
+fn paper<'a>(content: impl Into<Element<'a, Message>>, t: Tokens) -> Element<'a, Message> {
+    container(content.into())
         .width(THUMB_W)
         .height(THUMB_H)
         .padding(THUMB_MARGIN)

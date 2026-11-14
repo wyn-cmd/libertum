@@ -1,5 +1,6 @@
 //! Application state, messages, update and view.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use libertum_export::{SUGGESTION_LIMIT, Tag, TagCategory, TagSuggestion};
 use libertum_layout::PageGeometry;
 use libertum_markdown::Markdown;
 use libertum_model::{
-    Align, CharFormat, DateTimeContent, DateTimeFormat, DateTimeSource, Document, HfKind,
+    Align, BlockId, CharFormat, DateTimeContent, DateTimeFormat, DateTimeSource, Document, HfKind,
     HfVariant, Ligatures, LineSpacing, PageNumbering, PageSetup, ParaFormat, Section,
 };
 use libertum_native::{Native, ViewState};
@@ -34,6 +35,7 @@ use crate::perf;
 use crate::recovery;
 use crate::settings::{DefaultFormat, Settings, ThemePreference, UnitsPreference, UpdateMute};
 use crate::shortcuts::{self, Shortcut};
+use crate::spell;
 use crate::state::{
     Alignment, AppState, Baseline, BorderStyle, DocumentPane, Field, FontName, FontWeight,
     FormatPane, InsertAction, Inspector, Ligature, LineSpacingMode, ListKind, Margin, MarginSide,
@@ -41,7 +43,7 @@ use crate::state::{
     Points, Swatch, SwatchTarget, TableAction, Units, ViewAction, Zoom,
 };
 use crate::strings as s;
-use crate::templates::TemplateId;
+use crate::templates::{self, TemplateFormat, TemplateId, UserTemplate};
 use crate::theme::{self as look, Scheme, Tokens};
 use crate::toolbar;
 use crate::update::CHECK_INTERVAL_SECS;
@@ -85,6 +87,8 @@ pub enum FormatMsg {
     Ligatures(Ligature),
     /// Border box around the selected paragraphs (Layout pane).
     BorderStyle(BorderStyle),
+    BorderSides(libertum_model::BorderSides),
+    BorderColour([u8; 4]),
 }
 
 #[derive(Debug, Clone)]
@@ -519,6 +523,8 @@ pub enum Message {
     SetAntialiasing(bool),
     /// Automatic update checks on or off (Settings).
     SetCheckForUpdates(bool),
+    SetSpellcheck(bool),
+    SetSpellLanguage(spell::Language),
     /// "Check now" in Settings, even while automatic checks are off.
     CheckForUpdatesNow,
     /// The background update check finished.
@@ -572,6 +578,8 @@ pub enum Message {
     RefreshCrossRefs,
     /// Jump the caret to a heading from the Headers pane.
     GoToHeading(libertum_model::BlockId),
+    /// Fold or unfold the children of a heading in the Headers pane.
+    ToggleHeading(libertum_model::BlockId),
     /// Edit note `index` in a paragraph from the Notes pane.
     NoteText(libertum_model::BlockId, usize, String),
     /// Jump the caret to a note from the Notes pane.
@@ -611,6 +619,29 @@ pub enum Message {
     /// Home screen: select a template, or create a document from one.
     SelectTemplate(TemplateId),
     CreateDocument(TemplateId),
+    /// Home screen: an added template (index into `user_templates`).
+    SelectUserTemplate(usize),
+    CreateUserTemplate(usize),
+    /// Add an ODT, DOCX or Libertum document as a template.
+    AddTemplate,
+    /// Delete the selected added template's copy.
+    RemoveSelectedTemplate,
+    /// A spelling check finished. Results from an older generation are ignored.
+    SpellChecked {
+        generation: u64,
+        result: Result<Vec<spell::Span>, String>,
+    },
+    /// Replace one misspelt word with a suggestion.
+    SpellReplace {
+        span: spell::Span,
+        replacement: String,
+    },
+    /// Ignore this occurrence, in this session only.
+    SpellIgnoreOnce(spell::Span),
+    /// Ignore this word throughout the open document, in this session only.
+    SpellIgnoreDocument(String),
+    /// Add this word to the personal dictionary.
+    SpellAddWord(String),
     /// Open a document from a file (home screen, Cmd/Ctrl+O).
     OpenFile,
     /// A background save finished.
@@ -785,6 +816,24 @@ pub struct App {
     doc: Option<DocView>,
     /// The template selected on the home screen.
     home_selection: TemplateId,
+    /// The added template selected on the home screen, if any.
+    home_user: Option<usize>,
+    /// Where added templates are stored (a `templates` folder in the data directory).
+    templates_dir: PathBuf,
+    /// The added templates, loaded from `templates_dir`.
+    user_templates: Vec<UserTemplate>,
+    /// Misspellings in the paragraphs last checked.
+    spell_errors: Vec<spell::Span>,
+    /// Bumped for every check; a slower, older result must not replace a newer one.
+    spell_generation: u64,
+    /// The personal word list, lowercased.
+    spell_personal: HashSet<String>,
+    /// Words ignored for this document only.
+    spell_ignored_document: HashSet<String>,
+    /// Single occurrences ignored for this session.
+    spell_ignored_once: HashSet<(BlockId, usize, usize, String)>,
+    /// Where the personal list lives; `None` in tests that do not use a file.
+    spell_path: Option<PathBuf>,
     /// Scroll offset of the page strip, physical pixels.
     scroll: (f32, f32),
     /// Canvas size in logical pixels, once the widget has reported it.
@@ -821,6 +870,8 @@ pub struct App {
     after_save: Option<Pending>,
     /// Cached headings for the Headers pane (refreshed while that pane is visible).
     headings: Vec<HeadingEntry>,
+    /// Headings whose children are folded in the Headers pane.
+    collapsed_headings: HashSet<BlockId>,
     /// Cached notes for the Notes pane.
     notes: Vec<NoteEntry>,
     /// Cached bookmarks for the Bookmarks pane.
@@ -904,6 +955,20 @@ impl App {
         apply_inspector_hook(&mut state);
         state.settle_sidebar();
         let theme_preference = theme_override().unwrap_or(settings.theme);
+        #[cfg(test)]
+        let templates_dir =
+            std::env::temp_dir().join(format!("libertum-templates-test-{}", std::process::id()));
+        #[cfg(not(test))]
+        let templates_dir = templates::default_dir().unwrap_or_else(std::env::temp_dir);
+        let user_templates = templates::load(&templates_dir);
+        #[cfg(test)]
+        let spell_path = None;
+        #[cfg(not(test))]
+        let spell_path = spell::personal_path();
+        let spell_personal = spell_path
+            .as_deref()
+            .map(spell::load_personal)
+            .unwrap_or_default();
         let mut app = Self {
             state,
             settings,
@@ -914,6 +979,15 @@ impl App {
             window_height: 680.0,
             doc,
             home_selection: TemplateId::default(),
+            home_user: None,
+            templates_dir,
+            user_templates,
+            spell_errors: Vec::new(),
+            spell_generation: 0,
+            spell_personal,
+            spell_ignored_document: HashSet::new(),
+            spell_ignored_once: HashSet::new(),
+            spell_path,
             scroll: (0.0, 0.0),
             viewport: None,
             scale_factor: 1.0,
@@ -929,6 +1003,7 @@ impl App {
             modal: None,
             after_save: None,
             headings: Vec::new(),
+            collapsed_headings: HashSet::new(),
             notes: Vec::new(),
             bookmarks: Vec::new(),
             bookmark_draft: None,
@@ -1126,6 +1201,14 @@ impl App {
         {
             self.show_history(PathBuf::from(file), false);
         }
+        // `LIBERTUM_TEMPLATES=<folder>` uses that folder for added templates (for
+        // screenshots and tests; nothing is written unless a template is added).
+        if let Ok(folder) = std::env::var("LIBERTUM_TEMPLATES")
+            && !folder.is_empty()
+        {
+            self.templates_dir = PathBuf::from(folder);
+            self.reload_templates();
+        }
     }
 
     /// Replaces the home screen with a new document built from `template`. The caret starts
@@ -1151,6 +1234,75 @@ impl App {
         self.refresh_view();
         self.refresh_format();
         Task::run(events, Message::Doc)
+    }
+
+    /// Creates a new unsaved document from one of the writer's added templates.
+    fn create_user_template(&mut self, index: usize) -> Task<Message> {
+        let Some(template) = self.user_templates.get(index).cloned() else {
+            return Task::none();
+        };
+        let (context, document, warnings) = match FileContext::open(&template.path) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.modal = Some(Modal::Error(format!("{} {error}", s::TEMPLATE_OPEN_FAILED)));
+                return Task::none();
+            }
+        };
+        for warning in warnings {
+            tracing::info!(%warning, path = %template.path.display(), "template import warning");
+        }
+        let view = context.view();
+        let (mut doc, events) = match template.format {
+            TemplateFormat::Native if view.as_ref().is_some_and(|view| view.pageless) => {
+                DocView::open_pageless(document)
+            }
+            _ => DocView::open(document),
+        };
+        doc.move_caret(|ed| ed.move_doc_end(false));
+        self.state.fonts = installed_fonts(&doc);
+        self.state.word_count = doc.word_count();
+        self.state.page_count = doc.page_total();
+        self.state.current_page = 1;
+        self.doc = Some(doc);
+        self.file = None;
+        // Keep the template's package so a save in the same format keeps the parts the
+        // model does not hold (headers, unknown parts).
+        self.file_context = Some(context);
+        self.dirty = false;
+        self.modal = None;
+        self.after_save = None;
+        self.scroll = (0.0, 0.0);
+        self.canvas_focused = true;
+        self.ime_preedit = None;
+        self.refresh_document();
+        self.refresh_view();
+        self.refresh_format();
+        Task::run(events, Message::Doc)
+    }
+
+    /// Copies a document into the template folder and returns its index.
+    fn import_template(&mut self, source: &std::path::Path) -> Result<usize, String> {
+        if TemplateFormat::from_path(source).is_none() {
+            return Err(s::TEMPLATE_UNSUPPORTED.to_owned());
+        }
+        // A template that cannot be read would only fail when it is used; check it now.
+        FileContext::open(source)?;
+        let template = templates::add(&self.templates_dir, source)?;
+        self.reload_templates();
+        self.user_templates
+            .iter()
+            .position(|item| item.path == template.path)
+            .ok_or_else(|| s::TEMPLATE_ADD_FAILED.to_owned())
+    }
+
+    fn reload_templates(&mut self) {
+        self.user_templates = templates::load(&self.templates_dir);
+        if self
+            .home_user
+            .is_some_and(|index| index >= self.user_templates.len())
+        {
+            self.home_user = None;
+        }
     }
 
     /// Toolbar Table button and Insert > Table: a fresh 3x3 table, as wide as the section's
@@ -1516,12 +1668,20 @@ impl App {
     fn on_home_key(&mut self, key: &keyboard::Key) -> Task<Message> {
         use keyboard::key::Named;
         match key.as_ref() {
-            keyboard::Key::Named(Named::Enter) => self.create_document(self.home_selection),
+            keyboard::Key::Named(Named::Enter) => {
+                if let Some(index) = self.home_user {
+                    self.create_user_template(index)
+                } else {
+                    self.create_document(self.home_selection)
+                }
+            }
             keyboard::Key::Named(Named::ArrowLeft) => {
+                self.home_user = None;
                 self.home_selection = self.home_selection.step(-1);
                 Task::none()
             }
             keyboard::Key::Named(Named::ArrowRight) => {
+                self.home_user = None;
                 self.home_selection = self.home_selection.step(1);
                 Task::none()
             }
@@ -1681,6 +1841,14 @@ impl App {
         if self.doc.is_none() {
             return;
         }
+        self.state.selection_words = self.doc.as_ref().and_then(|doc| {
+            let (start, end) = doc.editor().ordered_selection()?;
+            (start != end).then(|| {
+                doc.editor()
+                    .selected_text()
+                    .map_or(0, |text| text.split_whitespace().count())
+            })
+        });
         self.refresh_thumbnails();
         if self.state.inspector == Inspector::Headers {
             self.headings = self.headings();
@@ -1809,7 +1977,9 @@ impl App {
                 } else if let Some((block, index)) = picture {
                     crate::toolbar::ContextMenuTarget::Image { block, index }
                 } else {
-                    crate::toolbar::ContextMenuTarget::Text
+                    crate::toolbar::ContextMenuTarget::Text {
+                        spelling: self.spelling_at(page, x_pt, y_pt),
+                    }
                 };
                 self.state.open_menu = None;
                 self.context_menu = Some(ContextMenuState { x, y, target });
@@ -2272,7 +2442,7 @@ impl App {
         tracing::info!(scale_factor = sf, "window scale factor");
     }
 
-    fn on_doc_event(&mut self, event: DocEvent) {
+    fn on_doc_event(&mut self, event: DocEvent) -> Task<Message> {
         match event {
             DocEvent::Pagination { pages, complete } => {
                 if complete {
@@ -2283,9 +2453,86 @@ impl App {
                     tracing::info!(pages, "pagination complete; scroll extent is now exact");
                 }
                 self.refresh_view();
+                return self.schedule_spell_check();
             }
             DocEvent::PageReady => {} // the canvas draws from the shared cache
         }
+        Task::none()
+    }
+
+    /// Checks the paragraphs near the viewport (plus the caret's) on a worker.
+    fn schedule_spell_check(&mut self) -> Task<Message> {
+        self.spell_generation = self.spell_generation.wrapping_add(1);
+        let generation = self.spell_generation;
+        if !self.settings.spellcheck {
+            self.spell_errors.clear();
+            return Task::none();
+        }
+        let Some(doc) = self.doc.as_ref() else {
+            self.spell_errors.clear();
+            return Task::none();
+        };
+        let targets = doc.visible_paragraphs(self.pages_near_view());
+        if targets.is_empty() {
+            self.spell_errors.clear();
+            return Task::none();
+        }
+        let language = self.settings.spellcheck_language;
+        let personal = self.spell_personal.clone();
+        let ignored = self.spell_ignored_document.clone();
+        Task::perform(
+            async move { spell::check_paragraphs(&targets, language, &personal, &ignored) },
+            move |result| Message::SpellChecked { generation, result },
+        )
+    }
+
+    /// The underline rectangles for the current misspellings.
+    fn spell_rects(&self) -> Vec<libertum_layout::SelectionRect> {
+        let Some(doc) = self.doc.as_ref() else {
+            return Vec::new();
+        };
+        let mut rects = Vec::new();
+        for error in &self.spell_errors {
+            rects.extend(doc.range_rects(error.block, error.start, error.end));
+        }
+        rects
+    }
+
+    /// The misspelt word under a page point, with suggestions, for the context menu.
+    fn spelling_at(
+        &self,
+        page: usize,
+        x_pt: f32,
+        y_pt: f32,
+    ) -> Option<crate::toolbar::SpellingMenu> {
+        let doc = self.doc.as_ref()?;
+        let (block, offset) = doc.hit_test(page, x_pt, y_pt)?;
+        let text = doc.document().paragraph(block)?.text().to_owned();
+        let (start, end, word) = spell::word_at(&text, offset)?;
+        let errors = spell::check(
+            &text,
+            self.settings.spellcheck_language,
+            &self.spell_personal,
+            &self.spell_ignored_document,
+        )
+        .ok()?;
+        let (start, end, word) = errors
+            .into_iter()
+            .find(|(s, e, w)| *s == start && *e == end && w == &word)?;
+        let span = spell::Span {
+            block,
+            start,
+            end,
+            word,
+        };
+        if self
+            .spell_ignored_once
+            .contains(&(block, span.start, span.end, span.word.clone()))
+        {
+            return None;
+        }
+        let suggestions = spell::suggestions(&span.word, self.settings.spellcheck_language);
+        Some(crate::toolbar::SpellingMenu { span, suggestions })
     }
 
     // ------------------------------------------------------------ autoscroll
@@ -3664,6 +3911,16 @@ impl App {
                 self.thumb_cache.clear();
                 self.save_settings();
             }
+            Message::SetSpellcheck(on) => {
+                self.settings.spellcheck = on;
+                self.save_settings();
+                return self.schedule_spell_check();
+            }
+            Message::SetSpellLanguage(language) => {
+                self.settings.spellcheck_language = language;
+                self.save_settings();
+                return self.schedule_spell_check();
+            }
             Message::SetCheckForUpdates(on) => {
                 self.settings.check_for_updates = on;
                 if !on {
@@ -3937,7 +4194,49 @@ impl App {
                 }
             }
             Message::Canvas(event) => return self.on_canvas_event(event),
-            Message::SelectTemplate(id) => self.home_selection = id,
+            Message::SelectTemplate(id) => {
+                self.home_selection = id;
+                self.home_user = None;
+            }
+            Message::SelectUserTemplate(index) => {
+                if index < self.user_templates.len() {
+                    self.home_user = Some(index);
+                }
+            }
+            Message::CreateUserTemplate(index) => return self.create_user_template(index),
+            Message::AddTemplate => {
+                let Some(path) = rfd::FileDialog::new()
+                    .set_title(s::TEMPLATE_ADD_TITLE)
+                    .add_filter(s::TEMPLATE_FILTER, &["odt", "lbtd", "docx"])
+                    .pick_file()
+                else {
+                    return Task::none();
+                };
+                match self.import_template(&path) {
+                    Ok(index) => self.home_user = Some(index),
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "could not add the template");
+                        self.modal =
+                            Some(Modal::Error(format!("{} {error}", s::TEMPLATE_ADD_FAILED)));
+                    }
+                }
+            }
+            Message::RemoveSelectedTemplate => {
+                if let Some(index) = self.home_user.take()
+                    && let Some(template) = self.user_templates.get(index).cloned()
+                {
+                    if let Err(error) = templates::remove(&template) {
+                        self.home_user = Some(index);
+                        tracing::warn!(%error, path = %template.path.display(), "could not remove the template");
+                        self.modal = Some(Modal::Error(format!(
+                            "{} {error}",
+                            s::TEMPLATE_REMOVE_FAILED
+                        )));
+                    } else {
+                        self.reload_templates();
+                    }
+                }
+            }
             Message::OpenFile => return self.choose_open_file(),
             Message::Export(format) => return self.export_document(format),
             Message::Exported(result) => {
@@ -4066,7 +4365,75 @@ impl App {
                     return self.create_document(id);
                 }
             }
-            Message::Doc(event) => self.on_doc_event(event),
+            Message::Doc(event) => return self.on_doc_event(event),
+            Message::SpellChecked { generation, result } => {
+                if generation == self.spell_generation {
+                    match result {
+                        Ok(errors) => {
+                            self.spell_errors = errors
+                                .into_iter()
+                                .filter(|error| {
+                                    !self.spell_ignored_once.contains(&(
+                                        error.block,
+                                        error.start,
+                                        error.end,
+                                        error.word.clone(),
+                                    ))
+                                })
+                                .collect();
+                        }
+                        Err(error) => tracing::warn!(%error, "spell check failed"),
+                    }
+                }
+            }
+            Message::SpellReplace { span, replacement } => {
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|editor| {
+                        editor.set_caret(
+                            libertum_editor::DocPosition {
+                                block: span.block,
+                                offset: span.start,
+                            },
+                            false,
+                        );
+                        editor.set_caret(
+                            libertum_editor::DocPosition {
+                                block: span.block,
+                                offset: span.end,
+                            },
+                            true,
+                        );
+                        editor.insert_text(&replacement)
+                    });
+                    self.spell_errors.retain(|error| error != &span);
+                    return self.finish_edit(result);
+                }
+            }
+            Message::SpellIgnoreOnce(span) => {
+                self.spell_ignored_once.insert((
+                    span.block,
+                    span.start,
+                    span.end,
+                    span.word.clone(),
+                ));
+                self.spell_errors.retain(|error| error != &span);
+            }
+            Message::SpellIgnoreDocument(word) => {
+                self.spell_ignored_document.insert(word.to_lowercase());
+                self.spell_errors
+                    .retain(|error| !error.word.eq_ignore_ascii_case(&word));
+            }
+            Message::SpellAddWord(word) => {
+                let lower = word.to_lowercase();
+                self.spell_personal.insert(lower.clone());
+                if let Some(path) = &self.spell_path
+                    && let Err(error) = spell::add_personal(path, &lower)
+                {
+                    tracing::warn!(%error, "could not add the word to the personal dictionary");
+                }
+                self.spell_errors
+                    .retain(|error| !error.word.eq_ignore_ascii_case(&word));
+            }
             Message::Keyboard(event) => return self.on_keyboard(event),
             Message::Ime(event) => return self.on_ime(event),
             Message::PasteText(text) => {
@@ -4240,6 +4607,11 @@ impl App {
                     });
                     self.ensure_caret_visible();
                     self.refresh_view();
+                }
+            }
+            Message::ToggleHeading(block) => {
+                if !self.collapsed_headings.remove(&block) {
+                    self.collapsed_headings.insert(block);
                 }
             }
             Message::NoteText(block, index, text) => {
@@ -4436,6 +4808,32 @@ impl App {
                     borders: Some(v.borders()),
                     ..ParaFormat::default()
                 }),
+                FormatMsg::BorderSides(sides) => {
+                    self.state.format.border_sides = *sides;
+                    let width = self.state.format.border_style.value().map_or(0.5, BorderStyle::width).max(0.5);
+                    Some(ParaFormat {
+                        borders: Some(libertum_model::Borders {
+                            sides: *sides,
+                            width_pt: width,
+                            colour: self.state.format.border_colour,
+                            ..libertum_model::Borders::default()
+                        }),
+                        ..ParaFormat::default()
+                    })
+                }
+                FormatMsg::BorderColour(colour) => {
+                    self.state.format.border_colour = *colour;
+                    let width = self.state.format.border_style.value().map_or(0.5, BorderStyle::width).max(0.5);
+                    Some(ParaFormat {
+                        borders: Some(libertum_model::Borders {
+                            sides: self.state.format.border_sides,
+                            width_pt: width,
+                            colour: *colour,
+                            ..libertum_model::Borders::default()
+                        }),
+                        ..ParaFormat::default()
+                    })
+                }
                 _ => None,
             };
             if let Some(para) = para {
@@ -4564,6 +4962,8 @@ impl App {
             FormatMsg::WidowOrphan(v) => f.widow_orphan = Mixed::Value(v),
             FormatMsg::RemoveHyphenation(v) => f.remove_hyphenation = Mixed::Value(v),
             FormatMsg::BorderStyle(v) => f.border_style = Mixed::Value(v),
+            FormatMsg::BorderSides(v) => f.border_sides = v,
+            FormatMsg::BorderColour(v) => f.border_colour = v,
             FormatMsg::Ligatures(v) => f.ligatures = Mixed::Value(v),
         }
     }
@@ -4850,6 +5250,10 @@ impl App {
         f.list_kind = mixed(ps.list.map(ListKind::from_model));
         f.remove_hyphenation = mixed(ps.hyphenate.map(|h| !h));
         f.border_style = mixed(ps.borders.map(BorderStyle::from_borders));
+        if let Some(Some(borders)) = ps.borders {
+            f.border_sides = borders.sides;
+            f.border_colour = borders.colour;
+        }
         let defaults = &doc.editor().document().styles.para_defaults;
         self.state.document.hyphenation = Mixed::Value(defaults.hyphenate);
         f.font_weight = mixed(sum.weight.map(FontWeight::nearest));
@@ -5064,9 +5468,9 @@ impl App {
         let Some(doc) = self.doc.as_mut() else {
             return;
         };
-        let mut setup = doc.editor().page_setup();
+        let mut setup = doc.editor().page_setup_at_caret();
         change(&mut setup);
-        let result = doc.edit(|ed| ed.set_page_setup(setup));
+        let result = doc.edit(|ed| ed.set_page_setup_at_caret(setup));
         let _ = self.finish_edit(result);
         self.refresh_document();
     }
@@ -5093,7 +5497,7 @@ impl App {
         };
         let document = doc.editor().document();
         self.state.pageless = doc.pageless;
-        let setup = document.page_setup();
+        let setup = doc.editor().page_setup_at_caret();
         let d = &mut self.state.document;
         d.page_size = Mixed::Value(PageSize::from_model(setup.paper));
         d.orientation = Mixed::Value(Orientation::from_model(setup.orientation));
@@ -5188,7 +5592,13 @@ impl App {
         let Some(doc) = &self.doc else {
             // Prompts (the stitch dialog, an open error, crash recovery) belong on the home
             // screen too: without this layer they were set but never drawn.
-            let home = home::view(self.home_selection, &self.settings.recent_files, t);
+            let home = home::view(
+                self.home_selection,
+                self.home_user,
+                &self.user_templates,
+                &self.settings.recent_files,
+                t,
+            );
             return match &self.modal {
                 None => home,
                 Some(_) => stack![home, self.modal_layer(t)].into(),
@@ -5209,6 +5619,7 @@ impl App {
                 ime_caret: doc.caret_rect(),
                 selection: doc.selection_rects_on(self.pages_near_view()),
                 find: self.find_match_rects(),
+                spell: self.spell_rects(),
                 preedit: self.preedit_overlay(),
                 animate: self.autoscroll.as_ref().is_some_and(AutoScroll::active),
                 booklet: self.state.booklet,
@@ -5257,7 +5668,15 @@ impl App {
             .bookmark_draft
             .as_ref()
             .map(|(block, index, name)| (*block, *index, name.as_str()));
-        if let Some(sidebar) = inspector::view(&self.state, headings, notes, bookmarks, draft, t) {
+        if let Some(sidebar) = inspector::view(
+            &self.state,
+            headings,
+            &self.collapsed_headings,
+            notes,
+            bookmarks,
+            draft,
+            t,
+        ) {
             main = main.push(sidebar);
         }
 
@@ -5838,6 +6257,22 @@ impl App {
             Some(self.settings.units),
             Message::SetUnits,
         );
+        let spelling_language = segmented::select(
+            t,
+            Look::Raised,
+            &[
+                (
+                    spell::Language::British,
+                    Content::Label(spell::Language::British.label()),
+                ),
+                (
+                    spell::Language::American,
+                    Content::Label(spell::Language::American.label()),
+                ),
+            ],
+            Some(self.settings.spellcheck_language),
+            Message::SetSpellLanguage,
+        );
         let update_status: Element<'_, Message> = match self.update_check {
             UpdateCheck::Idle => space().into(),
             UpdateCheck::Checking => text(s::UPDATES_CHECKING)
@@ -5942,6 +6377,23 @@ impl App {
                 controls::caption(t, s::SETTINGS_PERFORMANCE_HINT),
             ]
             .spacing(4),
+            labelled(
+                t,
+                s::SETTINGS_SPELLING,
+                column![
+                    controls::checkbox_row(
+                        t,
+                        s::SETTINGS_SPELLCHECK,
+                        self.settings.spellcheck,
+                        false,
+                        Message::SetSpellcheck,
+                    ),
+                    labelled(t, s::SETTINGS_SPELL_LANGUAGE, spelling_language),
+                    controls::caption(t, s::SETTINGS_SPELL_HINT),
+                ]
+                .spacing(6)
+                .into(),
+            ),
             column![
                 controls::checkbox_row(
                     t,
@@ -6723,6 +7175,7 @@ impl App {
             self.state.current_page,
             self.state.page_count,
             self.state.word_count,
+            self.state.selection_words,
         );
         container(
             container(text(label).size(12).color(t.pill_text))
@@ -7302,6 +7755,44 @@ mod tests {
             Some("It was a dark night.")
         );
         assert_eq!(app.state.word_count, app.doc().word_count());
+    }
+
+    #[test]
+    fn an_added_template_creates_an_unsaved_document_and_can_be_removed() {
+        let dir =
+            std::env::temp_dir().join(format!("libertum-app-templates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temporary templates folder");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/odt/rich.odt");
+
+        let mut app = home();
+        app.templates_dir = dir.clone();
+        app.user_templates = Vec::new();
+
+        let index = app.import_template(&source).expect("import the ODT");
+        assert_eq!(app.user_templates.len(), 1);
+        assert_eq!(app.user_templates[index].format, TemplateFormat::Odt);
+        assert!(app.user_templates[index].path.starts_with(&dir));
+
+        let _ = app.update(Message::CreateUserTemplate(index));
+        assert!(app.doc.is_some());
+        assert!(
+            app.file.is_none(),
+            "the template copy is not the new document's file"
+        );
+        assert!(
+            paragraph_texts(&app)
+                .iter()
+                .any(|text| text.contains("Fixture Heading")),
+            "the template's content becomes the new document's content"
+        );
+
+        app.home_user = Some(index);
+        let _ = app.update(Message::RemoveSelectedTemplate);
+        assert!(app.user_templates.is_empty());
+        assert!(app.home_user.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -9723,7 +10214,7 @@ mod tests {
         assert!(
             matches!(
                 app.context_menu.as_ref().map(|menu| &menu.target),
-                Some(crate::toolbar::ContextMenuTarget::Text)
+                Some(crate::toolbar::ContextMenuTarget::Text { .. })
             ),
             "text commands over body text"
         );

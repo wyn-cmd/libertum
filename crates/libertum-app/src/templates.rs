@@ -4,6 +4,10 @@
 //! setup) plus the layout options that supply the fallback fonts. Page setup lives in the
 //! document's sections, so the same template opens on any page size the document later gets.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use directories::ProjectDirs;
 use libertum_layout::{LayoutOptions, PageGeometry};
 use libertum_model::{
     Align, BOLD, BlockId, CharFormat, Document, LineSpacing, PageNumberPos, PageSetup, PaperSize,
@@ -28,6 +32,125 @@ pub enum TemplateId {
 pub struct NewDocument {
     pub document: Document,
     pub options: LayoutOptions,
+}
+
+/// A template the writer added: a copy of an ODT, DOCX or native `.lbtd` file in the
+/// templates folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserTemplate {
+    /// The display name (the file stem, with a suffix if a name was already taken).
+    pub name: String,
+    /// The copy in the templates folder.
+    pub path: PathBuf,
+    pub format: TemplateFormat,
+}
+
+/// The formats a document template can come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateFormat {
+    Odt,
+    Docx,
+    Native,
+}
+
+impl TemplateFormat {
+    /// The format named by a path's extension, if it can be a template.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "odt" => Some(Self::Odt),
+            "docx" => Some(Self::Docx),
+            "lbtd" => Some(Self::Native),
+            _ => None,
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Odt => "odt",
+            Self::Docx => "docx",
+            Self::Native => "lbtd",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Odt => s::TEMPLATE_FORMAT_ODT,
+            Self::Docx => s::TEMPLATE_FORMAT_DOCX,
+            Self::Native => s::TEMPLATE_FORMAT_NATIVE,
+        }
+    }
+}
+
+/// Where added templates are kept (a `templates` folder in the platform data directory).
+#[cfg_attr(test, allow(dead_code))]
+pub fn default_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "Libertum", "Libertum").map(|dirs| dirs.data_dir().join("templates"))
+}
+
+/// The templates in `dir`, newest name order (case-insensitive). Missing folders and files
+/// that are not templates are ignored.
+pub fn load(dir: &Path) -> Vec<UserTemplate> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut templates: Vec<UserTemplate> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let format = TemplateFormat::from_path(&path)?;
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            Some(UserTemplate { name, path, format })
+        })
+        .collect();
+    templates.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    templates
+}
+
+/// Copies `source` into `dir` as a template. The caller is expected to have checked that it
+/// opens as a document. A name already in use gets a numbered suffix.
+pub fn add(dir: &Path, source: &Path) -> Result<UserTemplate, String> {
+    let format =
+        TemplateFormat::from_path(source).ok_or_else(|| s::TEMPLATE_UNSUPPORTED.to_owned())?;
+    fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().trim().to_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "Template".to_owned());
+    let mut target = dir.join(format!("{stem}.{}", format.extension()));
+    let mut number = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem} ({number}).{}", format.extension()));
+        number += 1;
+    }
+
+    if let Err(error) = fs::copy(source, &target) {
+        let _ = fs::remove_file(&target);
+        return Err(error.to_string());
+    }
+    let name = target
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or(stem);
+    Ok(UserTemplate {
+        name,
+        path: target,
+        format,
+    })
+}
+
+/// Deletes the template's copy. The file it was made from is untouched.
+pub fn remove(template: &UserTemplate) -> Result<(), String> {
+    fs::remove_file(&template.path).map_err(|error| error.to_string())
 }
 
 /// Manuscript body size, points.
@@ -446,5 +569,88 @@ mod tests {
         assert_eq!(TemplateId::Blank.step(1), TemplateId::Manuscript);
         assert_eq!(TemplateId::Manuscript.step(1), TemplateId::Book);
         assert_eq!(TemplateId::Book.step(1), TemplateId::Book);
+    }
+}
+
+#[cfg(test)]
+mod user_template_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn folder(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "libertum-templates-{name}-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a temporary folder");
+        dir
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn only_odt_docx_and_lbtd_can_be_templates() {
+        assert_eq!(
+            TemplateFormat::from_path(Path::new("a.odt")),
+            Some(TemplateFormat::Odt)
+        );
+        assert_eq!(
+            TemplateFormat::from_path(Path::new("a.DOCX")),
+            Some(TemplateFormat::Docx)
+        );
+        assert_eq!(
+            TemplateFormat::from_path(Path::new("a.lbtd")),
+            Some(TemplateFormat::Native)
+        );
+        assert_eq!(TemplateFormat::from_path(Path::new("a.md")), None);
+        assert_eq!(TemplateFormat::from_path(Path::new("a")), None);
+    }
+
+    #[test]
+    fn adding_copies_and_load_lists_in_name_order() {
+        let dir = folder("add");
+        let source = fixture("odt/rich.odt");
+
+        let template = add(&dir, &source).expect("add the ODT");
+        assert_eq!(template.format, TemplateFormat::Odt);
+        assert_eq!(template.name, "rich");
+        assert!(template.path.exists());
+        assert_ne!(template.path, source, "the template is a copy");
+
+        let second = add(&dir, &source).expect("add the ODT again");
+        assert_eq!(second.name, "rich (2)", "a name in use gets a suffix");
+
+        let list = load(&dir);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "rich");
+        assert_eq!(list[1].name, "rich (2)");
+
+        remove(&second).expect("remove the second copy");
+        assert_eq!(load(&dir).len(), 1);
+        assert!(source.exists(), "the source document is untouched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn other_files_are_ignored_and_unsupported_files_are_refused() {
+        let dir = folder("ignore");
+        fs::write(dir.join("notes.txt"), b"not a template").expect("write");
+        assert!(load(&dir).is_empty());
+
+        let error = add(&dir, &dir.join("notes.txt")).expect_err("refuse the text file");
+        assert!(
+            error.contains("ODT"),
+            "the error explains the formats: {error}"
+        );
+        assert!(!dir.join("notes.txt").is_file() || fs::read(dir.join("notes.txt")).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
