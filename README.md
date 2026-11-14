@@ -10,16 +10,16 @@ format (`.lbtd`) for documents that need more than the interchange formats can h
 follows Pages: the page sits on the left and the inspector on the right, with the Format and
 Document buttons switching between the formatting and document panes.
 
-The main acceptance document is a 343-page novel with footnotes, images, a table of contents
-and cross-references, so long documents are the point rather than an afterthought.
+The largest test document is a 343-page novel with footnotes, images, a table of contents and
+cross-references.
 
 ## What works
 
 - Editing: caret and selection by mouse or keyboard, undo and redo, plain-text clipboard, IME
   input.
 - Formatting: character and paragraph formatting, paragraph styles, lists, borders, tab stops,
-  columns, hyphenation and ligatures. Changes apply to the selection, and mixed states show as
-  mixed.
+  columns, hyphenation and ligatures. Changes apply to the selection, and a mixed selection
+  shows as mixed.
 - Pages: page size, orientation, margins, per-section layout, headers and footers with first
   page and even page variants, page numbers, text watermarks, booklet view, page thumbnails,
   full screen and zoom. There is also a pageless mode that shows the document as one long
@@ -53,8 +53,8 @@ those files opens it straight in the editor.
 
 ## Install on Linux
 
-A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain binary. None of
-them are signed.
+A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain binary. They are
+all unsigned.
 
 ```sh
 sudo apt install ./libertum_0.1.2_amd64.deb                  # Debian, Ubuntu, ...
