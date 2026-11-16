@@ -46,19 +46,19 @@ pub fn current_version() -> &'static str {
 
 /// Asks GitHub for the latest release. `Ok(None)` means this build is up to date.
 pub fn check() -> Result<Option<Release>, UpdateError> {
-    let output = match Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "10",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-A",
-            concat!("Libertum/", env!("CARGO_PKG_VERSION")),
-            LATEST_RELEASE,
-        ])
-        .output()
-    {
+    let mut curl = Command::new("curl");
+    curl.args([
+        "-fsSL",
+        "--max-time",
+        "10",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-A",
+        concat!("Libertum/", env!("CARGO_PKG_VERSION")),
+        LATEST_RELEASE,
+    ]);
+    hide_console_window(&mut curl);
+    let output = match curl.output() {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(UpdateError::CurlMissing);
@@ -176,7 +176,21 @@ pub fn open_release_page(url: &str) -> Result<(), UpdateError> {
         command
     };
 
+    hide_console_window(&mut command);
     command.spawn().map(|_| ()).map_err(UpdateError::Open)
+}
+
+/// The app has no console of its own, so on Windows a console program such as `curl` would
+/// otherwise open a black window for as long as it runs.
+fn hide_console_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
 }
 
 #[cfg(test)]
