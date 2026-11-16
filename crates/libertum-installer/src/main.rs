@@ -1,13 +1,16 @@
 //! The Libertum installer: one `.exe` that carries the program, its install script and the
 //! README, and installs them for the current user.
 //!
-//! Two modes:
+//! Three modes:
 //!
 //! - **Install** (double-click, no arguments): asks first, extracts the carried files into
 //!   a temporary folder, runs `install.ps1` from there with no console window, removes the
 //!   folder, and says how it went. The script does the real work (copy to
 //!   `%LOCALAPPDATA%\Libertum`, shortcuts, "Open with" registration, uninstaller), so the
 //!   `.exe` and the documented manual route install exactly the same way.
+//! - **Update** (`--update <pid>`, started by Libertum itself): waits for that process to
+//!   exit, installs with no questions and no window of its own, and opens the new version.
+//!   Only a failure is shown, in a message box.
 //! - **Pack** (`libertum-installer pack --app <exe> --script <ps1> --readme <md> --out <exe>`):
 //!   writes a copy of this program with the three files appended (see [`payload`]). This is
 //!   how a release installer is made; see `packaging/windows/build-installer.ps1`.
@@ -44,7 +47,17 @@ fn main() -> ExitCode {
             }
         };
     }
-    install()
+    let update_after = match args.as_slice() {
+        [flag, pid] if flag == "--update" => match pid.parse::<u32>() {
+            Ok(pid) => Some(pid),
+            Err(_) => {
+                eprintln!("libertum-installer: --update needs a process number");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => None,
+    };
+    install(update_after)
 }
 
 /// `pack --app <exe> --script <ps1> --readme <md> --out <exe>`.
@@ -106,7 +119,7 @@ fn pack(args: &[String]) -> Result<PathBuf, String> {
 }
 
 #[cfg(not(windows))]
-fn install() -> ExitCode {
+fn install(_update_after: Option<u32>) -> ExitCode {
     // Say what this installer carries, so a copy on the wrong machine is still explained.
     let carried = std::env::current_exe()
         .and_then(std::fs::read)
@@ -126,7 +139,7 @@ fn install() -> ExitCode {
 }
 
 #[cfg(windows)]
-fn install() -> ExitCode {
+fn install(update_after: Option<u32>) -> ExitCode {
     let version = env!("CARGO_PKG_VERSION");
     let files = match std::env::current_exe()
         .and_then(std::fs::read)
@@ -142,6 +155,9 @@ fn install() -> ExitCode {
     if !files.iter().any(|f| f.name == APP_NAME) || !files.iter().any(|f| f.name == SCRIPT_NAME) {
         ui::error("Libertum could not be installed: this installer is incomplete.");
         return ExitCode::FAILURE;
+    }
+    if let Some(pid) = update_after {
+        return update_quietly(pid, &files);
     }
     let question = format!(
         "Install Libertum {version} for this Windows user?\n\n\
@@ -165,6 +181,26 @@ fn install() -> ExitCode {
         }
         Err(error) => {
             ui::error(&format!("Libertum could not be installed.\n\n{error}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The silent route Libertum's own updater takes: once the old program has exited, install
+/// and open the new one. The question and the "installed" message are skipped; a failure is
+/// still shown, because nobody else will tell the user.
+#[cfg(windows)]
+fn update_quietly(pid: u32, files: &[File]) -> ExitCode {
+    ui::wait_for_exit(pid, 60_000);
+    match run_script(files) {
+        Ok(()) => {
+            if let Some(exe) = installed_exe() {
+                let _ = std::process::Command::new(exe).spawn();
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            ui::error(&format!("Libertum could not be updated.\n\n{error}"));
             ExitCode::FAILURE
         }
     }
@@ -250,6 +286,28 @@ mod ui {
             caption: *const u16,
             kind: u32,
         ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    const SYNCHRONIZE: u32 = 0x10_0000;
+
+    /// Waits up to `milliseconds` for process `pid` to exit. A process that is already gone,
+    /// or cannot be opened, counts as exited.
+    pub fn wait_for_exit(pid: u32, milliseconds: u32) {
+        // SAFETY: plain Win32 calls; the handle is checked for null and closed once.
+        unsafe {
+            let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+            if !handle.is_null() {
+                WaitForSingleObject(handle, milliseconds);
+                CloseHandle(handle);
+            }
+        }
     }
 
     const MB_YESNO: u32 = 0x4;

@@ -177,4 +177,10 @@ dmg="$out_dir/Libertum-${version}-macos-${arch}.dmg"
 rm -f "$dmg"
 hdiutil create -quiet -volname "Libertum" -srcfolder "$app" -ov -format UDZO "$dmg"
 
-printf 'build-app: %s\nbuild-app: %s\n' "$app" "$dmg"
+# The same app as a zip, which Libertum's own updater downloads and unpacks (ditto keeps the
+# signature, symlinks and permissions; a plain zip would not).
+zip="$out_dir/Libertum-${version}-macos-${arch}.zip"
+rm -f "$zip"
+ditto -c -k --keepParent "$app" "$zip"
+
+printf 'build-app: %s\nbuild-app: %s\nbuild-app: %s\n' "$app" "$dmg" "$zip"

@@ -12,6 +12,7 @@ mod fps;
 mod home;
 mod icons;
 mod inspector;
+mod install;
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_icon;
 mod macros;

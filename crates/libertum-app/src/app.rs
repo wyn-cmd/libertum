@@ -382,6 +382,19 @@ pub enum McpDecision {
     Deny,
 }
 
+/// Where the update prompt is.
+#[derive(Debug, Clone)]
+enum UpdateStage {
+    /// Asking whether to update.
+    Ask,
+    /// Downloading and checking.
+    Working,
+    /// The automatic route failed; the release page is the way on.
+    Failed(String),
+    /// A package was downloaded; the writer runs `command` in a terminal.
+    Command { command: String, file: PathBuf },
+}
+
 /// A prompt over the document.
 #[derive(Debug, Clone)]
 enum Modal {
@@ -396,8 +409,11 @@ enum Modal {
     Unsaved { pending: Pending },
     /// An open or save failed. The message is already user-facing.
     Error(String),
-    /// A newer release exists; `url` is its GitHub release page.
-    UpdateAvailable { version: String, url: String },
+    /// A newer release exists; the prompt follows it through the download.
+    UpdateAvailable {
+        release: crate::update::Release,
+        stage: UpdateStage,
+    },
     /// The file at `path` changed on disk since it was opened (another device, a sync service);
     /// Overwrite saves anyway, Save a Copy asks for another name.
     ChangedOnDisk { path: PathBuf },
@@ -573,8 +589,15 @@ pub enum Message {
         manual: bool,
         result: Result<Option<crate::update::Release>, String>,
     },
-    /// Open the available release's page in the browser.
+    /// Download and install the available release (or open its page where that is all
+    /// this installation can do).
     UpdateNow,
+    /// The download finished (or failed).
+    UpdatePrepared(Result<crate::install::Prepared, String>),
+    /// Copy the install command shown for a downloaded package.
+    CopyUpdateCommand,
+    /// Open the available release's page in the browser.
+    OpenUpdatePage,
     /// Close the update prompt without changing anything.
     DismissUpdate,
     /// Ignore this release for the given number of seconds.
@@ -841,6 +864,8 @@ fn autosave_ticks(seconds: &u64) -> UnboundedReceiver<()> {
 const AUTOSCROLL_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub struct App {
+    /// A downloaded update, installed as Libertum quits.
+    staged_update: Option<crate::install::Staged>,
     pub state: AppState,
     pub settings: Settings,
     /// Where settings are persisted. `None` disables persistence (used by tests).
@@ -1070,6 +1095,7 @@ impl App {
             pending_recovery: None,
             settings_open: false,
             update_check: UpdateCheck::Idle,
+            staged_update: None,
             vocabulary_open: false,
             tag_draft: String::new(),
             tag_category: TagCategory::Freeform,
@@ -1399,8 +1425,12 @@ impl App {
             && !version.is_empty()
         {
             self.modal = Some(Modal::UpdateAvailable {
-                version,
-                url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.4".to_owned(),
+                release: crate::update::Release {
+                    version,
+                    url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.4".to_owned(),
+                    assets: Vec::new(),
+                },
+                stage: UpdateStage::Ask,
             });
         }
         // `LIBERTUM_LIBRARY=<folder>` opens the Library window on that folder at start-up
@@ -3584,6 +3614,14 @@ impl App {
             return Task::none();
         }
         recovery::clear(&self.recovery_dir);
+        self.exit_app()
+    }
+
+    /// Quits, first starting the staged update (if any) so it takes over as Libertum goes.
+    fn exit_app(&mut self) -> Task<Message> {
+        if let Some(staged) = self.staged_update.take() {
+            staged.apply();
+        }
         iced::exit()
     }
 
@@ -3653,7 +3691,7 @@ impl App {
         match pending {
             Pending::Close => {
                 recovery::clear(&self.recovery_dir);
-                iced::exit()
+                self.exit_app()
             }
             Pending::Home => {
                 self.go_home();
@@ -4230,8 +4268,8 @@ impl App {
                                 && self.settings.wants_update_prompt(&release.version, now));
                         if show {
                             self.modal = Some(Modal::UpdateAvailable {
-                                version: release.version,
-                                url: release.url,
+                                release,
+                                stage: UpdateStage::Ask,
                             });
                         }
                     }
@@ -4249,8 +4287,52 @@ impl App {
                 }
             }
             Message::UpdateNow => {
-                if let Some(Modal::UpdateAvailable { url, .. }) = self.modal.take()
-                    && let Err(error) = crate::update::open_release_page(&url)
+                let Some(Modal::UpdateAvailable { release, stage }) = self.modal.as_mut() else {
+                    return Task::none();
+                };
+                let plan = crate::install::plan(&crate::install::Host::detect(), release);
+                if plan == crate::install::Plan::Page {
+                    return self.update(Message::OpenUpdatePage);
+                }
+                *stage = UpdateStage::Working;
+                let release = release.clone();
+                return Task::perform(
+                    async move { crate::install::prepare(&release, plan) },
+                    Message::UpdatePrepared,
+                );
+            }
+            Message::UpdatePrepared(result) => {
+                let Some(Modal::UpdateAvailable { stage, .. }) = self.modal.as_mut() else {
+                    return Task::none();
+                };
+                match result {
+                    Ok(crate::install::Prepared::Restart(staged)) => {
+                        // Applied as Libertum quits, after the unsaved-changes prompt.
+                        self.staged_update = Some(staged);
+                        self.modal = None;
+                        return self.on_close_request();
+                    }
+                    Ok(crate::install::Prepared::Command { command, file }) => {
+                        *stage = UpdateStage::Command { command, file };
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "the update could not be prepared");
+                        *stage = UpdateStage::Failed(error);
+                    }
+                }
+            }
+            Message::CopyUpdateCommand => {
+                if let Some(Modal::UpdateAvailable {
+                    stage: UpdateStage::Command { command, .. },
+                    ..
+                }) = &self.modal
+                {
+                    return iced::clipboard::write(command.clone());
+                }
+            }
+            Message::OpenUpdatePage => {
+                if let Some(Modal::UpdateAvailable { release, .. }) = self.modal.take()
+                    && let Err(error) = crate::update::open_release_page(&release.url)
                 {
                     tracing::warn!(%error, "could not open the release page");
                     self.modal = Some(Modal::Error(format!("{} {error}", s::UPDATES_OPEN_FAILED)));
@@ -4262,19 +4344,19 @@ impl App {
                 }
             }
             Message::MuteUpdate(seconds) => {
-                if let Some(Modal::UpdateAvailable { version, .. }) = self.modal.take() {
+                if let Some(Modal::UpdateAvailable { release, .. }) = self.modal.take() {
                     let until = now_seconds().max(0) as u64 + seconds;
                     self.settings.update_mute = Some(UpdateMute {
-                        version,
+                        version: release.version,
                         until: Some(until),
                     });
                     self.save_settings();
                 }
             }
             Message::MuteUpdateVersion => {
-                if let Some(Modal::UpdateAvailable { version, .. }) = self.modal.take() {
+                if let Some(Modal::UpdateAvailable { release, .. }) = self.modal.take() {
                     self.settings.update_mute = Some(UpdateMute {
-                        version,
+                        version: release.version,
                         until: None,
                     });
                     self.save_settings();
@@ -7314,8 +7396,8 @@ impl App {
         if let Modal::DateTime { updated, format } = modal {
             return self.date_time_layer(*updated, *format, t);
         }
-        if let Modal::UpdateAvailable { version, .. } = modal {
-            return self.update_layer(version, t);
+        if let Modal::UpdateAvailable { release, stage } = modal {
+            return self.update_layer(release, stage, t);
         }
         let (title, detail): (String, String) = match modal {
             Modal::McpApproval {
@@ -7512,53 +7594,112 @@ impl App {
     }
 
     /// The prompt for a newer release: update, remind later, mute it, or turn checks off.
-    fn update_layer(&self, version: &str, t: Tokens) -> Element<'_, Message> {
-        let detail = format!(
-            "Libertum {version} is available. You have {}. {}",
-            crate::update::current_version(),
-            s::UPDATES_HINT
-        );
-        let primary = row![
-            self.action_button(s::UPDATES_UPDATE, true, Message::UpdateNow),
-            self.action_button(s::UPDATES_LATER, false, Message::DismissUpdate),
-        ]
-        .spacing(8);
-        let quiet = row![
-            self.action_button(s::UPDATES_MUTE_WEEK, false, Message::MuteUpdate(7 * 86_400)),
-            self.action_button(
-                s::UPDATES_MUTE_MONTH,
-                false,
-                Message::MuteUpdate(30 * 86_400)
-            ),
-            self.action_button(s::UPDATES_MUTE_VERSION, false, Message::MuteUpdateVersion),
-            self.action_button(s::UPDATES_DISABLE, false, Message::DisableUpdates),
-        ]
-        .spacing(6);
-        let card = container(
-            column![
-                text(s::UPDATES_TITLE).size(15).color(t.text),
-                text(detail).size(13).color(t.text_secondary),
-                primary,
-                quiet,
+    fn update_layer(
+        &self,
+        release: &crate::update::Release,
+        stage: &UpdateStage,
+        t: Tokens,
+    ) -> Element<'_, Message> {
+        let version = &release.version;
+        let content: Element<'_, Message> = match stage {
+            UpdateStage::Ask => {
+                let hint = if crate::install::plan(&crate::install::Host::detect(), release)
+                    == crate::install::Plan::Page
+                {
+                    s::UPDATES_HINT_PAGE
+                } else {
+                    s::UPDATES_HINT
+                };
+                let detail = format!(
+                    "Libertum {version} is available. You have {}. {hint}",
+                    crate::update::current_version(),
+                );
+                let primary = row![
+                    self.action_button(s::UPDATES_UPDATE, true, Message::UpdateNow),
+                    self.action_button(s::UPDATES_LATER, false, Message::DismissUpdate),
+                ]
+                .spacing(8);
+                let quiet = row![
+                    self.action_button(
+                        s::UPDATES_MUTE_WEEK,
+                        false,
+                        Message::MuteUpdate(7 * 86_400)
+                    ),
+                    self.action_button(
+                        s::UPDATES_MUTE_MONTH,
+                        false,
+                        Message::MuteUpdate(30 * 86_400)
+                    ),
+                    self.action_button(s::UPDATES_MUTE_VERSION, false, Message::MuteUpdateVersion),
+                    self.action_button(s::UPDATES_DISABLE, false, Message::DisableUpdates),
+                ]
+                .spacing(6);
+                column![
+                    text(s::UPDATES_TITLE).size(15).color(t.text),
+                    text(detail).size(13).color(t.text_secondary),
+                    primary,
+                    quiet,
+                ]
+                .spacing(10)
+                .into()
+            }
+            UpdateStage::Working => column![
+                text(s::UPDATES_WORKING_TITLE).size(15).color(t.text),
+                text(s::UPDATES_WORKING_DETAIL)
+                    .size(13)
+                    .color(t.text_secondary),
             ]
-            .spacing(10),
-        )
-        .padding(24)
-        .width(Length::Fixed(640.0))
-        .style(move |_| container::Style {
-            background: Some(t.inspector.into()),
-            border: iced::Border {
-                color: t.divider,
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            shadow: iced::Shadow {
-                color: t.shadow,
-                offset: iced::Vector::new(0.0, 8.0),
-                blur_radius: 24.0,
-            },
-            ..container::Style::default()
-        });
+            .spacing(10)
+            .into(),
+            UpdateStage::Failed(why) => column![
+                text(s::UPDATES_FAILED_TITLE).size(15).color(t.text),
+                text(why.clone()).size(13).color(t.text_secondary),
+                row![
+                    self.action_button(s::UPDATES_OPEN_PAGE, true, Message::OpenUpdatePage),
+                    self.action_button(s::UPDATES_CLOSE, false, Message::DismissUpdate),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10)
+            .into(),
+            UpdateStage::Command { command, file } => column![
+                text(s::UPDATES_COMMAND_TITLE).size(15).color(t.text),
+                text(s::UPDATES_COMMAND_DETAIL)
+                    .size(13)
+                    .color(t.text_secondary),
+                text(format!("{} {}", s::UPDATES_SAVED_TO, file.display()))
+                    .size(13)
+                    .color(t.text_secondary),
+                text(command.clone())
+                    .size(13)
+                    .font(iced::Font::MONOSPACE)
+                    .color(t.text),
+                row![
+                    self.action_button(s::UPDATES_COPY_COMMAND, true, Message::CopyUpdateCommand),
+                    self.action_button(s::UPDATES_CLOSE, false, Message::DismissUpdate),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10)
+            .into(),
+        };
+        let card = container(content)
+            .padding(24)
+            .width(Length::Fixed(640.0))
+            .style(move |_| container::Style {
+                background: Some(t.inspector.into()),
+                border: iced::Border {
+                    color: t.divider,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: t.shadow,
+                    offset: iced::Vector::new(0.0, 8.0),
+                    blur_radius: 24.0,
+                },
+                ..container::Style::default()
+            });
         let backdrop = mouse_area(
             container(space().width(Length::Fill).height(Length::Fill)).style(move |_| {
                 container::Style {
@@ -10732,8 +10873,12 @@ mod tests {
         assert!(!saved.check_for_updates, "the switch is persisted");
 
         app.modal = Some(Modal::UpdateAvailable {
-            version: "0.1.3".to_owned(),
-            url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+            release: crate::update::Release {
+                version: "0.1.3".to_owned(),
+                url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+                assets: Vec::new(),
+            },
+            stage: UpdateStage::Ask,
         });
         let _ = app.update(Message::MuteUpdate(7 * 86_400));
         assert!(app.modal.is_none(), "the prompt closes");
@@ -10743,8 +10888,12 @@ mod tests {
         assert!(mute.until.is_some(), "a week is a deadline, not forever");
 
         app.modal = Some(Modal::UpdateAvailable {
-            version: "0.1.3".to_owned(),
-            url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+            release: crate::update::Release {
+                version: "0.1.3".to_owned(),
+                url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.1.3".to_owned(),
+                assets: Vec::new(),
+            },
+            stage: UpdateStage::Ask,
         });
         let _ = app.update(Message::DisableUpdates);
         assert!(app.modal.is_none());
@@ -10752,6 +10901,44 @@ mod tests {
         assert!(!saved.check_for_updates);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_update_prompt_follows_a_download_to_its_result() {
+        let mut app = app();
+        let release = crate::update::Release {
+            version: "0.4.0".to_owned(),
+            url: "https://github.com/wyn-cmd/libertum/releases/tag/v0.4.0".to_owned(),
+            assets: Vec::new(),
+        };
+        app.modal = Some(Modal::UpdateAvailable {
+            release: release.clone(),
+            stage: UpdateStage::Working,
+        });
+        // A failed download keeps the prompt, with the reason and the release page to fall back on.
+        let _ = app.update(Message::UpdatePrepared(Err("no network".to_owned())));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::UpdateAvailable { stage: UpdateStage::Failed(why), .. }) if why == "no network"
+        ));
+        // A downloaded package shows its command and nothing is staged for quitting.
+        let _ = app.update(Message::UpdatePrepared(Ok(
+            crate::install::Prepared::Command {
+                command: "sudo apt install '/tmp/a.deb'".to_owned(),
+                file: PathBuf::from("/tmp/a.deb"),
+            },
+        )));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::UpdateAvailable { stage: UpdateStage::Command { command, .. }, .. })
+                if command == "sudo apt install '/tmp/a.deb'"
+        ));
+        assert!(app.staged_update.is_none());
+        let _ = app.update(Message::DismissUpdate);
+        assert!(app.modal.is_none(), "Close dismisses it");
+        // A result that arrives after the prompt was closed is ignored.
+        let _ = app.update(Message::UpdatePrepared(Err("late".to_owned())));
+        assert!(app.modal.is_none());
     }
 
     #[test]

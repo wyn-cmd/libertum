@@ -2,8 +2,9 @@
 //!
 //! The check is deliberately small: it asks the public GitHub releases API with the system
 //! `curl` (present on Windows 10+, macOS and normal Linux desktops) and reads `tag_name` and
-//! `html_url` from the JSON. It never downloads or runs an installer; "Update" opens the
-//! release page in the browser. Nothing about the user or the document is sent.
+//! `html_url` and the attached files from the JSON. What "Update" does with them is in
+//! `install.rs` (download, check and install where that is possible; otherwise the release
+//! page opens in the browser). Nothing about the user or the document is sent.
 
 use std::process::Command;
 
@@ -14,6 +15,8 @@ pub const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 const LATEST_RELEASE: &str = "https://api.github.com/repos/wyn-cmd/libertum/releases/latest";
 const RELEASE_URL_PREFIX: &str = "https://github.com/wyn-cmd/libertum/releases/";
+/// Files are only ever downloaded from this repository's releases.
+const DOWNLOAD_URL_PREFIX: &str = "https://github.com/wyn-cmd/libertum/releases/download/";
 
 /// A release newer than the running build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +25,22 @@ pub struct Release {
     pub version: String,
     /// The GitHub release page.
     pub url: String,
+    /// The files attached to the release.
+    pub assets: Vec<Asset>,
+}
+
+/// A file attached to a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asset {
+    /// A plain file name, for example `Libertum-Setup-0.3.0.exe`.
+    pub name: String,
+    pub url: String,
+}
+
+impl Release {
+    pub fn asset(&self, name: &str) -> Option<&Asset> {
+        self.assets.iter().find(|asset| asset.name == name)
+    }
 }
 
 /// Why a check (or opening the release page) failed.
@@ -109,7 +128,28 @@ pub fn parse_release(json: &str, current: &str) -> Result<Option<Release>, Updat
     Ok(Some(Release {
         version,
         url: url.to_owned(),
+        assets: parse_assets(&value),
     }))
+}
+
+/// The release's attached files. Anything whose address is not under this repository's
+/// download path, or whose name is not a plain file name, is left out.
+fn parse_assets(release: &Value) -> Vec<Asset> {
+    let Some(list) = release.get("assets").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|item| {
+            let name = item.get("name")?.as_str()?;
+            let url = item.get("browser_download_url")?.as_str()?;
+            let plain =
+                !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\', ':']);
+            (plain && url.starts_with(DOWNLOAD_URL_PREFIX)).then(|| Asset {
+                name: name.to_owned(),
+                url: url.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Whether `candidate` is newer than `current`. Versions are dotted numbers; a missing part
@@ -182,7 +222,7 @@ pub fn open_release_page(url: &str) -> Result<(), UpdateError> {
 
 /// The app has no console of its own, so on Windows a console program such as `curl` would
 /// otherwise open a black window for as long as it runs.
-fn hide_console_window(command: &mut Command) {
+pub(crate) fn hide_console_window(command: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -261,6 +301,26 @@ mod tests {
             open_release_page("https://example.com/installer.exe"),
             Err(UpdateError::BadRelease)
         ));
+    }
+
+    #[test]
+    fn attached_files_are_read_and_foreign_or_odd_ones_are_dropped() {
+        let json = RELEASE.replace(
+            "\"html_url\"",
+            r#""assets": [
+                {"name": "SHA256SUMS", "browser_download_url": "https://github.com/wyn-cmd/libertum/releases/download/v0.1.3/SHA256SUMS"},
+                {"name": "evil.exe", "browser_download_url": "https://example.com/evil.exe"},
+                {"name": "../x.exe", "browser_download_url": "https://github.com/wyn-cmd/libertum/releases/download/v0.1.3/x.exe"},
+                {"name": "C:evil", "browser_download_url": "https://github.com/wyn-cmd/libertum/releases/download/v0.1.3/e"}
+            ],
+            "html_url""#,
+        );
+        let release = parse_release(&json, "0.1.2")
+            .expect("parse")
+            .expect("newer");
+        assert_eq!(release.assets.len(), 1);
+        assert!(release.asset("SHA256SUMS").is_some());
+        assert!(release.asset("evil.exe").is_none());
     }
 
     #[test]

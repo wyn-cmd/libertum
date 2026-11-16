@@ -55,6 +55,13 @@ CI is in `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on W
 
 A release is cut from a green CI run on `main`: download the run's artifacts (`gh run download <run id>`), zip each platform's folder, and create the GitHub release with them (`gh release create v<version> <files> --target main`). The Windows asset to point people at is `Libertum-Setup.exe`; for Linux attach the `.deb`, the `.rpm` and the `.AppImage` from the Linux artifact, and for macOS the `.dmg` from each macOS artifact (they are inside the artifact, not at its top level). Nothing is code-signed (PLAN §9): say so in the release notes, with the SmartScreen and Gatekeeper workarounds.
 
+**The in-app updater needs two more things in every release** (`crates/libertum-app/src/install.rs`; without them it falls back to opening the release page):
+
+1. **`Libertum-Setup-<version>.exe`**, attached under that exact name (the updater looks for it; `Libertum-Setup.exe` stays as the fixed-name copy).
+2. **A `SHA256SUMS` file** listing every attached file, made after all the files are collected: `sha256sum <files> > SHA256SUMS` (Git Bash on Windows has `sha256sum`), then attach it. It must include each file name exactly as attached. The macOS artifact also holds `Libertum-<version>-macos-<arch>.zip` (the app, for the updater); attach it next to the `.dmg`.
+
+The updater checks each download against `SHA256SUMS` from the same release, so it catches a damaged download, not a tampered release (nothing is code-signed).
+
 ## Workspace layout
 
 | Crate | Role | Status |

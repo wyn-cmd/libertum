@@ -63,8 +63,8 @@ A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain bin
 all unsigned.
 
 ```sh
-sudo apt install ./libertum_0.3.0_amd64.deb                  # Debian, Ubuntu, ...
-sudo dnf install ./libertum-0.3.0-1.x86_64.rpm               # Fedora, openSUSE, ...
+sudo apt install ./libertum_0.3.1_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.3.1-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
 The packages put `libertum` in `/usr/bin` and install a desktop entry, the icon and a MIME
@@ -80,8 +80,8 @@ The AppImage carries its own font, input, Wayland and graphics libraries, and on
 host's X11/XCB and glibc:
 
 ```sh
-chmod +x Libertum-0.3.0-x86_64.AppImage
-./Libertum-0.3.0-x86_64.AppImage
+chmod +x Libertum-0.3.1-x86_64.AppImage
+./Libertum-0.3.1-x86_64.AppImage
 ```
 
 Pinch-to-zoom needs a Wayland session. On X11, Ctrl + two-finger scroll zooms.

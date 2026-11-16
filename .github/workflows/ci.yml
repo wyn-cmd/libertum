@@ -171,6 +171,7 @@ jobs:
             --binary "target/${{ matrix.target }}/release/libertum" \
             --out dist --arch "${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x64' }}"
           hdiutil verify dist/Libertum-*.dmg
+          unzip -tq dist/Libertum-*.zip
       # Downloadable from the run's summary page for 30 days.
       - name: Upload the build
         uses: actions/upload-artifact@v4
