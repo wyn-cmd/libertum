@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -23,6 +23,7 @@ libertum-library = { path = "crates/libertum-library" }
 libertum-markdown = { path = "crates/libertum-markdown" }
 libertum-editor = { path = "crates/libertum-editor" }
 libertum-export = { path = "crates/libertum-export" }
+libertum-mcp = { path = "crates/libertum-mcp" }
 
 # UI
 iced = "0.14"
@@ -77,6 +78,17 @@ directories = "6"
 # Spellchecking with Hunspell-format dictionaries. Apache-2.0, and the bundled SCOWL
 # dictionaries are permissive; see docs/third-party-licences.md and the spell module.
 zspell = { version = "0.5.5", features = ["unstable-suggestions"] }
+
+# MCP server (dev mode, docs/mcp-plan.md). rmcp is Apache-2.0; tokio and axum are MIT;
+# getrandom is MIT OR Apache-2.0. tokio runs on libertum-mcp's own thread only: the app's
+# Iced executor is the thread pool, not tokio.
+rmcp = { version = "3.10.0", default-features = false }
+tokio = { version = "1.54", default-features = false }
+# Recipe scripts (phase 6): koto is MIT. Only its `rc` runtime is used (no serde); the app removes its io, os and koto
+# modules and `print` from every script, so a script cannot reach files, programs or the network.
+koto = { version = "0.16.1", default-features = false, features = ["rc"] }
+axum = { version = "0.8", default-features = false }
+getrandom = "0.3"
 
 # Testing
 # Plotting, rayon and HTML reports off: text output is enough, and it keeps plotters out of the tree.

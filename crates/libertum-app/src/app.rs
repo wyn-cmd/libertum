@@ -31,6 +31,7 @@ use crate::inspector;
 use crate::inspector::bookmarks::BookmarkEntry;
 use crate::inspector::headers::HeadingEntry;
 use crate::inspector::notes::NoteEntry;
+use crate::mcp;
 use crate::perf;
 use crate::recovery;
 use crate::settings::{DefaultFormat, Settings, ThemePreference, UnitsPreference, UpdateMute};
@@ -49,6 +50,10 @@ use crate::toolbar;
 use crate::update::CHECK_INTERVAL_SECS;
 use crate::widgets::controls::flat;
 use crate::widgets::segmented::{self, Content, Look};
+
+mod macro_run;
+mod runner;
+pub use runner::RunnerMsg;
 
 /// Unix seconds from the system clock, for date and time fields.
 fn now_seconds() -> i64 {
@@ -367,9 +372,26 @@ enum Pending {
     Open(PathBuf),
 }
 
+/// The writer's answer when an MCP client first asks to edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpDecision {
+    /// Allow this client until Libertum closes.
+    AllowSession,
+    /// Allow this client from now on (until "Forget approved tools").
+    AllowAlways,
+    Deny,
+}
+
 /// A prompt over the document.
 #[derive(Debug, Clone)]
 enum Modal {
+    /// An MCP client wants to edit. The request itself waits in `App::mcp_approvals`; this
+    /// holds what the prompt shows.
+    McpApproval {
+        client: String,
+        action: String,
+        detail: String,
+    },
     /// The document has unsaved changes; `pending` runs after Save or Don't Save.
     Unsaved { pending: Pending },
     /// An open or save failed. The message is already user-facing.
@@ -517,6 +539,8 @@ pub enum Message {
     SetDefaultFormat(DefaultFormat),
     /// The autosave period in seconds (0 turns autosave off).
     SetAutosave(u32),
+    SetScriptMemory(u32),
+    SetScriptTotalMemory(u32),
     SetUnits(UnitsPreference),
     /// Show or hide the frame-rate and frame-time overlay (Settings).
     SetShowPerformance(bool),
@@ -524,6 +548,22 @@ pub enum Message {
     /// Automatic update checks on or off (Settings).
     SetCheckForUpdates(bool),
     SetSpellcheck(bool),
+    /// A client of the MCP server asked a question (dev mode); answer it from the open document.
+    McpRequest(mcp::McpRequest),
+    /// Copy the MCP server's token to the clipboard (Settings).
+    CopyMcpToken,
+    /// Developer mode on or off (Settings). Turning it off also turns MCP off.
+    SetDevMode(bool),
+    /// MCP connectors on or off (Settings); only reachable while developer mode is on.
+    SetMcpEnabled(bool),
+    /// Allow MCP clients to edit, or not (Settings); only reachable while MCP is on.
+    SetMcpAllowEdits(bool),
+    /// "Forget approved tools" in Settings: every client asks again.
+    ForgetMcpClients,
+    /// The writer's answer to an MCP client's request to edit.
+    McpDecision(McpDecision),
+    /// The MCP tool runner window (developer mode).
+    Runner(RunnerMsg),
     SetSpellLanguage(spell::Language),
     /// "Check now" in Settings, even while automatic checks are off.
     CheckForUpdatesNow,
@@ -864,6 +904,16 @@ pub struct App {
     file_context: Option<FileContext>,
     /// Unsaved changes since the last open or save.
     dirty: bool,
+    /// The MCP server, while dev mode and MCP are both on (`docs/mcp-plan.md`).
+    mcp: Option<mcp::McpService>,
+    /// Why the server could not start, shown in Settings.
+    mcp_error: Option<String>,
+    /// Edit requests waiting for the writer's answer; the first is the one the prompt shows.
+    mcp_approvals: std::collections::VecDeque<libertum_mcp::Pending>,
+    /// Clients the writer allowed "this session": gone when Libertum closes.
+    mcp_session_trusted: HashSet<String>,
+    /// The tool runner window, open only while MCP is on. Closing it stops its program.
+    runner: Option<crate::mcp_runner::Runner>,
     /// A prompt over the document (unsaved changes, or an error).
     modal: Option<Modal>,
     /// What to do when a save finishes (close the window, open another file).
@@ -1000,6 +1050,11 @@ impl App {
             file: None,
             file_context: None,
             dirty: false,
+            mcp: None,
+            mcp_error: None,
+            mcp_approvals: std::collections::VecDeque::new(),
+            mcp_session_trusted: HashSet::new(),
+            runner: None,
             modal: None,
             after_save: None,
             headings: Vec::new(),
@@ -1032,7 +1087,160 @@ impl App {
         app.headings = app.headings();
         app.notes = app.notes();
         app.bookmarks = app.bookmarks();
+        app.sync_mcp();
         app
+    }
+
+    /// Start or stop the MCP server so it matches the settings: running only while developer
+    /// mode and MCP are both on.
+    fn sync_mcp(&mut self) {
+        if self.settings.mcp_active() {
+            if self.mcp.is_none() {
+                match mcp::McpService::start() {
+                    Ok(service) => {
+                        self.mcp = Some(service);
+                        self.mcp_error = None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not start the MCP server");
+                        self.mcp_error = Some(error.to_string());
+                    }
+                }
+            }
+        } else {
+            // Dropping the service closes the port and ends its threads.
+            self.mcp = None;
+            self.mcp_error = None;
+            self.mcp_session_trusted.clear();
+            // The runner is part of MCP: its program stops with it.
+            self.close_runner();
+        }
+        // Switching editing (or MCP, or dev mode) off answers anything still waiting.
+        if !self.settings.mcp_edits_allowed() {
+            self.drain_mcp_approvals();
+        }
+    }
+
+    /// Refuse every edit that is waiting for the writer, and close the prompt for it.
+    fn drain_mcp_approvals(&mut self) {
+        for pending in std::mem::take(&mut self.mcp_approvals) {
+            pending.respond(Err(libertum_mcp::HostError::EditsDisabled));
+        }
+        if matches!(self.modal, Some(Modal::McpApproval { .. })) {
+            self.modal = None;
+        }
+    }
+
+    /// Work through the queued edit requests: refuse them when editing is off, make them for a
+    /// client the writer already trusts, and otherwise ask (one prompt at a time).
+    fn process_mcp_approvals(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        while let Some(front) = self.mcp_approvals.front() {
+            if front.is_abandoned() {
+                // The client was already told it timed out; never make that edit now.
+                self.mcp_approvals.pop_front();
+                continue;
+            }
+            let name = mcp::display_name(&front.client().name);
+            let trusted =
+                self.settings.mcp_trusts(&name) || self.mcp_session_trusted.contains(&name);
+            if !self.settings.mcp_edits_allowed() || trusted {
+                if let Some(pending) = self.mcp_approvals.pop_front() {
+                    tasks.push(self.apply_mcp_edit(pending));
+                }
+                continue;
+            }
+            if self.modal.is_none() {
+                let summary = mcp::describe(front.request(), self.doc.as_ref());
+                self.modal = Some(Modal::McpApproval {
+                    client: name,
+                    action: summary.action,
+                    detail: summary.detail,
+                });
+            }
+            break;
+        }
+        Task::batch(tasks)
+    }
+
+    /// Make one approved edit (or refuse it when editing has been switched off since).
+    fn apply_mcp_edit(&mut self, pending: libertum_mcp::Pending) -> Task<Message> {
+        if !self.settings.mcp_edits_allowed() {
+            pending.respond(Err(libertum_mcp::HostError::EditsDisabled));
+            return Task::none();
+        }
+        // The server may have given up on this request while it waited for the writer; if it
+        // did, the client believes the edit failed, so it must not happen.
+        if !pending.claim() {
+            return Task::none();
+        }
+        let result = mcp::apply_edit(pending.request(), self.doc.as_mut());
+        let edited = result.is_ok();
+        pending.respond(result);
+        if edited {
+            self.dirty = true;
+            self.after_edit();
+            return self.schedule_spell_check();
+        }
+        Task::none()
+    }
+
+    /// The writer's answer to the prompt for the first queued edit.
+    fn decide_mcp(&mut self, decision: McpDecision) -> Task<Message> {
+        if matches!(self.modal, Some(Modal::McpApproval { .. })) {
+            self.modal = None;
+        }
+        let Some(pending) = self.mcp_approvals.pop_front() else {
+            return Task::none();
+        };
+        let name = mcp::display_name(&pending.client().name);
+        let task = match decision {
+            McpDecision::Deny => {
+                pending.respond(Err(libertum_mcp::HostError::Denied));
+                Task::none()
+            }
+            McpDecision::AllowSession => {
+                self.mcp_session_trusted.insert(name);
+                self.apply_mcp_edit(pending)
+            }
+            McpDecision::AllowAlways => {
+                self.settings.trust_mcp_client(&name);
+                self.save_settings();
+                self.apply_mcp_edit(pending)
+            }
+        };
+        Task::batch([task, self.process_mcp_approvals()])
+    }
+
+    /// Answer a question from an MCP client: reads from the open document at once, edits after
+    /// the checks and the writer's approval.
+    fn answer_mcp(&mut self, request: &mcp::McpRequest) -> Task<Message> {
+        let Some(pending) = request.take() else {
+            return Task::none();
+        };
+        if pending.request().is_edit() {
+            self.mcp_approvals.push_back(pending);
+            return self.process_mcp_approvals();
+        }
+        let title = self
+            .file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s::UNTITLED.to_owned());
+        let format = match self.file.as_ref().and_then(|path| path.extension()) {
+            Some(extension) => extension.to_string_lossy().to_lowercase(),
+            None => Format::from_settings(&self.settings).extension().to_owned(),
+        };
+        let meta = mcp::DocMeta {
+            title: &title,
+            path: self.file.as_deref(),
+            format: &format,
+            dirty: self.dirty,
+        };
+        let result = mcp::answer(pending.request(), self.doc.as_ref(), &meta);
+        pending.respond(result);
+        Task::none()
     }
 
     /// Starts on the home screen, or on the generated 500-page demo document when
@@ -1177,6 +1385,14 @@ impl App {
         // `LIBERTUM_SETTINGS=1` opens the Settings window at start-up (for screenshots).
         if std::env::var("LIBERTUM_SETTINGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
             self.settings_open = true;
+        }
+        // `LIBERTUM_MCP_RUNNER=1` opens the MCP tool runner at start-up (for screenshots); it
+        // still needs developer mode and MCP switched on in the settings.
+        if std::env::var("LIBERTUM_MCP_RUNNER").is_ok_and(|v| v != "0" && !v.is_empty())
+            && self.settings.mcp_active()
+        {
+            self.runner = Some(crate::mcp_runner::Runner::default());
+            self.load_macros();
         }
         // `LIBERTUM_UPDATE=<version>` shows the update prompt at start-up (for screenshots).
         if let Ok(version) = std::env::var("LIBERTUM_UPDATE")
@@ -3372,10 +3588,23 @@ impl App {
     }
 
     fn on_modal_choice(&mut self, choice: ModalChoice) -> Task<Message> {
+        let task = self.on_modal_choice_inner(choice);
+        // A prompt that was waiting behind this one (an MCP edit) can show now.
+        Task::batch([task, self.process_mcp_approvals()])
+    }
+
+    fn on_modal_choice_inner(&mut self, choice: ModalChoice) -> Task<Message> {
         let Some(modal) = self.modal.take() else {
             return Task::none();
         };
         match (modal, choice) {
+            // Escape or a click outside the prompt refuses just this edit.
+            (Modal::McpApproval { .. }, _) => {
+                if let Some(pending) = self.mcp_approvals.pop_front() {
+                    pending.respond(Err(libertum_mcp::HostError::Denied));
+                }
+                Task::none()
+            }
             (Modal::Unsaved { pending }, ModalChoice::Save) => {
                 self.after_save = Some(pending);
                 self.save_document(false)
@@ -3489,6 +3718,12 @@ impl App {
         if let Some(seconds) = self.autosave_interval() {
             subs.push(
                 Subscription::run_with(seconds, autosave_ticks).map(|_| Message::AutosaveTick),
+            );
+        }
+        if let Some(service) = &self.mcp {
+            subs.push(
+                Subscription::run_with(service.feed(), mcp::McpFeed::stream)
+                    .map(Message::McpRequest),
             );
         }
         Subscription::batch(subs)
@@ -3898,6 +4133,14 @@ impl App {
                 self.settings.autosave_secs = seconds;
                 self.save_settings();
             }
+            Message::SetScriptMemory(megabytes) => {
+                self.settings.script_memory_mb = megabytes;
+                self.save_settings();
+            }
+            Message::SetScriptTotalMemory(megabytes) => {
+                self.settings.script_total_memory_mb = megabytes;
+                self.save_settings();
+            }
             Message::SetShowPerformance(on) => {
                 self.settings.show_performance = on;
                 // A fresh measurement starts each time it is switched on.
@@ -3915,6 +4158,36 @@ impl App {
                 self.settings.spellcheck = on;
                 self.save_settings();
                 return self.schedule_spell_check();
+            }
+            Message::SetDevMode(on) => {
+                self.settings.set_dev_mode(on);
+                self.save_settings();
+                self.sync_mcp();
+            }
+            Message::SetMcpEnabled(on) => {
+                if self.settings.set_mcp_enabled(on) {
+                    self.save_settings();
+                }
+                self.sync_mcp();
+            }
+            Message::SetMcpAllowEdits(on) => {
+                if self.settings.set_mcp_allow_edits(on) {
+                    self.save_settings();
+                }
+                self.sync_mcp();
+            }
+            Message::ForgetMcpClients => {
+                self.settings.forget_mcp_clients();
+                self.mcp_session_trusted.clear();
+                self.save_settings();
+            }
+            Message::McpDecision(decision) => return self.decide_mcp(decision),
+            Message::Runner(message) => return self.update_runner(message),
+            Message::McpRequest(request) => return self.answer_mcp(&request),
+            Message::CopyMcpToken => {
+                if let Some(service) = &self.mcp {
+                    return iced::clipboard::write(service.token().to_owned());
+                }
             }
             Message::SetSpellLanguage(language) => {
                 self.settings.spellcheck_language = language;
@@ -4120,8 +4393,12 @@ impl App {
             }
             Message::Shortcut(Shortcut::CloseMenu) => {
                 self.context_menu = None;
-                // Escape backs out of whatever is in front: a prompt (Cancel, or Discard for
-                // the recovery offer), then the Settings window, then the Find bar.
+                // Escape backs out of whatever is in front: the tool runner, a prompt (Cancel,
+                // or Discard for the recovery offer), then the Settings window, then the Find bar.
+                if self.runner.is_some() {
+                    self.close_runner();
+                    return Task::none();
+                }
                 if self.vocabulary_open {
                     self.vocabulary_open = false;
                     self.rerank_suggestions();
@@ -5747,10 +6024,15 @@ impl App {
         };
         // The vocabulary window sits over the chapter window it re-ranks (and over Settings,
         // which links to it), so it is pushed last.
-        if self.vocabulary_open {
+        let base: Element<'_, Message> = if self.vocabulary_open {
             stack![base, self.tag_vocabulary_layer(t)].into()
         } else {
             base
+        };
+        // The tool runner is a developer window; it goes over everything else.
+        match &self.runner {
+            Some(runner) => stack![base, self.runner_layer(runner, t)].into(),
+            None => base,
         }
     }
 
@@ -6430,6 +6712,121 @@ impl App {
                 .align_y(Center),
             ]
             .spacing(4),
+            labelled(t, s::SETTINGS_DEVELOPER, {
+                let mut developer = column![
+                    controls::checkbox_row(
+                        t,
+                        s::SETTINGS_DEV_MODE,
+                        self.settings.dev_mode,
+                        false,
+                        Message::SetDevMode,
+                    ),
+                    controls::caption(t, s::SETTINGS_DEV_MODE_HINT),
+                ]
+                .spacing(6);
+                // The MCP switch only exists while developer mode is on.
+                if self.settings.dev_mode {
+                    developer = developer
+                        .push(controls::checkbox_row(
+                            t,
+                            s::SETTINGS_MCP,
+                            self.settings.mcp_enabled,
+                            false,
+                            Message::SetMcpEnabled,
+                        ))
+                        .push(controls::caption(t, s::SETTINGS_MCP_HINT));
+                    // Editing is a second, separate switch, and exists only while MCP is on.
+                    if self.settings.mcp_enabled {
+                        developer = developer
+                            .push(controls::checkbox_row(
+                                t,
+                                s::SETTINGS_MCP_ALLOW_EDITS,
+                                self.settings.mcp_allow_edits,
+                                false,
+                                Message::SetMcpAllowEdits,
+                            ))
+                            .push(controls::caption(t, s::SETTINGS_MCP_ALLOW_EDITS_HINT));
+                        if !self.settings.mcp_trusted_clients.is_empty()
+                            || !self.mcp_session_trusted.is_empty()
+                        {
+                            developer = developer.push(
+                                button(
+                                    text(s::SETTINGS_MCP_FORGET)
+                                        .size(13)
+                                        .wrapping(Wrapping::None),
+                                )
+                                .padding([6, 14])
+                                .style(move |_, status| controls::flat(t, status))
+                                .on_press(Message::ForgetMcpClients),
+                            );
+                        }
+                    }
+                    if let Some(service) = &self.mcp {
+                        developer = developer
+                            .push(controls::caption(
+                                t,
+                                format!("{} {}", s::SETTINGS_MCP_ADDRESS, service.url()),
+                            ))
+                            .push(
+                                button(
+                                    text(s::SETTINGS_MCP_COPY_TOKEN)
+                                        .size(13)
+                                        .wrapping(Wrapping::None),
+                                )
+                                .padding([6, 14])
+                                .style(move |_, status| controls::flat(t, status))
+                                .on_press(Message::CopyMcpToken),
+                            );
+                    }
+                    developer = developer
+                        .push(controls::caption(t, s::SETTINGS_SCRIPT_MEMORY))
+                        .push(segmented::select(
+                            t,
+                            Look::Raised,
+                            &[
+                                (128u32, Content::Label(s::SCRIPT_MEMORY_128)),
+                                (256, Content::Label(s::SCRIPT_MEMORY_256)),
+                                (512, Content::Label(s::SCRIPT_MEMORY_512)),
+                                (1024, Content::Label(s::SCRIPT_MEMORY_1024)),
+                                (2048, Content::Label(s::SCRIPT_MEMORY_2048)),
+                            ],
+                            Some(self.settings.script_memory_mb),
+                            Message::SetScriptMemory,
+                        ))
+                        .push(controls::caption(t, s::SETTINGS_SCRIPT_MEMORY_HINT))
+                        .push(controls::caption(t, s::SETTINGS_SCRIPT_TOTAL_MEMORY))
+                        .push(segmented::select(
+                            t,
+                            Look::Raised,
+                            &[
+                                (512u32, Content::Label(s::SCRIPT_MEMORY_512)),
+                                (1024, Content::Label(s::SCRIPT_MEMORY_1024)),
+                                (2048, Content::Label(s::SCRIPT_MEMORY_2048)),
+                                (4096, Content::Label(s::SCRIPT_MEMORY_4096)),
+                            ],
+                            Some(self.settings.script_total_memory_mb),
+                            Message::SetScriptTotalMemory,
+                        ))
+                        .push(controls::caption(t, s::SETTINGS_SCRIPT_TOTAL_MEMORY_HINT));
+                    developer = developer.push(
+                        button(
+                            text(s::SETTINGS_MCP_TOOLS)
+                                .size(13)
+                                .wrapping(Wrapping::None),
+                        )
+                        .padding([6, 14])
+                        .style(move |_, status| controls::flat(t, status))
+                        .on_press(Message::Runner(RunnerMsg::Open)),
+                    );
+                    if let Some(error) = &self.mcp_error {
+                        developer = developer.push(controls::caption(
+                            t,
+                            format!("{} {error}", s::SETTINGS_MCP_FAILED),
+                        ));
+                    }
+                }
+                developer.into()
+            }),
         ]
         .spacing(16)
         .width(Length::Fixed(400.0));
@@ -6921,6 +7318,22 @@ impl App {
             return self.update_layer(version, t);
         }
         let (title, detail): (String, String) = match modal {
+            Modal::McpApproval {
+                client,
+                action,
+                detail,
+            } => {
+                let mut lines = vec![action.clone()];
+                if !detail.is_empty() {
+                    lines.push(detail.clone());
+                }
+                lines.push(String::new());
+                lines.push(s::MCP_APPROVAL_DETAIL.to_owned());
+                (
+                    format!("{client} {}", s::MCP_APPROVAL_TITLE),
+                    lines.join("\n"),
+                )
+            }
             Modal::Unsaved { .. } => (s::UNSAVED_TITLE.to_owned(), s::UNSAVED_DETAIL.to_owned()),
             Modal::Error(message) => (message.clone(), String::new()),
             Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
@@ -6965,6 +7378,19 @@ impl App {
             }
         };
         let buttons: Vec<Element<'_, Message>> = match modal {
+            Modal::McpApproval { .. } => vec![
+                self.action_button(
+                    s::MCP_ALLOW_SESSION,
+                    true,
+                    Message::McpDecision(McpDecision::AllowSession),
+                ),
+                self.action_button(
+                    s::MCP_ALLOW_ALWAYS,
+                    false,
+                    Message::McpDecision(McpDecision::AllowAlways),
+                ),
+                self.action_button(s::MCP_DENY, false, Message::McpDecision(McpDecision::Deny)),
+            ],
             Modal::Unsaved { .. } => vec![
                 self.modal_button(s::SAVE, true, ModalChoice::Save),
                 self.modal_button(s::DONT_SAVE, false, ModalChoice::Discard),
@@ -9868,6 +10294,432 @@ mod tests {
     }
 
     #[test]
+    fn mcp_switch_is_gated_by_dev_mode_and_saved() {
+        let dir = std::env::temp_dir().join(format!("libertum-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let path = dir.join("settings.toml");
+        let mut app = App::new(Settings::default(), Some(path.clone()));
+
+        let _ = app.update(Message::SetMcpEnabled(true));
+        assert!(!app.settings.mcp_enabled, "refused while dev mode is off");
+
+        let _ = app.update(Message::SetDevMode(true));
+        let _ = app.update(Message::SetMcpEnabled(true));
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(saved.dev_mode && saved.mcp_enabled, "both are persisted");
+
+        let _ = app.update(Message::SetDevMode(false));
+        assert!(!app.settings.mcp_enabled, "closing the gate turns MCP off");
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(!saved.dev_mode && !saved.mcp_enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_mcp_on_serves_the_open_document_and_off_closes_the_port() {
+        use libertum_mcp::{Reply, Request};
+        use std::net::{SocketAddr, TcpStream};
+
+        let mut app = App::new(Settings::default(), None);
+        assert!(app.mcp.is_none(), "nothing runs by default");
+
+        let _ = app.update(Message::SetDevMode(true));
+        assert!(app.mcp.is_none(), "dev mode alone starts nothing");
+        let _ = app.update(Message::SetMcpEnabled(true));
+        let service = app.mcp.as_ref().expect("the server is running");
+        let url = service.url();
+        let addr: SocketAddr = url
+            .trim_start_matches("http://")
+            .trim_end_matches("/mcp")
+            .parse()
+            .expect("a loopback address");
+        assert!(addr.ip().is_loopback());
+        assert!(TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok());
+        assert_eq!(service.token().len(), 64);
+
+        // A client's question travels to the UI thread and is answered from the open document.
+        let (host, queue) = libertum_mcp::channel(Duration::from_secs(5), Duration::from_secs(5));
+        let client = libertum_mcp::ClientInfo::new("test", "1");
+        let asker = std::thread::spawn(move || {
+            libertum_mcp::Host::request(&*host, &client, Request::ListDocuments)
+        });
+        let pending = queue
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a question");
+        let _ = app.update(Message::McpRequest(mcp::McpRequest::new(pending)));
+        let Ok(Reply::Documents(documents)) = asker.join().expect("the asker") else {
+            panic!("a document listing");
+        };
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].id, app.doc.as_ref().expect("a document").id());
+
+        let _ = app.update(Message::SetDevMode(false));
+        assert!(app.mcp.is_none(), "closing the gate stops the server");
+        assert!(
+            TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err(),
+            "the port is closed"
+        );
+    }
+
+    // ------------------------------------------------------------ MCP edits
+
+    use crate::mcp_runner::{CallResult, Link};
+    use libertum_mcp::{ClientInfo, Host as _, HostError, HostResult, Position, Reply, Request};
+
+    fn mcp_app(allow_edits: bool, settings_path: Option<std::path::PathBuf>) -> App {
+        let mut app = App::new(Settings::default(), settings_path);
+        let _ = app.update(Message::SetDevMode(true));
+        let _ = app.update(Message::SetMcpEnabled(true));
+        if allow_edits {
+            let _ = app.update(Message::SetMcpAllowEdits(true));
+        }
+        app
+    }
+
+    fn insert_request(text: &str) -> Request {
+        let at = Position {
+            paragraph: 0,
+            offset: 0,
+        };
+        Request::ReplaceRange {
+            document: None,
+            start: at,
+            end: at,
+            text: text.into(),
+        }
+    }
+
+    /// Send `request` as `client` the way the server does, and hand it to the app. Returns the
+    /// client side, which finishes when the app answers.
+    fn send(app: &mut App, client: &str, request: Request) -> std::thread::JoinHandle<HostResult> {
+        let (host, queue) = libertum_mcp::channel(Duration::from_secs(5), Duration::from_secs(30));
+        let client = ClientInfo::new(client, "1");
+        let asker = std::thread::spawn(move || host.request(&client, request));
+        let pending = queue
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a request");
+        let _ = app.update(Message::McpRequest(mcp::McpRequest::new(pending)));
+        asker
+    }
+
+    fn first_paragraph(app: &App) -> String {
+        app.doc
+            .as_ref()
+            .expect("a document")
+            .document()
+            .paragraph_at(0)
+            .expect("a paragraph")
+            .text()
+            .to_owned()
+    }
+
+    fn asking(app: &App) -> bool {
+        matches!(app.modal, Some(Modal::McpApproval { .. }))
+    }
+
+    #[test]
+    fn edits_are_refused_while_allow_edits_is_off() {
+        let mut app = mcp_app(false, None);
+        let before = first_paragraph(&app);
+        let asker = send(&mut app, "Test tool", insert_request("hello"));
+        assert_eq!(asker.join().expect("asker"), Err(HostError::EditsDisabled));
+        assert!(!asking(&app), "nothing to ask about: editing is off");
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn allow_edits_cannot_be_switched_on_without_mcp() {
+        let mut app = App::new(Settings::default(), None);
+        let _ = app.update(Message::SetMcpAllowEdits(true));
+        assert!(!app.settings.mcp_allow_edits);
+        let _ = app.update(Message::SetDevMode(true));
+        let _ = app.update(Message::SetMcpAllowEdits(true));
+        assert!(!app.settings.mcp_allow_edits, "MCP itself is still off");
+    }
+
+    #[test]
+    fn a_first_edit_asks_and_then_is_one_undo_step() {
+        let mut app = mcp_app(true, None);
+        let before = first_paragraph(&app);
+        let undo_before = app.doc.as_ref().expect("doc").editor().history().undo_len();
+
+        let asker = send(&mut app, "Test tool", insert_request("hello "));
+        assert!(asking(&app), "the writer is asked first");
+        assert_eq!(first_paragraph(&app), before, "nothing changed yet");
+
+        let _ = app.update(Message::McpDecision(McpDecision::AllowSession));
+        let Ok(Reply::Edited { .. }) = asker.join().expect("asker") else {
+            panic!("the edit was made");
+        };
+        assert!(!asking(&app));
+        assert_eq!(first_paragraph(&app), format!("hello {before}"));
+        assert!(app.dirty);
+        let doc = app.doc.as_mut().expect("doc");
+        assert_eq!(doc.editor().history().undo_len(), undo_before + 1);
+        doc.undo().expect("undo");
+        assert_eq!(first_paragraph(&app), before, "one Undo takes it back");
+    }
+
+    #[test]
+    fn a_client_allowed_for_the_session_is_not_asked_again_but_another_is() {
+        let mut app = mcp_app(true, None);
+        let first = send(&mut app, "Tool A", insert_request("a"));
+        let _ = app.update(Message::McpDecision(McpDecision::AllowSession));
+        assert!(first.join().expect("asker").is_ok());
+
+        let second = send(&mut app, "Tool A", insert_request("b"));
+        assert!(!asking(&app), "Tool A is trusted for the session");
+        assert!(second.join().expect("asker").is_ok());
+
+        let other = send(&mut app, "Tool B", insert_request("c"));
+        assert!(asking(&app), "a different tool asks for itself");
+        let _ = app.update(Message::McpDecision(McpDecision::Deny));
+        assert_eq!(other.join().expect("asker"), Err(HostError::Denied));
+    }
+
+    #[test]
+    fn denying_changes_nothing_and_the_next_request_asks_again() {
+        let mut app = mcp_app(true, None);
+        let before = first_paragraph(&app);
+        let asker = send(&mut app, "Test tool", insert_request("no"));
+        let _ = app.update(Message::McpDecision(McpDecision::Deny));
+        assert_eq!(asker.join().expect("asker"), Err(HostError::Denied));
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+        assert!(app.mcp_session_trusted.is_empty());
+
+        let again = send(&mut app, "Test tool", insert_request("no"));
+        assert!(asking(&app), "a denial is not remembered as trust");
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert_eq!(
+            again.join().expect("asker"),
+            Err(HostError::Denied),
+            "Escape or a click outside also refuses"
+        );
+    }
+
+    #[test]
+    fn always_allow_is_saved_and_forgetting_clears_it() {
+        let dir = std::env::temp_dir().join(format!("libertum-mcp-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let path = dir.join("settings.toml");
+        let mut app = mcp_app(true, Some(path.clone()));
+
+        let asker = send(&mut app, "Test tool", insert_request("x"));
+        let _ = app.update(Message::McpDecision(McpDecision::AllowAlways));
+        assert!(asker.join().expect("asker").is_ok());
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(saved.mcp_trusts("Test tool"), "remembered across launches");
+
+        let quiet = send(&mut app, "Test tool", insert_request("y"));
+        assert!(!asking(&app));
+        assert!(quiet.join().expect("asker").is_ok());
+
+        let _ = app.update(Message::ForgetMcpClients);
+        let saved = Settings::load_from(&path).expect("settings");
+        assert!(!saved.mcp_trusts("Test tool"));
+        let asks = send(&mut app, "Test tool", insert_request("z"));
+        assert!(asking(&app), "it has to ask again");
+        let _ = app.update(Message::McpDecision(McpDecision::Deny));
+        let _ = asks.join();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_allow_edits_off_answers_a_waiting_request_and_closes_the_prompt() {
+        let mut app = mcp_app(true, None);
+        let before = first_paragraph(&app);
+        let asker = send(&mut app, "Test tool", insert_request("late"));
+        assert!(asking(&app));
+        let _ = app.update(Message::SetMcpAllowEdits(false));
+        assert!(!asking(&app));
+        assert_eq!(asker.join().expect("asker"), Err(HostError::EditsDisabled));
+        assert_eq!(first_paragraph(&app), before);
+    }
+
+    #[test]
+    fn an_edit_the_server_gave_up_on_is_never_applied() {
+        let mut app = mcp_app(true, None);
+        let before = first_paragraph(&app);
+        // A client whose request times out before anyone answers.
+        let (host, queue) =
+            libertum_mcp::channel(Duration::from_millis(40), Duration::from_millis(40));
+        let client = ClientInfo::new("Slow tool", "1");
+        let asker = std::thread::spawn(move || host.request(&client, insert_request("stale")));
+        let pending = queue
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a request");
+        assert!(matches!(
+            asker.join().expect("asker"),
+            Err(HostError::Unavailable(_))
+        ));
+
+        // The app only now sees it, and even a trusted tool must not get this edit made.
+        app.mcp_session_trusted.insert("Slow tool".into());
+        let _ = app.update(Message::McpRequest(mcp::McpRequest::new(pending)));
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+        assert!(app.mcp_approvals.is_empty() && !asking(&app));
+    }
+
+    #[test]
+    fn an_edit_that_times_out_while_the_prompt_is_open_is_not_applied_on_allow() {
+        let mut app = mcp_app(true, None);
+        let before = first_paragraph(&app);
+        let (host, queue) =
+            libertum_mcp::channel(Duration::from_millis(40), Duration::from_millis(40));
+        let client = ClientInfo::new("Slow tool", "1");
+        let asker = std::thread::spawn(move || host.request(&client, insert_request("stale")));
+        let pending = queue
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a request");
+        let _ = app.update(Message::McpRequest(mcp::McpRequest::new(pending)));
+        assert!(asking(&app));
+        // The client gives up while the prompt is still on screen...
+        assert!(matches!(
+            asker.join().expect("asker"),
+            Err(HostError::Unavailable(_))
+        ));
+        // ...so Allow must not make an edit the client was told failed.
+        let _ = app.update(Message::McpDecision(McpDecision::AllowSession));
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn queued_requests_are_asked_one_at_a_time() {
+        let mut app = mcp_app(true, None);
+        let first = send(&mut app, "Tool A", insert_request("1"));
+        let second = send(&mut app, "Tool B", insert_request("2"));
+        let Some(Modal::McpApproval { client, .. }) = &app.modal else {
+            panic!("a prompt");
+        };
+        assert_eq!(client, "Tool A", "first come, first asked");
+        let _ = app.update(Message::McpDecision(McpDecision::Deny));
+        assert_eq!(first.join().expect("asker"), Err(HostError::Denied));
+        let Some(Modal::McpApproval { client, .. }) = &app.modal else {
+            panic!("the next prompt follows");
+        };
+        assert_eq!(client, "Tool B");
+        let _ = app.update(Message::McpDecision(McpDecision::AllowSession));
+        assert!(second.join().expect("asker").is_ok());
+    }
+
+    #[test]
+    fn a_prompt_waits_behind_another_and_shows_when_it_closes() {
+        let mut app = mcp_app(true, None);
+        app.modal = Some(Modal::Error("Something else".into()));
+        let asker = send(&mut app, "Test tool", insert_request("w"));
+        assert!(
+            matches!(app.modal, Some(Modal::Error(_))),
+            "the other prompt is not replaced"
+        );
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert!(asking(&app), "the edit prompt takes its turn");
+        let _ = app.update(Message::McpDecision(McpDecision::Deny));
+        let _ = asker.join();
+    }
+
+    #[test]
+    fn a_bad_range_is_an_error_and_changes_nothing() {
+        let mut app = mcp_app(true, None);
+        app.mcp_session_trusted.insert("Test tool".into());
+        let before = first_paragraph(&app);
+        let at = |paragraph, offset| Position { paragraph, offset };
+        let far = Request::ReplaceRange {
+            document: None,
+            start: at(99, 0),
+            end: at(99, 0),
+            text: "x".into(),
+        };
+        let result = send(&mut app, "Test tool", far).join().expect("asker");
+        assert!(matches!(result, Err(HostError::Other(m)) if m.contains("paragraph 99")));
+        let past_end = Request::ReplaceRange {
+            document: None,
+            start: at(0, 10_000),
+            end: at(0, 10_000),
+            text: "x".into(),
+        };
+        let result = send(&mut app, "Test tool", past_end).join().expect("asker");
+        assert!(matches!(result, Err(HostError::Other(_))), "{result:?}");
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn format_and_style_edits_work_and_are_one_undo_step_each() {
+        let mut app = mcp_app(true, None);
+        app.mcp_session_trusted.insert("Test tool".into());
+        let _ = send(&mut app, "Test tool", insert_request("Some title"))
+            .join()
+            .expect("asker");
+        let steps = |app: &App| app.doc.as_ref().expect("doc").editor().history().undo_len();
+        let base = steps(&app);
+        let at = |paragraph, offset| Position { paragraph, offset };
+
+        let italic = Request::FormatRange {
+            document: None,
+            start: at(0, 0),
+            end: at(0, 4),
+            format: libertum_mcp::FormatPatch {
+                italic: Some(true),
+                ..Default::default()
+            },
+        };
+        assert!(
+            send(&mut app, "Test tool", italic)
+                .join()
+                .expect("asker")
+                .is_ok()
+        );
+        assert_eq!(steps(&app), base + 1);
+
+        let style = Request::SetParagraphStyle {
+            document: None,
+            paragraph: 0,
+            style: "heading 1".into(),
+        };
+        assert!(
+            send(&mut app, "Test tool", style)
+                .join()
+                .expect("asker")
+                .is_ok()
+        );
+        assert_eq!(steps(&app), base + 2);
+        let level = app
+            .doc
+            .as_ref()
+            .expect("doc")
+            .document()
+            .paragraph_at(0)
+            .expect("paragraph")
+            .props
+            .outline_level;
+        assert!(level.is_some(), "the heading style gives an outline level");
+
+        let unknown = Request::SetParagraphStyle {
+            document: None,
+            paragraph: 0,
+            style: "No such style".into(),
+        };
+        let result = send(&mut app, "Test tool", unknown).join().expect("asker");
+        assert!(matches!(result, Err(HostError::Other(m)) if m.contains("No such style")));
+        assert_eq!(steps(&app), base + 2);
+    }
+
+    #[test]
+    fn client_names_are_made_safe_before_they_are_shown_or_remembered() {
+        assert_eq!(mcp::display_name("  Claude\n\tDesktop  "), "Claude Desktop");
+        assert_eq!(mcp::display_name("\u{7}\u{0}"), "an unnamed tool");
+        assert_eq!(mcp::display_name(&"x".repeat(500)).chars().count(), 61);
+    }
+
+    #[test]
     fn update_settings_are_saved_and_muting_keeps_the_version() {
         let dir = std::env::temp_dir().join(format!("libertum-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -11284,6 +12136,482 @@ Opened from Explorer.
         app.check_recovery();
         assert!(app.modal.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------ MCP tool runner
+
+    fn runner_app() -> App {
+        let mut app = mcp_app(false, None);
+        let _ = app.update(Message::Runner(RunnerMsg::Open));
+        app
+    }
+
+    /// Save a server the way the window's Add button does.
+    fn add_server(app: &mut App, name: &str, command: &str) {
+        let _ = app.update(Message::Runner(RunnerMsg::Name(name.into())));
+        let _ = app.update(Message::Runner(RunnerMsg::Command(command.into())));
+        let _ = app.update(Message::Runner(RunnerMsg::Add));
+    }
+
+    fn notice(app: &App) -> Option<&str> {
+        app.runner.as_ref().and_then(|r| r.notice.as_deref())
+    }
+
+    #[test]
+    fn the_runner_opens_only_while_mcp_is_on_and_closes_with_it() {
+        let mut off = App::new(Settings::default(), None);
+        let _ = off.update(Message::Runner(RunnerMsg::Open));
+        assert!(off.runner.is_none(), "closed gate, no window");
+
+        let mut dev_only = App::new(Settings::default(), None);
+        let _ = dev_only.update(Message::SetDevMode(true));
+        let _ = dev_only.update(Message::Runner(RunnerMsg::Open));
+        assert!(dev_only.runner.is_none(), "dev mode alone is not enough");
+
+        let mut app = runner_app();
+        assert!(app.runner.is_some());
+        let _ = app.update(Message::SetMcpEnabled(false));
+        assert!(app.runner.is_none(), "switching MCP off closes the window");
+        let _ = app.update(Message::Runner(RunnerMsg::Run));
+        assert!(app.runner.is_none(), "a late message does not reopen it");
+    }
+
+    #[test]
+    fn adding_a_server_checks_the_command_and_leaves_it_unapproved() {
+        let mut app = runner_app();
+        add_server(&mut app, "Notes", "npx -y \"some server\"");
+        assert_eq!(app.settings.mcp_servers.len(), 1);
+        assert!(!app.settings.mcp_servers[0].is_approved());
+        assert_eq!(app.runner.as_ref().expect("runner").selected, Some(0));
+        assert!(app.runner.as_ref().expect("runner").name_draft.is_empty());
+
+        add_server(&mut app, "Broken", "tool \"open");
+        assert_eq!(notice(&app), Some(s::RUNNER_ERR_COMMAND_QUOTE));
+        add_server(&mut app, "", "tool");
+        assert_eq!(notice(&app), Some(s::RUNNER_ERR_ADD));
+        add_server(&mut app, "Empty", "   ");
+        assert_eq!(notice(&app), Some(s::RUNNER_ERR_COMMAND_EMPTY));
+        assert_eq!(app.settings.mcp_servers.len(), 1, "nothing bad was saved");
+    }
+
+    #[test]
+    fn a_token_typed_with_a_web_address_is_saved_and_the_draft_cleared() {
+        let mut app = runner_app();
+        let _ = app.update(Message::Runner(RunnerMsg::Token("tok-abc".into())));
+        add_server(&mut app, "Web", "https://example.com/mcp");
+        assert_eq!(
+            app.settings.mcp_servers[0].token.as_deref(),
+            Some("tok-abc")
+        );
+        assert!(app.runner.as_ref().expect("runner").token_draft.is_empty());
+        assert_eq!(notice(&app), None);
+
+        // A program takes no token: the server is saved, the token is not, and the writer is told.
+        let _ = app.update(Message::Runner(RunnerMsg::Token("tok-xyz".into())));
+        add_server(&mut app, "Prog", "libertum-no-such-program-0f3a");
+        assert_eq!(app.settings.mcp_servers[1].token, None);
+        assert!(notice(&app).is_some_and(|n| n.contains("token")));
+        assert!(app.runner.as_ref().expect("runner").token_draft.is_empty());
+    }
+
+    #[test]
+    fn a_program_is_never_started_without_approval() {
+        let mut app = runner_app();
+        add_server(&mut app, "Notes", "libertum-no-such-program-0f3a");
+        let _ = app.update(Message::Runner(RunnerMsg::Connect(0)));
+        let runner = app.runner.as_ref().expect("runner");
+        assert!(
+            matches!(runner.link, Link::Idle),
+            "Connect alone does nothing"
+        );
+        assert_eq!(runner.generation, 0, "no attempt was even begun");
+    }
+
+    #[test]
+    fn approval_starts_one_attempt_and_a_failed_start_is_reported() {
+        let mut app = runner_app();
+        add_server(&mut app, "Notes", "libertum-no-such-program-0f3a");
+        let _ = app.update(Message::Runner(RunnerMsg::ApproveAndConnect(0)));
+        assert!(app.settings.mcp_servers[0].is_approved());
+        let runner = app.runner.as_ref().expect("runner");
+        assert!(matches!(runner.link, Link::Connecting(0)));
+        let generation = runner.generation;
+
+        // An answer to some older attempt changes nothing.
+        let _ = app.update(Message::Runner(RunnerMsg::Connected(
+            generation + 7,
+            Err("old".into()),
+        )));
+        assert!(matches!(
+            app.runner.as_ref().expect("runner").link,
+            Link::Connecting(0)
+        ));
+
+        let _ = app.update(Message::Runner(RunnerMsg::Connected(
+            generation,
+            Err("no such file".into()),
+        )));
+        let runner = app.runner.as_ref().expect("runner");
+        assert!(matches!(runner.link, Link::Idle));
+        assert!(notice(&app).is_some_and(
+            |n| n.starts_with(s::RUNNER_ERR_CONNECT) && n.contains("no such file")
+        ));
+    }
+
+    #[test]
+    fn changing_the_command_asks_for_approval_again() {
+        let mut app = runner_app();
+        add_server(&mut app, "Notes", "libertum-no-such-program-0f3a");
+        let _ = app.update(Message::Runner(RunnerMsg::ApproveAndConnect(0)));
+        let _ = app.update(Message::Runner(RunnerMsg::Disconnect));
+        // The file is edited by hand to run something else.
+        app.settings.mcp_servers[0].command_line = "libertum-other-program".into();
+        let _ = app.update(Message::Runner(RunnerMsg::Connect(0)));
+        assert!(
+            matches!(app.runner.as_ref().expect("runner").link, Link::Idle),
+            "the new command was never approved"
+        );
+    }
+
+    #[test]
+    fn removing_a_server_ends_the_connection_and_the_selection() {
+        let mut app = runner_app();
+        add_server(&mut app, "One", "a");
+        add_server(&mut app, "Two", "b");
+        let _ = app.update(Message::Runner(RunnerMsg::ApproveAndConnect(1)));
+        let before = app.runner.as_ref().expect("runner").generation;
+        let _ = app.update(Message::Runner(RunnerMsg::Remove(0)));
+        let runner = app.runner.as_ref().expect("runner");
+        assert!(matches!(runner.link, Link::Idle));
+        assert!(runner.selected.is_none());
+        assert!(
+            runner.generation > before,
+            "an answer still on its way is ignored"
+        );
+        assert_eq!(app.settings.mcp_servers.len(), 1);
+        assert_eq!(app.settings.mcp_servers[0].name, "Two");
+    }
+
+    #[test]
+    fn tools_fill_the_list_and_picking_one_builds_its_form() {
+        let mut app = runner_app();
+        let generation = app.runner.as_ref().expect("runner").generation;
+        let tool = libertum_mcp::ToolInfo {
+            name: "search".into(),
+            description: "Find things".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+        };
+        let _ = app.update(Message::Runner(RunnerMsg::Tools(
+            generation + 1,
+            Ok(vec![tool.clone()]),
+        )));
+        assert!(
+            app.runner.as_ref().expect("runner").tools.is_empty(),
+            "a stale list is ignored"
+        );
+        let _ = app.update(Message::Runner(RunnerMsg::Tools(
+            generation,
+            Ok(vec![tool]),
+        )));
+        let _ = app.update(Message::Runner(RunnerMsg::PickTool(0)));
+        let _ = app.update(Message::Runner(RunnerMsg::Field(0, "needle".into())));
+        let runner = app.runner.as_ref().expect("runner");
+        assert_eq!(runner.fields.len(), 1);
+        assert_eq!(runner.fields[0].value, "needle");
+        // Not connected, so Run does nothing rather than failing.
+        let _ = app.update(Message::Runner(RunnerMsg::Run));
+        assert!(!app.runner.as_ref().expect("runner").running);
+    }
+
+    #[test]
+    fn inserting_a_result_is_one_undo_step() {
+        let mut app = runner_app();
+        let before = first_paragraph(&app);
+        let undo_before = app.doc.as_ref().expect("doc").editor().history().undo_len();
+        app.runner.as_mut().expect("runner").result = Some(CallResult {
+            text: "from a tool".into(),
+            is_error: false,
+            truncated: false,
+        });
+        let _ = app.update(Message::Runner(RunnerMsg::Insert));
+        assert_eq!(first_paragraph(&app), format!("from a tool{before}"));
+        assert!(app.dirty);
+        let doc = app.doc.as_mut().expect("doc");
+        assert_eq!(doc.editor().history().undo_len(), undo_before + 1);
+        doc.undo().expect("undo");
+        assert_eq!(first_paragraph(&app), before);
+    }
+
+    /// Put a recipe in the open runner window, as if it had been read from the folder.
+    fn add_recipe(app: &mut App, toml: &str) -> usize {
+        let runner = app.runner.as_mut().expect("runner");
+        runner.macros.push(crate::macros::RecipeFile {
+            file: "test.toml".into(),
+            recipe: crate::macros::parse(toml),
+        });
+        runner.macros.len() - 1
+    }
+
+    fn macro_status(app: &App) -> String {
+        app.runner
+            .as_ref()
+            .and_then(|r| r.macro_status.clone())
+            .unwrap_or_default()
+    }
+
+    const SHOUT: &str = "name = 'Shout'
+        [[steps]]
+kind = 'get_selection'
+save_as = 't'
+        [[steps]]
+kind = 'replace_selection'
+text = '{{t}}!'
+        [[steps]]
+kind = 'insert'
+text = ' [done]'
+";
+
+    #[test]
+    fn a_macro_run_is_one_undo_step_and_undo_restores_the_text() {
+        let mut app = runner_app();
+        let index = add_recipe(&mut app, SHOUT);
+        let before = first_paragraph(&app);
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let undo_before = app.doc.as_ref().expect("doc").editor().history().undo_len();
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        assert!(
+            macro_status(&app).starts_with("Finished"),
+            "{}",
+            macro_status(&app)
+        );
+        assert!(app.runner.as_ref().expect("runner").macro_run.is_none());
+        assert!(app.dirty);
+        assert!(
+            paragraph_texts(&app).iter().any(|t| t.contains("! [done]")),
+            "the text was replaced and the insert came after it"
+        );
+        let doc = app.doc.as_mut().expect("doc");
+        assert_eq!(doc.editor().history().undo_len(), undo_before + 1);
+        doc.undo().expect("undo");
+        assert_eq!(first_paragraph(&app), before);
+    }
+
+    #[test]
+    fn a_script_step_transforms_the_selection_and_a_failing_one_changes_nothing() {
+        let mut app = runner_app();
+        let good = add_recipe(
+            &mut app,
+            "name = 'Upper'
+             [[steps]]
+kind = 'get_selection'
+save_as = 't'
+             [[steps]]
+kind = 'script'
+save_as = 'u'
+code = 't.to_uppercase()'
+             [[steps]]
+kind = 'replace_selection'
+text = '{{u}}'
+",
+        );
+        let before = first_paragraph(&app);
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(good)));
+        assert!(
+            macro_status(&app).starts_with("Finished"),
+            "{}",
+            macro_status(&app)
+        );
+        assert_eq!(first_paragraph(&app), before.to_uppercase());
+        let doc = app.doc.as_mut().expect("doc");
+        doc.undo().expect("undo");
+        assert_eq!(first_paragraph(&app), before);
+
+        // A script that fails at run time stops the recipe before it edits anything.
+        let bad = add_recipe(
+            &mut app,
+            "name = 'Bad'
+             [[steps]]
+kind = 'get_selection'
+save_as = 't'
+             [[steps]]
+kind = 'script'
+save_as = 'u'
+code = 't.no_such_method()'
+             [[steps]]
+kind = 'replace_selection'
+text = '{{u}}'
+",
+        );
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(bad)));
+        assert!(
+            macro_status(&app).starts_with("Stopped"),
+            "{}",
+            macro_status(&app)
+        );
+        assert_eq!(first_paragraph(&app), before);
+    }
+
+    #[test]
+    fn a_macro_without_a_selection_stops_before_changing_anything() {
+        let mut app = runner_app();
+        let index = add_recipe(&mut app, SHOUT);
+        let before = first_paragraph(&app);
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        assert!(
+            macro_status(&app).starts_with("Stopped"),
+            "{}",
+            macro_status(&app)
+        );
+        assert_eq!(first_paragraph(&app), before);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn a_recipe_with_a_stray_field_is_not_runnable() {
+        let mut app = runner_app();
+        let index = add_recipe(
+            &mut app,
+            "name = 'x'
+[[steps]]
+kind = 'get_selection'
+save_as = 't'
+             [[steps]]
+kind = 'call_tool'
+tool = 'noop'
+             [[steps]]
+kind = 'replace_selection'
+text = 'y'
+server = 'S'
+",
+        );
+        // That recipe is invalid (a step with a stray field); it must not be runnable.
+        assert!(
+            app.runner.as_ref().expect("runner").macros[index]
+                .recipe
+                .is_err()
+        );
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        assert!(app.runner.as_ref().expect("runner").macro_run.is_none());
+    }
+
+    #[test]
+    fn a_recipe_that_needs_a_program_waits_for_it_to_be_connected() {
+        let mut app = runner_app();
+        let index = add_recipe(
+            &mut app,
+            "name = 'x'
+server = 'Notes'
+[[steps]]
+kind = 'call_tool'
+tool = 't'
+",
+        );
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        assert!(macro_status(&app).contains("Connect this program first"));
+        assert!(app.runner.as_ref().expect("runner").macro_run.is_none());
+    }
+
+    #[test]
+    fn editing_while_a_macro_waits_stops_it_and_keeps_the_writers_edit_apart() {
+        let mut app = runner_app();
+        let index = add_recipe(&mut app, SHOUT);
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        // Start a fresh run by hand at the insert step, as if a tool call were out, then let
+        // the writer type before it resumes.
+        let runner = app.runner.as_mut().expect("runner");
+        let recipe = crate::macros::parse(SHOUT).expect("recipe");
+        let undo_now = app.doc.as_ref().expect("doc").editor().history().undo_len();
+        runner.macro_serial += 1;
+        runner.macro_run = Some(crate::mcp_runner::MacroRun {
+            recipe,
+            serial: runner.macro_serial,
+            next: 2,
+            vars: Default::default(),
+            pending_save: None,
+            selection: None,
+            undo_before: undo_now,
+            expected_undo: undo_now,
+            edited: false,
+        });
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .edit(|ed| ed.insert_text("typed"))
+            .expect("typing");
+        let serial = app.runner.as_ref().expect("runner").macro_serial;
+        let _ = app.update(Message::Runner(RunnerMsg::MacroCalled(
+            serial,
+            Ok(libertum_mcp::ToolOutput {
+                text: "answer".into(),
+                is_error: false,
+                truncated: false,
+            }),
+        )));
+        assert!(
+            macro_status(&app).contains("edited while"),
+            "{}",
+            macro_status(&app)
+        );
+        assert!(
+            !first_paragraph(&app).contains("[done]"),
+            "nothing was inserted"
+        );
+        // A stale answer for a run that is over changes nothing.
+        let _ = app.update(Message::Runner(RunnerMsg::MacroCalled(
+            serial,
+            Ok(libertum_mcp::ToolOutput {
+                text: "late".into(),
+                is_error: false,
+                truncated: false,
+            }),
+        )));
+        assert!(!first_paragraph(&app).contains("late"));
+    }
+
+    #[test]
+    fn a_cut_tool_result_is_never_used() {
+        let mut app = runner_app();
+        let index = add_recipe(&mut app, SHOUT);
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let _ = app.update(Message::Runner(RunnerMsg::RunMacro(index)));
+        let runner = app.runner.as_mut().expect("runner");
+        runner.macro_serial += 1;
+        runner.macro_run = Some(crate::mcp_runner::MacroRun {
+            recipe: crate::macros::parse(SHOUT).expect("recipe"),
+            serial: runner.macro_serial,
+            next: 2,
+            vars: Default::default(),
+            pending_save: Some("v".into()),
+            selection: None,
+            undo_before: 0,
+            expected_undo: 0,
+            edited: false,
+        });
+        let serial = runner.macro_serial;
+        let _ = app.update(Message::Runner(RunnerMsg::MacroCalled(
+            serial,
+            Ok(libertum_mcp::ToolOutput {
+                text: "partial".into(),
+                is_error: false,
+                truncated: true,
+            }),
+        )));
+        assert!(macro_status(&app).contains("cut"), "{}", macro_status(&app));
+    }
+
+    #[test]
+    fn escape_closes_the_runner_first() {
+        let mut app = runner_app();
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(app.runner.is_none());
     }
 }
 

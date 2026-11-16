@@ -14,8 +14,15 @@ mod icons;
 mod inspector;
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_icon;
+mod macros;
+mod mcp;
+mod mcp_runner;
 mod perf;
 mod recovery;
+mod script;
+
+#[global_allocator]
+static ALLOCATOR: script::Counting = script::Counting;
 mod settings;
 mod shortcuts;
 mod spell;

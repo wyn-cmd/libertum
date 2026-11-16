@@ -23,10 +23,12 @@ libertum-rtf = { workspace = true }
 libertum-native = { workspace = true }
 libertum-library = { workspace = true }
 libertum-formats-common = { workspace = true }
+libertum-mcp = { workspace = true }
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+koto = { workspace = true }
 directories = { workspace = true }
 zspell = { workspace = true }
 tracing = { workspace = true }

@@ -65,6 +65,9 @@ pub enum EditorError {
     /// Merging across a section start would renumber every later section.
     #[error("a section boundary cannot be merged away")]
     SectionBoundary,
+    /// A position or range given from outside (not the writer's own selection) is not valid.
+    #[error("invalid range: {0}")]
+    InvalidRange(&'static str),
 }
 
 /// The selection's character formatting, property by property: `Some` when uniform across
@@ -283,6 +286,11 @@ impl Editor {
         self.history.can_undo()
     }
 
+    /// Joins the last `count` undo steps into one (see [`History::merge_last`]).
+    pub fn merge_last_undo_steps(&mut self, count: usize) -> bool {
+        self.history.merge_last(count)
+    }
+
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
     }
@@ -411,16 +419,36 @@ impl Editor {
 
     /// Same as [`insert_text`](Self::insert_text), with an explicit clock for coalescing tests.
     pub fn insert_text_at(&mut self, now: Instant, text: &str) -> Result<ChangeSet, EditorError> {
+        self.insert_text_impl(now, text, false)
+    }
+
+    /// Inserts text that did not come from the writer's keyboard, for example a tool's output:
+    /// always its own undo step, never joined to typing, and the writer's pending formatting is
+    /// neither applied nor used up.
+    pub fn insert_text_separately(&mut self, text: &str) -> Result<ChangeSet, EditorError> {
+        self.insert_text_impl(Instant::now(), text, true)
+    }
+
+    /// The body of [`insert_text_at`](Self::insert_text_at). `external` marks an edit made on
+    /// someone else's behalf: it is always its own undo step, Return on an empty list item
+    /// inserts a paragraph break instead of ending the list, and the writer's pending
+    /// formatting is neither applied nor used up.
+    fn insert_text_impl(
+        &mut self,
+        now: Instant,
+        text: &str,
+        external: bool,
+    ) -> Result<ChangeSet, EditorError> {
         let text = normalise_newlines(text);
         if text.is_empty() {
             return Ok(ChangeSet::default());
         }
         self.guard_caret()?;
-        if text == "\n" && !self.has_selection() && self.caret_in_empty_list_item() {
+        if !external && text == "\n" && !self.has_selection() && self.caret_in_empty_list_item() {
             // Return on an empty list item ends the list there (Word, Pages).
             return self.set_list(None);
         }
-        let pending = self.take_pending();
+        let pending = if external { None } else { self.take_pending() };
         let mut b = EditBuilder::default();
         let mut caret = self.delete_selection_into(&mut b)?;
         let mut dirty_blocks = b.dirty.clone();
@@ -469,7 +497,8 @@ impl Editor {
         self.sync_toc(&mut b)?;
         dirty_blocks.merge(b.dirty.clone());
 
-        let kind = if b.forward.len() == 1
+        let kind = if !external
+            && b.forward.len() == 1
             && !text.contains('\n')
             && text.chars().count() == 1
             && self.selection.is_collapsed()
@@ -2590,6 +2619,136 @@ impl Editor {
         let anchor = self.clamp(self.selection.anchor);
         self.selection = Selection { anchor, head };
         self.preferred_x = None;
+    }
+
+    // ------------------------------------------------------------ edits on someone else's behalf
+
+    /// Checks a range given from outside. Unlike [`set_selection`](Self::set_selection) it
+    /// never clamps: a bad range is an error, so nothing is edited by surprise.
+    fn check_range(&self, start: DocPosition, end: DocPosition) -> Result<(), EditorError> {
+        for pos in [start, end] {
+            let p = self
+                .doc
+                .paragraph(pos.block)
+                .ok_or(EditorError::InvalidRange("no such paragraph"))?;
+            if pos.offset > p.len() || !p.text().is_char_boundary(pos.offset) {
+                return Err(EditorError::InvalidRange(
+                    "offset is past the end or inside a character",
+                ));
+            }
+        }
+        let (Some(si), Some(ei)) = (self.doc.index_of(start.block), self.doc.index_of(end.block))
+        else {
+            return Err(EditorError::InvalidRange("no such paragraph"));
+        };
+        if (si, start.offset) > (ei, end.offset) {
+            return Err(EditorError::InvalidRange("start is after end"));
+        }
+        if !self.same_cell(start, end) {
+            return Err(EditorError::InvalidRange(
+                "a range cannot cross a table cell boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Puts the writer's selection back after an outside edit, when both its ends still exist
+    /// and the edit did not touch their paragraphs; otherwise leaves the caret where the
+    /// edit ended.
+    fn restore_selection_after(&mut self, saved: Selection, change: &ChangeSet) {
+        let untouched = |pos: DocPosition| {
+            self.doc
+                .paragraph(pos.block)
+                .is_some_and(|p| pos.offset <= p.len())
+                && !change.dirty.contains(&pos.block)
+        };
+        if untouched(saved.anchor) && untouched(saved.head) {
+            self.selection = saved;
+            self.preferred_x = None;
+        }
+    }
+
+    /// Replaces `start..end` with `text` (a deletion when `text` is empty) as one undo step of
+    /// its own: it never merges with the writer's typing, and the writer's pending formatting
+    /// is left alone. For edits that come from outside, such as an MCP client.
+    pub fn replace_range(
+        &mut self,
+        start: DocPosition,
+        end: DocPosition,
+        text: &str,
+    ) -> Result<ChangeSet, EditorError> {
+        self.check_range(start, end)?;
+        let saved = self.selection;
+        let saved_pending = self.pending.clone();
+        self.selection = Selection {
+            anchor: start,
+            head: end,
+        };
+        let now = Instant::now();
+        let result = if normalise_newlines(text).is_empty() {
+            if start == end {
+                Ok(ChangeSet::default())
+            } else {
+                self.delete_selection_transaction(now)
+            }
+        } else {
+            self.insert_text_impl(now, text, true)
+        };
+        self.pending = saved_pending;
+        match result {
+            Ok(change) => {
+                self.restore_selection_after(saved, &change);
+                Ok(change)
+            }
+            Err(e) => {
+                self.selection = saved;
+                Err(e)
+            }
+        }
+    }
+
+    /// Lays `patch` over `start..end` as one undo step. An empty range changes nothing (unlike
+    /// [`format_selection`](Self::format_selection), it never sets pending formatting), and the
+    /// writer's selection is left exactly as it was.
+    pub fn format_range(
+        &mut self,
+        start: DocPosition,
+        end: DocPosition,
+        patch: &CharFormat,
+    ) -> Result<ChangeSet, EditorError> {
+        self.check_range(start, end)?;
+        if start == end {
+            return Ok(ChangeSet::default());
+        }
+        let saved = self.selection;
+        self.selection = Selection {
+            anchor: start,
+            head: end,
+        };
+        let result = self.format_selection(patch);
+        self.selection = saved;
+        self.preferred_x = None;
+        result
+    }
+
+    /// Applies paragraph style `style` to the paragraph at `index` as one undo step, leaving
+    /// the writer's selection alone.
+    pub fn set_paragraph_style_at(
+        &mut self,
+        index: usize,
+        style: StyleId,
+    ) -> Result<ChangeSet, EditorError> {
+        let block = self
+            .doc
+            .paragraph_at(index)
+            .map(|p| p.id)
+            .ok_or(EditorError::InvalidRange("no such paragraph"))?;
+        let saved = self.selection;
+        self.selection = Selection::caret(DocPosition { block, offset: 0 });
+        let result = self.set_paragraph_style(style);
+        self.selection = saved;
+        self.preferred_x = None;
+        result
     }
 
     // ------------------------------------------------------------ helpers

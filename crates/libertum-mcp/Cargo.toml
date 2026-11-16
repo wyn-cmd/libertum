@@ -1,0 +1,19 @@
+[package]
+name = "libertum-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rmcp = { workspace = true, features = ["server", "client", "transport-child-process", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "reqwest-native-tls"] }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "process"] }
+axum = { workspace = true, features = ["tokio", "http1"] }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["transport-io"] }

@@ -2410,3 +2410,218 @@ fn page_setup_at_the_caret_changes_only_its_section() {
     ed.undo().expect("undo");
     assert_eq!(ed.document().sections[1].page, PageSetup::a4());
 }
+
+// ---------------------------------------------------------------- outside edits
+
+#[test]
+fn replace_range_is_one_undo_step_and_undo_is_exact() {
+    let mut ed = editor(&["hello world", "second"]);
+    let before = ed.document().clone();
+    let change = ed
+        .replace_range(pos(&ed, 0, 6), pos(&ed, 0, 11), "there")
+        .unwrap();
+    assert!(!change.dirty.is_empty());
+    assert_eq!(text_at(&ed, 0), "hello there");
+    assert_eq!(ed.history().undo_len(), 1);
+    ed.undo().unwrap();
+    assert!(ed.document().content_eq(&before));
+    ed.redo().unwrap();
+    assert_eq!(text_at(&ed, 0), "hello there");
+}
+
+#[test]
+fn replace_range_with_empty_text_deletes_and_across_paragraphs_joins() {
+    let mut ed = editor(&["alpha", "beta"]);
+    ed.replace_range(pos(&ed, 0, 2), pos(&ed, 1, 2), "")
+        .unwrap();
+    assert_eq!(ed.document().len(), 1);
+    assert_eq!(text_at(&ed, 0), "alta");
+    assert_eq!(ed.history().undo_len(), 1);
+    // Nothing to delete is not an edit.
+    let n = ed.history().undo_len();
+    ed.replace_range(pos(&ed, 0, 1), pos(&ed, 0, 1), "")
+        .unwrap();
+    assert_eq!(ed.history().undo_len(), n);
+}
+
+#[test]
+fn replace_range_does_not_coalesce_with_the_writers_typing() {
+    let mut ed = editor(&["abc", ""]);
+    let t0 = Instant::now();
+    ed.set_caret(pos(&ed, 1, 0), false);
+    ed.insert_text_at(t0, "x").unwrap();
+    // A single character inserted by someone else must not join the typing run.
+    ed.replace_range(pos(&ed, 0, 0), pos(&ed, 0, 0), "y")
+        .unwrap();
+    assert_eq!(ed.history().undo_len(), 2);
+    ed.undo().unwrap();
+    assert_eq!(text_at(&ed, 0), "abc");
+    assert_eq!(text_at(&ed, 1), "x");
+}
+
+#[test]
+fn replace_range_keeps_the_writers_selection_and_pending_format() {
+    let mut ed = editor(&["first line", "second line"]);
+    ed.set_selection(pos(&ed, 1, 2), pos(&ed, 1, 6));
+    let saved = ed.selection();
+    ed.replace_range(pos(&ed, 0, 0), pos(&ed, 0, 5), "FIRST")
+        .unwrap();
+    assert_eq!(ed.selection(), saved);
+
+    // Pending bold for the writer's caret survives an outside edit elsewhere.
+    ed.set_caret(pos(&ed, 1, 0), false);
+    ed.format_selection(&CharFormat {
+        weight: Some(700),
+        ..CharFormat::default()
+    })
+    .unwrap();
+    ed.replace_range(pos(&ed, 0, 0), pos(&ed, 0, 0), "z")
+        .unwrap();
+    ed.insert_text("B").unwrap();
+    let p = ed.document().paragraph_at(1).unwrap();
+    assert!(p.runs().iter().any(|r| r.format.weight == Some(700)));
+}
+
+#[test]
+fn replace_range_moves_the_caret_when_it_edits_the_writers_paragraph() {
+    let mut ed = editor(&["abcdef"]);
+    ed.set_caret(pos(&ed, 0, 4), false);
+    ed.replace_range(pos(&ed, 0, 0), pos(&ed, 0, 6), "xy")
+        .unwrap();
+    assert_eq!(ed.caret(), pos(&ed, 0, 2));
+}
+
+#[test]
+fn replace_range_rejects_bad_ranges_without_changing_anything() {
+    let mut ed = editor(&["héllo", "two"]);
+    let before = ed.document().clone();
+    let bad = [
+        (pos(&ed, 0, 0), pos(&ed, 0, 99)),
+        (pos(&ed, 0, 2), pos(&ed, 0, 3)), // inside the two-byte é
+        (pos(&ed, 1, 0), pos(&ed, 0, 0)), // start after end
+        (
+            DocPosition {
+                block: BlockId(9999),
+                offset: 0,
+            },
+            pos(&ed, 0, 0),
+        ),
+    ];
+    for (a, b) in bad {
+        assert!(matches!(
+            ed.replace_range(a, b, "x"),
+            Err(EditorError::InvalidRange(_))
+        ));
+    }
+    assert!(ed.document().content_eq(&before));
+    assert_eq!(ed.history().undo_len(), 0);
+}
+
+#[test]
+fn replace_range_inserts_paragraph_breaks_even_on_an_empty_list_item() {
+    let mut ed = editor(&["item"]);
+    ed.set_caret(pos(&ed, 0, 4), false);
+    ed.set_list(Some(ListStyle::Bullet)).ok();
+    ed.replace_range(pos(&ed, 0, 4), pos(&ed, 0, 4), "\nmore")
+        .unwrap();
+    assert_eq!(ed.document().len(), 2);
+    assert_eq!(text_at(&ed, 1), "more");
+}
+
+#[test]
+fn format_range_is_one_undo_step_and_leaves_the_selection() {
+    let mut ed = editor(&["hello world"]);
+    ed.set_selection(pos(&ed, 0, 1), pos(&ed, 0, 2));
+    let saved = ed.selection();
+    let before = ed.document().clone();
+    ed.format_range(
+        pos(&ed, 0, 0),
+        pos(&ed, 0, 5),
+        &CharFormat {
+            weight: Some(700),
+            ..CharFormat::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(ed.selection(), saved);
+    assert_eq!(ed.history().undo_len(), 1);
+    ed.undo().unwrap();
+    assert!(ed.document().content_eq(&before));
+}
+
+#[test]
+fn format_range_on_an_empty_range_changes_nothing() {
+    let mut ed = editor(&["hello"]);
+    let change = ed
+        .format_range(
+            pos(&ed, 0, 2),
+            pos(&ed, 0, 2),
+            &CharFormat {
+                italic: Some(true),
+                ..CharFormat::default()
+            },
+        )
+        .unwrap();
+    assert!(change.dirty.is_empty());
+    assert_eq!(ed.history().undo_len(), 0);
+    // No pending format was left for the next typing either.
+    ed.set_caret(pos(&ed, 0, 2), false);
+    ed.insert_text("x").unwrap();
+    let p = ed.document().paragraph_at(0).unwrap();
+    assert!(p.runs().iter().all(|r| r.format.italic.is_none()));
+}
+
+#[test]
+fn set_paragraph_style_at_changes_only_that_paragraph() {
+    let mut ed = editor(&["one", "two"]);
+    let style = StyleId(
+        ed.document()
+            .styles
+            .paragraph
+            .iter()
+            .position(|s| s.name.starts_with("Heading"))
+            .expect("a heading style") as _,
+    );
+    ed.set_caret(pos(&ed, 0, 1), false);
+    let saved = ed.selection();
+    ed.set_paragraph_style_at(1, style).unwrap();
+    assert_eq!(ed.selection(), saved);
+    assert_eq!(ed.document().paragraph_at(1).unwrap().props.style, style);
+    assert_ne!(ed.document().paragraph_at(0).unwrap().props.style, style);
+    assert_eq!(ed.history().undo_len(), 1);
+    assert!(matches!(
+        ed.set_paragraph_style_at(9, style),
+        Err(EditorError::InvalidRange(_))
+    ));
+}
+
+#[test]
+fn separate_insert_is_its_own_undo_step_and_is_not_made_bold_by_pending_format() {
+    let mut ed = editor(&["abc"]);
+    let t0 = Instant::now();
+    ed.set_caret(pos(&ed, 0, 3), false);
+    ed.insert_text_at(t0, "x").unwrap();
+    // One character right after typing would normally join the typing run.
+    ed.insert_text_separately("y").unwrap();
+    assert_eq!(text_at(&ed, 0), "abcxy");
+    assert_eq!(ed.history().undo_len(), 2);
+    ed.undo().unwrap();
+    assert_eq!(text_at(&ed, 0), "abcx");
+
+    // Pending bold is for the writer's next keystroke, not for a tool's output.
+    ed.format_selection(&CharFormat {
+        weight: Some(700),
+        ..CharFormat::default()
+    })
+    .unwrap();
+    ed.insert_text_separately("Z").unwrap();
+    let p = ed.document().paragraph_at(0).unwrap();
+    let whole = text_at(&ed, 0);
+    assert!(
+        p.runs()
+            .iter()
+            .filter(|r| r.format.weight == Some(700))
+            .all(|r| !whole[r.range.clone()].contains('Z')),
+        "the inserted text is not bold"
+    );
+}

@@ -1320,3 +1320,35 @@ fn page_numbering_counts_from_the_chosen_page() {
         1
     );
 }
+
+#[test]
+fn merged_steps_undo_and_redo_as_one() {
+    let mut doc = doc_with(&["abc"]);
+    let a = para_id(&doc, 0);
+    let mut h = History::new(100);
+    let before = doc.clone();
+    let mut now = Instant::now();
+    for (offset, text) in [(3, "d"), (4, "e"), (5, "f")] {
+        let fwd = vec![Operation::InsertText {
+            block: a,
+            offset,
+            text: text.into(),
+            format: None,
+        }];
+        let inv = doc.apply_transaction(fwd.clone()).unwrap();
+        now += std::time::Duration::from_secs(5);
+        h.record(HistoryEntry::new(fwd, inv, EditKind::Typing), now);
+    }
+    let after = doc.clone();
+    assert_eq!(h.undo_len(), 3);
+    assert!(!h.merge_last(1), "one step is nothing to merge");
+    assert!(!h.merge_last(4), "more than held");
+    assert_eq!(h.undo_len(), 3);
+    assert!(h.merge_last(3));
+    assert_eq!(h.undo_len(), 1);
+    h.undo(&mut doc).unwrap();
+    assert!(doc.content_eq(&before), "one undo reverts the whole run");
+    assert!(!h.can_undo());
+    h.redo(&mut doc).unwrap();
+    assert!(doc.content_eq(&after), "one redo repeats it");
+}

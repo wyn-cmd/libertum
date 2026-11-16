@@ -106,6 +106,83 @@ pub struct Settings {
     /// A release version the writer muted, with the time the mute ends (`None` = forever
     /// for that version; a newer version still prompts).
     pub update_mute: Option<UpdateMute>,
+    /// Developer features. Off by default; everything under it (MCP, macros) stays hidden and
+    /// inert until this is on. See `docs/mcp-plan.md`.
+    pub dev_mode: bool,
+    /// MCP connectors (Libertum as an MCP server and client). Can only be on while
+    /// `dev_mode` is on: use [`Settings::set_dev_mode`] and [`Settings::set_mcp_enabled`].
+    pub mcp_enabled: bool,
+    /// Let MCP clients change documents (otherwise they can only read). Off by default, and it
+    /// can only be on while MCP is: use [`Settings::set_mcp_allow_edits`]. Even then each
+    /// client asks the writer before its first edit.
+    pub mcp_allow_edits: bool,
+    /// Clients the writer chose "Always allow" for, by the name they announce. The name is the
+    /// client's own claim; the bearer token is what keeps strangers out.
+    pub mcp_trusted_clients: Vec<String>,
+    /// Programs the writer saved to run as MCP servers from the tool runner.
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// Most memory one recipe script may hold, in megabytes (developer mode). 512 MB by default.
+    #[serde(default = "default_script_memory_mb")]
+    pub script_memory_mb: u32,
+    /// Memory that scripts stopped for using too much may leave behind, all together, before
+    /// no script runs until Libertum restarts (megabytes). 1 GB by default.
+    #[serde(default = "default_script_total_memory_mb")]
+    pub script_total_memory_mb: u32,
+}
+
+fn default_script_memory_mb() -> u32 {
+    crate::script::DEFAULT_MEMORY_MB
+}
+
+fn default_script_total_memory_mb() -> u32 {
+    crate::script::DEFAULT_TOTAL_MEMORY_MB
+}
+
+/// Most MCP servers the writer can save, so a hand-edited file cannot grow without bound.
+pub const MAX_MCP_SERVERS: usize = 20;
+/// Longest saved server name or command line, in characters.
+pub const MAX_MCP_NAME_CHARS: usize = 60;
+pub const MAX_MCP_COMMAND_CHARS: usize = 500;
+
+/// A program Libertum can start as an MCP server and call tools on (developer mode only).
+/// It is never started until the writer has approved this exact command line.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    /// What is run, as typed: the program, then its arguments. Quote an argument that holds
+    /// spaces with double quotes.
+    pub command_line: String,
+    /// The command line the writer approved. Changing `command_line` makes this stale, so the
+    /// writer is asked again.
+    #[serde(default)]
+    pub approved_line: Option<String>,
+    /// An optional bearer token for a web address, sent as `Authorization: Bearer <token>`. It
+    /// is kept in the settings file as plain text (anyone who can read your files can read
+    /// it), is only sent to the approved address over https or to this computer, and is never
+    /// shown again or written to a log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command_line", &self.command_line)
+            .field("approved_line", &self.approved_line)
+            .field("token", &self.token.as_ref().map(|_| "<hidden>"))
+            .finish()
+    }
+}
+
+/// Longest token accepted, in characters.
+pub const MAX_MCP_TOKEN_CHARS: usize = 2000;
+
+impl McpServerConfig {
+    /// Whether the command line as it stands now is the one the writer approved.
+    pub fn is_approved(&self) -> bool {
+        self.approved_line.as_deref() == Some(self.command_line.as_str())
+    }
 }
 
 impl UnitsPreference {
@@ -123,6 +200,121 @@ impl Settings {
     /// The measurement units the inspector should use.
     pub fn units(&self) -> Units {
         self.units.to_units()
+    }
+
+    /// Turn developer mode on or off. Turning it off also turns off everything under it.
+    pub fn set_dev_mode(&mut self, on: bool) {
+        self.dev_mode = on;
+        if !on {
+            self.mcp_enabled = false;
+            self.mcp_allow_edits = false;
+        }
+    }
+
+    /// Turn MCP connectors on or off. Refused (returns `false`) while developer mode is off.
+    /// Turning MCP off also turns editing through it off.
+    pub fn set_mcp_enabled(&mut self, on: bool) -> bool {
+        if on && !self.dev_mode {
+            return false;
+        }
+        self.mcp_enabled = on;
+        if !on {
+            self.mcp_allow_edits = false;
+        }
+        true
+    }
+
+    /// Let MCP clients edit, or stop them. Refused (returns `false`) unless MCP is on.
+    pub fn set_mcp_allow_edits(&mut self, on: bool) -> bool {
+        if on && !self.mcp_active() {
+            return false;
+        }
+        self.mcp_allow_edits = on;
+        true
+    }
+
+    /// Whether MCP clients may be offered edits at all: MCP on and Allow edits on.
+    pub fn mcp_edits_allowed(&self) -> bool {
+        self.mcp_active() && self.mcp_allow_edits
+    }
+
+    /// Whether the writer chose "Always allow" for this client.
+    pub fn mcp_trusts(&self, client: &str) -> bool {
+        self.mcp_trusted_clients.iter().any(|c| c == client)
+    }
+
+    /// Remember "Always allow" for a client (once).
+    pub fn trust_mcp_client(&mut self, client: &str) {
+        if !self.mcp_trusts(client) {
+            self.mcp_trusted_clients.push(client.to_owned());
+        }
+    }
+
+    /// Forget every "Always allow" (each client asks again).
+    pub fn forget_mcp_clients(&mut self) {
+        self.mcp_trusted_clients.clear();
+    }
+
+    /// Save a server. The name and command line are trimmed; `None` when either is empty, too
+    /// long, or the list is full. Returns the new entry's index. It starts unapproved.
+    pub fn add_mcp_server(&mut self, name: &str, command_line: &str) -> Option<usize> {
+        let (name, command_line) = (name.trim(), command_line.trim());
+        if name.is_empty()
+            || command_line.is_empty()
+            || name.chars().count() > MAX_MCP_NAME_CHARS
+            || command_line.chars().count() > MAX_MCP_COMMAND_CHARS
+            || self.mcp_servers.len() >= MAX_MCP_SERVERS
+        {
+            return None;
+        }
+        self.mcp_servers.push(McpServerConfig {
+            name: name.to_owned(),
+            command_line: command_line.to_owned(),
+            approved_line: None,
+            token: None,
+        });
+        Some(self.mcp_servers.len() - 1)
+    }
+
+    /// Keep `token` for a saved server. Only a web address takes one, and it must be one word
+    /// of printable characters; an empty token clears it. Returns whether it was kept.
+    pub fn set_mcp_server_token(&mut self, index: usize, token: &str) -> bool {
+        let token = token.trim();
+        let Some(server) = self.mcp_servers.get_mut(index) else {
+            return false;
+        };
+        if token.is_empty() {
+            server.token = None;
+            return true;
+        }
+        let lower = server.command_line.trim_start().to_ascii_lowercase();
+        let web = lower.starts_with("http://") || lower.starts_with("https://");
+        if !web
+            || token.chars().count() > MAX_MCP_TOKEN_CHARS
+            || token.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return false;
+        }
+        server.token = Some(token.to_owned());
+        true
+    }
+
+    pub fn remove_mcp_server(&mut self, index: usize) {
+        if index < self.mcp_servers.len() {
+            self.mcp_servers.remove(index);
+        }
+    }
+
+    /// Record that the writer approved the server's command line as it stands now.
+    pub fn approve_mcp_server(&mut self, index: usize) {
+        if let Some(server) = self.mcp_servers.get_mut(index) {
+            server.approved_line = Some(server.command_line.clone());
+        }
+    }
+
+    /// Whether MCP connectors may run: both switches must be on.
+    pub fn mcp_active(&self) -> bool {
+        self.dev_mode && self.mcp_enabled
     }
 
     /// Whether a prompt for `version` should be shown now. A mute for another version does
@@ -160,6 +352,13 @@ impl Default for Settings {
             spellcheck_language: SpellLanguage::British,
             last_update_check: None,
             update_mute: None,
+            dev_mode: false,
+            mcp_enabled: false,
+            mcp_allow_edits: false,
+            mcp_trusted_clients: Vec::new(),
+            mcp_servers: Vec::new(),
+            script_memory_mb: default_script_memory_mb(),
+            script_total_memory_mb: default_script_total_memory_mb(),
         }
     }
 }
@@ -170,7 +369,18 @@ impl Settings {
     }
 
     pub fn from_toml(text: &str) -> Result<Self, SettingsError> {
-        Ok(toml::from_str(text)?)
+        let mut settings: Self = toml::from_str(text)?;
+        // A hand-edited file must not switch MCP on behind a closed dev-mode gate.
+        if !settings.dev_mode {
+            settings.mcp_enabled = false;
+        }
+        if !settings.mcp_enabled {
+            settings.mcp_allow_edits = false;
+        }
+        settings.mcp_servers.truncate(MAX_MCP_SERVERS);
+        settings.script_memory_mb = crate::script::clamp_mb(settings.script_memory_mb);
+        settings.script_total_memory_mb = crate::script::clamp_mb(settings.script_total_memory_mb);
+        Ok(settings)
     }
 
     /// Sidebar width clamped to a usable range (a hand-edited file may hold anything).
@@ -282,9 +492,67 @@ mod tests {
                 version: "0.1.3".to_owned(),
                 until: Some(1_700_086_400),
             }),
+            dev_mode: true,
+            mcp_enabled: true,
+            mcp_allow_edits: true,
+            mcp_trusted_clients: vec!["Claude Desktop".to_owned()],
+            mcp_servers: vec![McpServerConfig {
+                name: "Notes".to_owned(),
+                command_line: "npx -y some-server".to_owned(),
+                approved_line: Some("npx -y some-server".to_owned()),
+                token: Some("tok-123".to_owned()),
+            }],
+            script_memory_mb: 2048,
+            script_total_memory_mb: 4096,
         };
         let text = original.to_toml().expect("serialise");
         assert_eq!(Settings::from_toml(&text).expect("parse"), original);
+    }
+
+    #[test]
+    fn the_script_memory_cap_defaults_to_512mb_each_and_1gb_shared_and_is_clamped() {
+        assert_eq!(Settings::default().script_memory_mb, 512);
+        assert_eq!(Settings::default().script_total_memory_mb, 1024);
+        // A file from before the setting existed gets the default.
+        assert_eq!(
+            Settings::from_toml("").expect("parse").script_memory_mb,
+            512
+        );
+        let low = Settings::from_toml("script_memory_mb = 0").expect("parse");
+        assert_eq!(low.script_memory_mb, crate::script::MIN_MEMORY_MB);
+        let high = Settings::from_toml("script_memory_mb = 4000000000").expect("parse");
+        assert_eq!(high.script_memory_mb, crate::script::MAX_MEMORY_MB);
+        let total = Settings::from_toml("script_total_memory_mb = 1").expect("parse");
+        assert_eq!(total.script_total_memory_mb, crate::script::MIN_MEMORY_MB);
+    }
+
+    #[test]
+    fn a_token_belongs_to_a_web_address_and_stays_out_of_debug_output() {
+        let mut s = Settings::default();
+        let web = s
+            .add_mcp_server("Web", "https://example.com/mcp")
+            .expect("add");
+        let program = s.add_mcp_server("Prog", "npx -y thing").expect("add");
+        assert!(s.set_mcp_server_token(web, "  abc123  "));
+        assert_eq!(s.mcp_servers[web].token.as_deref(), Some("abc123"));
+        assert!(
+            !s.set_mcp_server_token(program, "abc"),
+            "a program takes none"
+        );
+        assert!(!s.set_mcp_server_token(web, "two words"));
+        assert!(!s.set_mcp_server_token(web, &"a".repeat(MAX_MCP_TOKEN_CHARS + 1)));
+        assert_eq!(
+            s.mcp_servers[web].token.as_deref(),
+            Some("abc123"),
+            "kept on refusal"
+        );
+        assert!(!format!("{:?}", s.mcp_servers[web]).contains("abc123"));
+        let text = s.to_toml().expect("serialise");
+        assert_eq!(Settings::from_toml(&text).expect("parse"), s);
+        assert!(!s.mcp_servers[program].token.is_some());
+        assert!(s.set_mcp_server_token(web, ""), "empty clears");
+        assert_eq!(s.mcp_servers[web].token, None);
+        assert!(!s.to_toml().expect("serialise").contains("token"));
     }
 
     #[test]
@@ -309,6 +577,157 @@ mod tests {
 
         s.check_for_updates = false;
         assert!(!s.wants_update_prompt("0.2.0", 10_000));
+    }
+
+    #[test]
+    fn developer_features_are_off_by_default() {
+        let s = Settings::default();
+        assert!(!s.dev_mode);
+        assert!(!s.mcp_enabled);
+        assert!(!s.mcp_active());
+        let old = Settings::from_toml("theme = \"dark\"\n").expect("parse");
+        assert!(!old.dev_mode && !old.mcp_enabled, "an old file has neither");
+    }
+
+    #[test]
+    fn allow_edits_needs_mcp_and_goes_off_with_it() {
+        let mut s = Settings::default();
+        assert!(
+            !s.mcp_allow_edits && !s.mcp_edits_allowed(),
+            "off by default"
+        );
+        assert!(!s.set_mcp_allow_edits(true), "refused while MCP is off");
+        s.set_dev_mode(true);
+        assert!(!s.set_mcp_allow_edits(true), "dev mode alone is not enough");
+        assert!(s.set_mcp_enabled(true));
+        assert!(!s.mcp_edits_allowed(), "MCP on does not allow edits");
+        assert!(s.set_mcp_allow_edits(true));
+        assert!(s.mcp_edits_allowed());
+
+        // Switching MCP off, or closing the dev-mode gate, switches editing off too.
+        assert!(s.set_mcp_enabled(false));
+        assert!(!s.mcp_allow_edits);
+        assert!(s.set_mcp_enabled(true) && s.set_mcp_allow_edits(true));
+        s.set_dev_mode(false);
+        assert!(!s.mcp_allow_edits && !s.mcp_edits_allowed());
+    }
+
+    #[test]
+    fn allow_edits_cannot_be_switched_on_by_editing_the_file() {
+        let s = Settings::from_toml(
+            "dev_mode = true
+mcp_allow_edits = true
+",
+        )
+        .expect("parse");
+        assert!(!s.mcp_allow_edits, "MCP is off, so editing is forced off");
+        let s = Settings::from_toml(
+            "mcp_enabled = true
+mcp_allow_edits = true
+",
+        )
+        .expect("parse");
+        assert!(!s.mcp_allow_edits, "dev mode is off, so everything is off");
+        let s = Settings::from_toml(
+            "dev_mode = true
+mcp_enabled = true
+mcp_allow_edits = true
+",
+        )
+        .expect("parse");
+        assert!(s.mcp_edits_allowed());
+        let old = Settings::from_toml("").expect("parse");
+        assert!(!old.mcp_allow_edits && old.mcp_trusted_clients.is_empty());
+    }
+
+    #[test]
+    fn servers_are_added_trimmed_limited_and_start_unapproved() {
+        let mut s = Settings::default();
+        assert_eq!(s.add_mcp_server("  Notes ", " npx -y x  "), Some(0));
+        assert_eq!(s.mcp_servers[0].name, "Notes");
+        assert_eq!(s.mcp_servers[0].command_line, "npx -y x");
+        assert!(!s.mcp_servers[0].is_approved());
+        assert_eq!(s.add_mcp_server("", "x"), None);
+        assert_eq!(s.add_mcp_server("x", "   "), None);
+        assert_eq!(s.add_mcp_server(&"n".repeat(61), "x"), None);
+        assert_eq!(s.add_mcp_server("n", &"c".repeat(501)), None);
+        for i in 1..MAX_MCP_SERVERS {
+            assert_eq!(s.add_mcp_server("n", "c"), Some(i));
+        }
+        assert_eq!(s.add_mcp_server("n", "c"), None, "the list is full");
+    }
+
+    #[test]
+    fn approval_belongs_to_the_exact_command_line() {
+        let mut s = Settings::default();
+        let i = s.add_mcp_server("Notes", "npx -y x").expect("added");
+        s.approve_mcp_server(i);
+        assert!(s.mcp_servers[i].is_approved());
+        let back = Settings::from_toml(&s.to_toml().expect("toml")).expect("parse");
+        assert!(back.mcp_servers[i].is_approved(), "approval is saved");
+        // Changing the command, even slightly, asks again.
+        s.mcp_servers[i].command_line = "npx -y x --other".to_owned();
+        assert!(!s.mcp_servers[i].is_approved());
+        s.approve_mcp_server(i);
+        assert!(s.mcp_servers[i].is_approved());
+        s.approve_mcp_server(99);
+        s.remove_mcp_server(99);
+        s.remove_mcp_server(i);
+        assert!(s.mcp_servers.is_empty());
+        let old = Settings::from_toml("").expect("parse");
+        assert!(old.mcp_servers.is_empty(), "an old file has no servers");
+    }
+
+    #[test]
+    fn trusted_clients_are_remembered_once_saved_and_forgotten() {
+        let mut s = Settings::default();
+        assert!(!s.mcp_trusts("Claude Desktop"));
+        s.trust_mcp_client("Claude Desktop");
+        s.trust_mcp_client("Claude Desktop");
+        assert_eq!(s.mcp_trusted_clients, ["Claude Desktop"]);
+        let back = Settings::from_toml(&s.to_toml().expect("toml")).expect("parse");
+        assert!(back.mcp_trusts("Claude Desktop"));
+        assert!(!back.mcp_trusts("Someone else"));
+        s.forget_mcp_clients();
+        assert!(!s.mcp_trusts("Claude Desktop"));
+    }
+
+    #[test]
+    fn mcp_needs_dev_mode() {
+        let mut s = Settings::default();
+        assert!(!s.set_mcp_enabled(true), "refused while dev mode is off");
+        assert!(!s.mcp_enabled);
+
+        s.set_dev_mode(true);
+        assert!(!s.mcp_active(), "dev mode alone does not start MCP");
+        assert!(s.set_mcp_enabled(true));
+        assert!(s.mcp_active());
+
+        s.set_dev_mode(false);
+        assert!(!s.mcp_enabled, "closing the gate switches MCP off");
+        assert!(!s.mcp_active());
+        assert!(s.set_mcp_enabled(false), "turning it off is always allowed");
+    }
+
+    #[test]
+    fn a_hand_edited_file_cannot_open_the_gate() {
+        let s = Settings::from_toml("mcp_enabled = true\n").expect("parse");
+        assert!(!s.mcp_enabled, "dev mode is off, so MCP is forced off");
+        assert!(!s.mcp_active());
+
+        let s = Settings::from_toml("dev_mode = true\nmcp_enabled = true\n").expect("parse");
+        assert!(s.mcp_active());
+    }
+
+    #[test]
+    fn developer_switches_round_trip() {
+        let mut s = Settings::default();
+        s.set_dev_mode(true);
+        assert!(s.set_mcp_enabled(true));
+        let text = s.to_toml().expect("serialise");
+        assert!(text.contains("dev_mode = true"), "{text}");
+        assert!(text.contains("mcp_enabled = true"), "{text}");
+        assert_eq!(Settings::from_toml(&text).expect("parse"), s);
     }
 
     #[test]

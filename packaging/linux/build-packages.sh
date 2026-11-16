@@ -106,8 +106,9 @@ glibc_min=${glibc_min:-2.17}
 # libraries are either dlopen()ed or linked indirectly, so listing them explicitly is the
 # only way the package manager knows a desktop needs them: fontconfig for the installed
 # fonts, X11 and Wayland for the window, libxkbcommon for the keyboard, Vulkan (wgpu's
-# first choice) and EGL/GLES (its fallback) for the window compositor.
-deb_depends="libc6 (>= $glibc_min), libgcc-s1, libfontconfig1, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libvulkan1, libegl1, libgles2"
+# first choice) and EGL/GLES (its fallback) for the window compositor, OpenSSL for HTTPS
+# MCP servers (native-tls; Windows and macOS use their own TLS).
+deb_depends="libc6 (>= $glibc_min), libgcc-s1, libfontconfig1, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libvulkan1, libegl1, libgles2, libssl3t64 | libssl3"
 
 rpm_requires="libc.so.6()(64bit)
 libm.so.6()(64bit)
@@ -123,6 +124,8 @@ libwayland-client.so.0()(64bit)
 libwayland-cursor.so.0()(64bit)
 libvulkan.so.1()(64bit)
 libEGL.so.1()(64bit)
+libssl.so.3()(64bit)
+libcrypto.so.3()(64bit)
 libGLESv2.so.2()(64bit)"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/libertum-packages.XXXXXX")

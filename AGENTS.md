@@ -135,6 +135,8 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_AO3_PICK=<n>` | With `LIBERTUM_AO3=1`, open that chapter's HTML window at start |
 | `LIBERTUM_TAGS=1` | Open the AO3 tag vocabulary window at start (for screenshots) |
 | `LIBERTUM_SETTINGS=1` | Open the Settings window at start (for screenshots) |
+| `LIBERTUM_MCP_RUNNER=1` | Open the MCP tool runner at start (for screenshots; needs `dev_mode` and `mcp_enabled` in the settings file) |
+| `LIBERTUM_MACROS=<folder>` | Read recipe macros from that folder instead of `macros/` in the data folder (for screenshots and tests) |
 | `LIBERTUM_UPDATE=<version>` | Show the update prompt for that version at start (for screenshots; no network call) |
 | `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
 | `LIBERTUM_LIBRARY=<folder>` | Open the Library window on that folder at start (for screenshots) |

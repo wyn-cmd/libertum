@@ -496,8 +496,13 @@ impl PageSource {
     }
 }
 
+/// Hands out [`DocView::id`]s: never reused within a run.
+static NEXT_DOC_ID: AtomicU64 = AtomicU64::new(1);
+
 /// The open document: the model, the editor, paginated layout and the render pipeline.
 pub struct DocView {
+    /// Identifies this open document to MCP clients; a different document gets a different id.
+    id: u64,
     pub source: PageSource,
     /// The page geometry currently laid out, derived from the document's page setup.
     pub geometry: PageGeometry,
@@ -674,6 +679,7 @@ impl DocView {
         };
         (
             Self {
+                id: NEXT_DOC_ID.fetch_add(1, Ordering::Relaxed),
                 source,
                 geometry,
                 pageless: fixed_geometry.is_some(),
@@ -766,6 +772,11 @@ impl DocView {
 
     /// Read access to the editor (selection, formatting summary). Changes go through
     /// [`edit`](Self::edit) so layout stays in sync.
+    /// This open document's id for MCP clients.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     pub fn editor(&self) -> &Editor {
         &self.editor
     }
@@ -811,10 +822,11 @@ impl DocView {
     /// Paginates the whole document now (tests: the app does it on a worker).
     #[cfg(test)]
     pub fn paginate_everything(&mut self) {
-        self.layout
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .paginate_all();
+        let mut layout = self.layout.write().unwrap_or_else(|e| e.into_inner());
+        layout.paginate_all();
+        // Publish the result to the page map, as the background paginator does, so that
+        // `page_total()` is exact and cannot race that thread (it was an intermittent failure).
+        self.source.pages.refresh(&layout);
     }
 
     /// List markers drawn on page `page` (tests).

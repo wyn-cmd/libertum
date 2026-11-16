@@ -296,6 +296,27 @@ impl History {
         })
     }
 
+    /// Joins the last `count` undo steps into one, so a single undo reverts them all and a
+    /// single redo repeats them (a macro run is one step). The forward operations keep their
+    /// order; the inverses keep the same order, so that undoing applies them back to front.
+    /// Returns false, changing nothing, when `count` is under two or more than the steps held.
+    pub fn merge_last(&mut self, count: usize) -> bool {
+        if count < 2 || count > self.undo.len() {
+            return false;
+        }
+        self.typing = None;
+        let tail = self.undo.split_off(self.undo.len() - count);
+        let mut forward = Vec::new();
+        let mut inverse = Vec::new();
+        for entry in tail {
+            forward.extend(entry.forward);
+            inverse.extend(entry.inverse);
+        }
+        self.undo
+            .push(HistoryEntry::new(forward, inverse, EditKind::Other));
+        true
+    }
+
     /// Undoes the last step, applying its inverse operations in reverse order.
     pub fn undo(&mut self, doc: &mut Document) -> Result<Option<ChangeSet>, ModelError> {
         self.typing = None;

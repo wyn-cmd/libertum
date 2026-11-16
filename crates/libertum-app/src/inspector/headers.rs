@@ -1,6 +1,7 @@
 //! Headers inspector: every heading in the document, indented by outline level, with the
 //! page it starts on. Clicking a row moves the caret there.
 
+use iced::advanced::text::Wrapping;
 use iced::widget::{button, column, container, row, space, text};
 use iced::{Element, Length, Padding};
 
@@ -75,18 +76,24 @@ pub fn body<'a>(
         };
         let label = text(truncated(&heading.text, level))
             .size(if level == 1 { 13.0 } else { 12.0 })
+            .width(Length::Fill)
+            .wrapping(Wrapping::None)
             .color(if level == 1 { t.text } else { t.text_secondary });
-        let page = text(
-            heading
-                .page
-                .map(|page| page.to_string())
-                .unwrap_or_default(),
+        let page = container(
+            text(
+                heading
+                    .page
+                    .map(|page| page.to_string())
+                    .unwrap_or_default(),
+            )
+            .size(11.0)
+            .color(t.text_secondary),
         )
-        .size(11.0)
-        .color(t.text_secondary);
+        .width(Length::Fixed(30.0))
+        .align_x(iced::alignment::Horizontal::Right);
         list = list.push(
             button(
-                row![arrow, label, space().width(Length::Fill), page]
+                row![arrow, label, page]
                     .width(Length::Fill)
                     .align_y(iced::Center),
             )
@@ -120,7 +127,7 @@ pub fn body<'a>(
 /// number rather than pushing it out of place.
 fn truncated(text: &str, level: u8) -> String {
     let level = usize::from(level.max(1));
-    let max = 34usize.saturating_sub(level.saturating_sub(1) * 2).max(12);
+    let max = 26usize.saturating_sub(level.saturating_sub(1) * 2).max(12);
     if text.chars().count() <= max {
         return text.to_owned();
     }
