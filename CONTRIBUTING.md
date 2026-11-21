@@ -168,7 +168,7 @@ A document path given as the first command-line argument (what Windows passes wh
 | `ICED_BACKEND=wgpu\|tiny-skia` | Force Iced's compositor (the app sets `wgpu,tiny-skia` if unset) |
 | `WGPU_BACKEND=vulkan\|dx12\|metal\|gl` | Force the wgpu backend |
 
-**Scrolling performance check:** run `LIBERTUM_PERF=1 LIBERTUM_AUTOSCROLL=1 target/release/libertum` and compare against the baseline of 16.7 ms mean and about 18 ms p95 frame interval on the development machine.
+**Scrolling performance check:** run `LIBERTUM_PERF=1 LIBERTUM_AUTOSCROLL=1 target/release/libertum` and compare against the baseline of 16.7 ms mean and about 18 ms p95 frame interval on the development machine. For the deep-scroll case (the one that used to grow quadratic in the page number), use a long document and a faster pass: `LIBERTUM_DEMO_PAGES=2000 LIBERTUM_PERF=1 LIBERTUM_AUTOSCROLL=1 LIBERTUM_AUTOSCROLL_SPEED=40000 target/release/libertum`. The per-second `scroll frames, last second` lines and the exit summary must stay flat from the first page to the last (2026-11-21, release build: mean 15.58 ms, p95 19.31 ms, `draw()` 0.05 ms); a rise with depth means a page lookup became linear again.
 
 **Screenshot recipe (Windows, PowerShell):**
 1. Call `user32!SetProcessDPIAware`, then start the release exe and wait about 6 s.

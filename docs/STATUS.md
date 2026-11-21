@@ -2,7 +2,17 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-21 (release 0.4.1: trackpad scrolling moves once per frame; `.deb` and `.rpm` updates install themselves)._
+_Last updated: 2026-11-21 (scrolling: page lookup is no longer quadratic, so a long document stays smooth deep in)._
+
+## Scrolling performance (2026-11-21)
+
+Deep scrolling in a long document got slower the further in it went: `Metrics::page_top` added up every page before the one asked for, and `visible_pages`/`page_at` searched page by page, so one frame cost O(page²). The 500-page benchmark never showed it. Fixed in `canvas.rs`:
+
+- `Metrics` keeps a running total of page heights (`tops`), built once per geometry; `page_top` and `content_height` are O(1), and `visible_pages`/`page_at` binary-search it.
+- `DocView::page_geometries`/`page_used_heights` are cached against `PageMap::generation` (bumped on every publish) and shared as `Arc<[…]>`, so a draw or scroll event no longer rebuilds every page's geometry; an edit or pagination bump rebuilds them once.
+- `PageSource::request` forgets strip plans more than 128 pages from the viewport (`PLAN_MARGIN`), so the plan map no longer grows with every page ever visited and its fallback scan stays small.
+
+Tests: 2,000 lookups deep in a 5,000-page `Metrics` must stay under 2 s (they took ~6.5 ms each in the old shape); plans far from the viewport are forgotten while the margin is kept; the geometry vectors are shared until an edit replaces them. Real app (`LIBERTUM_DEMO_PAGES=2000 LIBERTUM_PERF=1 LIBERTUM_AUTOSCROLL=1 LIBERTUM_AUTOSCROLL_SPEED=40000`, release build, Fedora/GNOME Wayland): frame interval n=2550 mean 15.58 ms, p95 19.31, p99 21.30, max 42.73; `draw()` 0.05 ms mean; no blank or stale pages. The per-second lines stay flat from the first page to the last instead of rising with depth.
 
 ## Release 0.4.1 (2026-11-21)
 

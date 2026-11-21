@@ -51,6 +51,11 @@ const BULK_PARAGRAPHS: usize = 200;
 const PENDING_MARGIN: usize = 8;
 /// Cap on the merged render queue (bounds how far ahead the worker can run).
 const PENDING_MAX: usize = 32;
+/// Pages on either side of the viewport whose strip plans are kept. A plan is small, and
+/// keeping a margin means scrolling back finds its strips in the handle cache (the plan's
+/// keys still match); plans further away are forgotten so the map cannot grow with every
+/// page ever visited. Looking up a page with no current plan has to scan the map.
+const PLAN_MARGIN: usize = 128;
 /// Cap on cached strip bitmaps (bytes of RGBA). A 600 MB working-set ceiling
 /// (2026-11-09); this leaves room for the layout caches and iced's GPU atlas.
 const HANDLE_CACHE_BYTES: usize = 160 * 1024 * 1024;
@@ -120,6 +125,9 @@ pub enum DocEvent {
 struct PageMapInner {
     hashes: Vec<u64>,
     complete: bool,
+    /// Bumped on every publish. The canvas caches the per-page geometry vectors against it,
+    /// so they are rebuilt only when the layout actually changes, not on every frame.
+    generation: u64,
 }
 
 /// What the UI knows about pagination, without touching the layout lock.
@@ -137,6 +145,11 @@ impl PageMap {
         lock(&self.0).hashes.get(page).copied()
     }
 
+    /// Changes whenever [`refresh`](Self::refresh) publishes a new layout state.
+    pub fn generation(&self) -> u64 {
+        lock(&self.0).generation
+    }
+
     /// Recomputes every known page hash from the layout and republishes completeness.
     pub fn refresh(&self, state: &LayoutState) {
         let mut m = lock(&self.0);
@@ -144,6 +157,7 @@ impl PageMap {
         m.hashes
             .extend((0..state.page_count()).filter_map(|i| state.page_content_hash(i)));
         m.complete = state.is_complete();
+        m.generation = m.generation.wrapping_add(1);
     }
 }
 
@@ -339,6 +353,17 @@ impl Plans {
         slot.insert(0, plan);
         slot.truncate(2);
     }
+
+    /// Forgets the plans of pages outside `lo..=hi`, at every scale. Their strips stay in
+    /// the handle cache and are reused if the worker plans the same content again.
+    fn retain_pages(&mut self, lo: usize, hi: usize) {
+        self.0.retain(|(page, _), _| (lo..=hi).contains(page));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 // ---------------------------------------------------------------- render queue
@@ -460,6 +485,9 @@ impl PageSource {
     /// time meant the worker rendered roughly one page per frame and the pages entering the
     /// viewport stayed blank (the white "flicker" of fast scrolling).
     pub fn request(&self, pages: &[usize], scale: f32) {
+        if pages.is_empty() {
+            return;
+        }
         let wanted: Vec<(usize, f32)> = pages
             .iter()
             .copied()
@@ -476,6 +504,12 @@ impl PageSource {
             .fold((usize::MAX, 0), |(lo, hi), p| (lo.min(p), hi.max(p)));
         let lo = lo.saturating_sub(PENDING_MARGIN);
         let hi = hi.saturating_add(PENDING_MARGIN);
+        // Drop plans for pages far from the viewport. Done before the queue is updated, so
+        // the map never holds every page ever visited.
+        lock(&self.plans).retain_pages(
+            lo.saturating_sub(PLAN_MARGIN),
+            hi.saturating_add(PLAN_MARGIN),
+        );
         let mut merged = wanted;
         for &(page, s) in &q.wanted {
             if merged.len() >= PENDING_MAX {
@@ -529,6 +563,17 @@ pub struct DocView {
     style_epoch: u64,
     /// Renders page thumbnails on the UI thread (a few at a time, only those in view).
     thumbs: libertum_render::PageRenderer,
+    /// Per-page geometry and used heights, shared with the canvas and rebuilt only when the
+    /// page map publishes a new layout state (see [`PageMap::generation`]). Without this the
+    /// whole document's geometry was rebuilt several times per scroll event.
+    page_views: Mutex<Option<PageViews>>,
+}
+
+struct PageViews {
+    generation: u64,
+    pages: usize,
+    geometries: Arc<[PageGeometry]>,
+    used: Arc<[f32]>,
 }
 
 /// Bits of a snapshot version above the paragraph's own edit count that hold the style
@@ -694,6 +739,7 @@ impl DocView {
                 paginate_epoch,
                 style_epoch: 0,
                 thumbs: libertum_render::PageRenderer::new(0),
+                page_views: Mutex::new(None),
             },
             rx,
         )
@@ -711,20 +757,52 @@ impl DocView {
     }
 
     /// One geometry per page for the canvas. Pages not laid out yet use section 0's setup.
-    pub fn page_geometries(&self) -> Vec<PageGeometry> {
-        let total = self.page_total();
-        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        (0..total).map(|page| layout.page_geometry(page)).collect()
+    pub fn page_geometries(&self) -> Arc<[PageGeometry]> {
+        self.page_views().0
     }
 
     /// How much of each page is used, in points (the canvas stacks pageless pages by this so
     /// no blank page tail opens between the lines of a split paragraph or table).
-    pub fn page_used_heights(&self) -> Vec<f32> {
+    pub fn page_used_heights(&self) -> Arc<[f32]> {
+        self.page_views().1
+    }
+
+    /// Both per-page vectors, rebuilt when the page map publishes a new generation and shared
+    /// from then on. Clones are cheap `Arc` clones, so a draw or a scroll event does not
+    /// allocate the whole document's geometry.
+    fn page_views(&self) -> (Arc<[PageGeometry]>, Arc<[f32]>) {
+        let generation = self.source.pages.generation();
         let total = self.page_total();
-        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        (0..total)
+        let mut slot = self
+            .page_views
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(views) = slot.as_ref()
+            && views.generation == generation
+            && views.pages == total
+        {
+            return (views.geometries.clone(), views.used.clone());
+        }
+        let layout = self
+            .layout
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let geometries: Arc<[PageGeometry]> = (0..total)
+            .map(|page| layout.page_geometry(page))
+            .collect::<Vec<_>>()
+            .into();
+        let used: Arc<[f32]> = (0..total)
             .map(|page| layout.page_used_height(page))
-            .collect()
+            .collect::<Vec<_>>()
+            .into();
+        drop(layout);
+        *slot = Some(PageViews {
+            generation,
+            pages: total,
+            geometries: geometries.clone(),
+            used: used.clone(),
+        });
+        (geometries, used)
     }
 
     /// Hash of what page `page` shows, once it is paginated (thumbnail cache key).
@@ -2099,5 +2177,84 @@ mod tests {
             view.selection_rects_on(500..510).is_empty(),
             "beyond the pages"
         );
+    }
+
+    #[test]
+    fn plans_for_pages_far_from_the_viewport_are_forgotten() {
+        // A source with 400 pages, so `request` can run without a live worker.
+        let pages = PageMap::default();
+        {
+            let mut map = lock(&pages.0);
+            map.hashes = vec![1; 400];
+            map.complete = true;
+        }
+        let source = PageSource {
+            pages,
+            cache: Arc::new(Mutex::new(HandleCache::new(1024))),
+            plans: Arc::new(Mutex::new(Plans::default())),
+            queue: Arc::new(RenderQueue::default()),
+        };
+        let plan = || BandPlan {
+            page_hash: 1,
+            height: 100,
+            rows: 100,
+            keys: Vec::new(),
+        };
+        for page in 0..400 {
+            if page != 300 {
+                lock(&source.plans).set(page, 1.0, plan());
+            }
+        }
+        assert_eq!(lock(&source.plans).len(), 399);
+
+        // Scrolling to page 300 keeps a margin either side and forgets the rest. (Page 300
+        // itself has no plan yet, so the request is not a no-op that skips pruning.)
+        source.request(&[300], 1.0);
+        let plans = lock(&source.plans);
+        assert_eq!(plans.len(), 400 - (300 - PENDING_MARGIN - PLAN_MARGIN) - 1);
+        assert!(plans.current(163, 1.0, 1).is_none(), "far behind");
+        assert!(plans.current(164, 1.0, 1).is_some(), "margin kept");
+        assert!(plans.current(399, 1.0, 1).is_some());
+    }
+
+    #[test]
+    fn page_views_are_shared_between_calls_and_rebuilt_after_an_edit() {
+        use libertum_editor::DocPosition;
+        use libertum_model::{BlockId, Document, Paragraph};
+
+        let doc = Document::from_paragraphs(vec![
+            Paragraph::new(BlockId(1), "one"),
+            Paragraph::new(BlockId(2), "two"),
+        ]);
+        let (mut view, _rx) = DocView::open(doc);
+        let first = view.editor().document().first_id().expect("block");
+
+        let geometries = view.page_geometries();
+        let again = view.page_geometries();
+        assert!(
+            Arc::ptr_eq(&geometries, &again),
+            "a draw or a scroll event reuses the vectors"
+        );
+        let used = view.page_used_heights();
+        let used_again = view.page_used_heights();
+        assert!(Arc::ptr_eq(&used, &used_again));
+
+        view.edit(|ed| {
+            ed.set_caret(
+                DocPosition {
+                    block: first,
+                    offset: 0,
+                },
+                false,
+            );
+            ed.insert_text("more ")
+        })
+        .expect("edit");
+        let after = view.page_geometries();
+        assert!(
+            !Arc::ptr_eq(&geometries, &after),
+            "the layout changed, so the next call rebuilds"
+        );
+        assert_eq!(after.len(), view.page_total());
     }
 }

@@ -114,6 +114,11 @@ pub struct Metrics {
     /// them: pages are stacked by how much of each is filled, so the blank tail of a page
     /// where a paragraph or table continued does not show as a gap.
     pub used: Vec<f32>,
+    /// Running totals of [`used`](Self::used): `tops[i]` is the height of pages `0..i`, and
+    /// the last entry is the whole document. A page's top is then one lookup, so scrolling
+    /// deep into a long document costs the same as at the start (it used to sum every page
+    /// before it on every call, which made a frame quadratic in the page number).
+    tops: Vec<f32>,
 }
 
 impl Metrics {
@@ -214,6 +219,14 @@ impl Metrics {
                 }
             })
             .collect();
+        // Prefix totals of the very heights `page_top` used to add up each time.
+        let mut tops = Vec::with_capacity(used.len() + 1);
+        tops.push(0.0);
+        let mut total = 0.0;
+        for height in &used {
+            total += height;
+            tops.push(total);
+        }
         Self {
             sf,
             scale,
@@ -230,6 +243,7 @@ impl Metrics {
             continuous,
             sizes,
             used,
+            tops,
         }
     }
 
@@ -298,21 +312,7 @@ impl Metrics {
                 + (self.rows() - 1) as f32 * self.gap;
         }
         let pages = self.pages;
-        let heights: f32 = (0..pages).map(|page| self.stack_height(page)).sum();
-        2.0 * self.pad + heights + pages.saturating_sub(1) as f32 * self.gap
-    }
-
-    /// The height `page` adds to the stack: a continuous view uses only the part that has
-    /// content, so pages meet where the text does rather than at the paper edge.
-    fn stack_height(&self, page: usize) -> f32 {
-        if self.continuous {
-            self.used
-                .get(page)
-                .copied()
-                .unwrap_or_else(|| self.size(page).1)
-        } else {
-            self.size(page).1
-        }
+        2.0 * self.pad + self.tops[pages] + pages.saturating_sub(1) as f32 * self.gap
     }
 
     pub fn content_width(&self, viewport_w: f32) -> f32 {
@@ -323,8 +323,8 @@ impl Metrics {
         if self.booklet {
             return self.pad + self.row_of(page) as f32 * self.pitch();
         }
-        let before: f32 = (0..page).map(|index| self.stack_height(index)).sum();
-        self.pad + before + page as f32 * self.gap
+        let page = page.min(self.pages);
+        self.pad + self.tops[page] + page as f32 * self.gap
     }
 
     /// Left edge of `page`'s rectangle in content coordinates.
@@ -348,15 +348,11 @@ impl Metrics {
     /// Pages whose rectangle intersects the viewport.
     pub fn visible_pages(&self, scroll_y: f32, viewport_h: f32) -> Range<usize> {
         if !self.booklet {
-            let mut first = 0usize;
-            while first + 1 < self.pages && self.page_top(first + 1) <= scroll_y {
-                first += 1;
-            }
-            let bottom = scroll_y + viewport_h;
-            let mut last = first;
-            while last + 1 < self.pages && self.page_top(last + 1) < bottom {
-                last += 1;
-            }
+            let first = self.page_at_or_before(scroll_y);
+            let last = self
+                .last_page_before(scroll_y + viewport_h)
+                .unwrap_or(first)
+                .max(first);
             return first.min(self.pages - 1)..(last + 1).min(self.pages);
         }
         let rows = self.rows();
@@ -379,14 +375,39 @@ impl Metrics {
         first.min(self.pages - 1)..(last + 1).min(self.pages)
     }
 
+    /// The last page whose top is at or above `y` (page 0 when `y` is above the first page).
+    /// Binary search over the running totals: O(log pages) at any depth.
+    fn page_at_or_before(&self, y: f32) -> usize {
+        let (mut lo, mut hi) = (0usize, self.pages);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.page_top(mid) <= y {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo.saturating_sub(1).min(self.pages - 1)
+    }
+
+    /// The last page whose top is strictly above `y`, if any is.
+    fn last_page_before(&self, y: f32) -> Option<usize> {
+        let (mut lo, mut hi) = (0usize, self.pages);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.page_top(mid) < y {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo.checked_sub(1)
+    }
+
     /// The page under a content-space point (physical pixels).
     pub fn page_at(&self, x: f32, y: f32, viewport_w: f32) -> usize {
         if !self.booklet {
-            let mut page = 0usize;
-            while page + 1 < self.pages && self.page_top(page + 1) <= y {
-                page += 1;
-            }
-            return page.min(self.pages - 1);
+            return self.page_at_or_before(y);
         }
         let rows = self.rows();
         let row =
@@ -457,10 +478,10 @@ pub struct CanvasProps {
     /// Markdown mode: no page gap or shadow.
     pub continuous: bool,
     /// Per-page geometry, index-aligned with the page count.
-    pub geometries: Vec<PageGeometry>,
+    pub geometries: std::sync::Arc<[PageGeometry]>,
     /// How much of each page is used, in points (pageless pages are stacked by this, so a
     /// paragraph or table that continues leaves no page-sized gap).
-    pub used_heights: Vec<f32>,
+    pub used_heights: std::sync::Arc<[f32]>,
     /// The document has keyboard focus, so the OS input method (IME) must stay enabled.
     pub ime_enabled: bool,
     /// Where the IME candidate window should sit: the caret, unaffected by blinking.
@@ -1428,8 +1449,8 @@ mod tests {
             animate: false,
             booklet: false,
             continuous: false,
-            geometries: Vec::new(),
-            used_heights: Vec::new(),
+            geometries: Vec::new().into(),
+            used_heights: Vec::new().into(),
             ime_enabled,
             ime_caret: caret,
         };
@@ -1510,6 +1531,42 @@ mod tests {
         let m = m(Zoom::Percent(100), 1.0, 1000.0, 5);
         assert_eq!(m.current_page(0.0, 600.0, 1000.0), 0);
         assert_eq!(m.current_page(1.0e9, 600.0, 1000.0), 4);
+    }
+
+    #[test]
+    fn looking_up_a_page_deep_in_a_long_document_is_cheap_and_exact() {
+        const PAGES: usize = 5_000;
+        let m = m(Zoom::Percent(100), 1.0, 1000.0, PAGES);
+        let page = PAGES - 10;
+        // The running total gives the same top the old sum-over-every-page did.
+        let expected = m.pad + m.used[..page].iter().sum::<f32>() + page as f32 * m.gap;
+        assert!((m.page_top(page) - expected).abs() < 0.01);
+        assert!(
+            (m.page_top(PAGES) - (m.pad + m.used.iter().sum::<f32>() + PAGES as f32 * m.gap)).abs()
+                < 0.01
+        );
+        // Hit testing and the visible range both agree at that depth.
+        assert_eq!(m.visible_pages(m.page_top(page), 700.0).start, page);
+        assert_eq!(m.page_at(500.0, m.page_top(page) + 1.0, 1000.0), page);
+        assert_eq!(m.page_at(500.0, m.page_top(page) - 1.0, 1000.0), page - 1);
+        let height = m.content_height();
+        assert!((height - (m.page_top(PAGES - 1) + m.used[PAGES - 1] + m.pad)).abs() < 0.01);
+
+        // Regression guard for the old O(page²) linear scan: 2,000 lookups anywhere in a
+        // 5,000-page document must finish far inside this limit (it used to take seconds).
+        let started = std::time::Instant::now();
+        let mut found = 0usize;
+        for step in 0..2_000 {
+            let y = (step as f32 * 1_234.5) % height;
+            found += m.visible_pages(y, 700.0).start;
+            found += m.page_at(500.0, y, 1000.0);
+        }
+        assert!(found > 0, "every lookup found a page");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "2,000 deep page lookups took {:?}",
+            started.elapsed()
+        );
     }
 }
 
