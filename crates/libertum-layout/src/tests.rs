@@ -2532,7 +2532,7 @@ fn hyphenated_lines_keep_the_same_line_spacing() {
 }
 
 #[test]
-fn the_automatic_thread_count_stops_at_two_and_an_explicit_one_is_honoured() {
+fn the_automatic_thread_count_stops_at_four_and_an_explicit_one_is_honoured() {
     use crate::engine::{DEFAULT_LAYOUT_THREADS, Engine, MAX_LAYOUT_THREADS};
     let with = |threads| {
         Engine::new(LayoutOptions {

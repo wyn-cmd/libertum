@@ -91,7 +91,7 @@ pub fn pageless_geometry(document: &Document) -> PageGeometry {
 }
 
 /// Layout options for a document opened in the app. `LIBERTUM_LAYOUT_THREADS=<n>` sets how
-/// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 2; 1:
+/// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 4; 1:
 /// none), for measuring.
 fn layout_options() -> LayoutOptions {
     let threads = std::env::var("LIBERTUM_LAYOUT_THREADS")

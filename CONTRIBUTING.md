@@ -142,7 +142,7 @@ The updater checks each download against `SHA256SUMS` from the same release, so 
 | `LIBERTUM_AUTOSCROLL=1` | Scroll page 1 to the last page, then exit (combine with `LIBERTUM_PERF`). `LIBERTUM_AUTOSCROLL_SPEED` sets px/s (default 4000) |
 | `LIBERTUM_THEME=light\|dark` | Force the theme |
 | `LIBERTUM_SCREENSHOT=<file.png>` | Save a picture of the window after `LIBERTUM_SCREENSHOT_DELAY` seconds (default 6) and exit. Works where the desktop blocks other programs from capturing the screen (GNOME on Wayland); combine with `LIBERTUM_THEME`, `LIBERTUM_MENU`, `LIBERTUM_AO3` and the other screenshot hooks (`src/shot.rs`) |
-| `LIBERTUM_LAYOUT_THREADS=<n>` | Threads that shape paragraphs ahead of pagination (0 or unset: one per core, up to 2; 1: none; more than 2 only for measuring), for measuring |
+| `LIBERTUM_LAYOUT_THREADS=<n>` | Threads that shape paragraphs ahead of pagination (0 or unset: one per core, up to 4; 1: none; more than 4 only for measuring), for measuring |
 | `LIBERTUM_INSPECTOR=format-style\|format-layout\|format-more\|document\|section` | Open a given inspector pane at start |
 | `LIBERTUM_BOOKLET=1` | Start in the booklet (two-page spread) view |
 | `LIBERTUM_THUMBNAILS=1` | Start with the page thumbnails column shown |

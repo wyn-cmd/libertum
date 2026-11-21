@@ -14,7 +14,7 @@
 
 - Memory at rest for the 500-page demo is about 278-287 MB on Linux, down from about 830 MB.
 - The spellcheck dictionary is built once and only the active language is kept, instead of one copy per worker thread.
-- Layout threads default to two; an explicit count is still available for measurement.
+- Layout shaping uses at most four threads, and fewer on small machines; an explicit count is still available for measurement.
 - The benchmark and screenshot hooks are documented in `CONTRIBUTING.md`.
 - Releases are built and published by `.github/workflows/release.yml` from a `v<version>` tag, with notes from this file and a generated `SHA256SUMS`.
 

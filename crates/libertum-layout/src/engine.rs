@@ -143,11 +143,11 @@ pub struct LayoutOptions {
 /// for.
 pub const MAX_LAYOUT_THREADS: usize = 8;
 
-/// Threads used when the count is left to the engine (`threads: 0`). Two, because more were
-/// slower on the 500-page demo (full pagination: about 600 ms with one thread, 620 to 650 ms
-/// with two or four, 920 to 1,070 ms with eight) and a dual-core machine has nothing to gain
-/// from more (docs/decisions.md, 2026-11-20).
-pub const DEFAULT_LAYOUT_THREADS: usize = 2;
+/// Threads used when the count is left to the engine (`threads: 0`). Four: the 500-page demo
+/// stops gaining there (full pagination: about 600 ms with one thread, 620 to 650 ms with two
+/// or four, 920 to 1,070 ms with eight), and a four-core machine keeps the count it had before
+/// the cap (docs/decisions.md, 2026-11-20 and 2026-11-21).
+pub const DEFAULT_LAYOUT_THREADS: usize = 4;
 
 impl Default for LayoutOptions {
     fn default() -> Self {
