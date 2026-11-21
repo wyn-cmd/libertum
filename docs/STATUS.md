@@ -2,7 +2,13 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-21 (scrolling: page lookup is no longer quadratic, so a long document stays smooth deep in)._
+_Last updated: 2026-11-22 (release 0.4.2: scrolling stays fast deep in a long document)._
+
+## Release 0.4.2 (2026-11-22)
+
+- **Feature: scrolling stays fast to the last page of a long document.** Page positions come from a running total (O(1)); the visible range and hit testing binary-search it. A 2,000-page autoscroll held 15.6 ms mean / 19.3 ms p95 from first page to last, with `draw()` at 0.05 ms and no blank or stale pages.
+- Per-page geometry and used heights are cached against a page-map generation and shared; strip plans far from the viewport are pruned.
+- Release notes in `docs/RELEASE-0.4.2.md`; built and published by `.github/workflows/release.yml`.
 
 ## Scrolling performance (2026-11-21)
 
