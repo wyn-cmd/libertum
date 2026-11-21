@@ -4,16 +4,21 @@
 //! Nothing here touches the UI. The chapter rules live in [`ChapterLevels`] and are used by
 //! both the AO3 export and EPUB, so a book splits the same way everywhere.
 
+mod autotags;
 mod epub;
 mod html;
 mod tags;
 mod text;
 
+pub use autotags::{
+    MAX_CHARACTERS, MAX_KEYWORDS, MAX_RELATIONSHIPS, auto_suggestions,
+    auto_suggestions_for_chapter, merge_suggestions,
+};
 pub use epub::{EpubError, build_epub};
 pub use html::{AO3_WHITELIST, ao3_fragment, chapter_html};
 pub use tags::{
-    SUGGESTION_LIMIT, Tag, TagCategory, TagMatch, TagSuggestion, suggest_for_chapter, suggest_tags,
-    tags_to_text, terms,
+    AO3_RATINGS, AO3_WARNINGS, SUGGESTION_LIMIT, Tag, TagCategory, TagMatch, TagSuggestion,
+    suggest_for_chapter, suggest_tags, tags_to_text, terms,
 };
 pub use text::{chapter_text, document_text};
 

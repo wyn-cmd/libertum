@@ -36,9 +36,17 @@ cross-references.
 - Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text and Markdown. A chapter
   can also be exported as HTML for AO3, with tag suggestions ranked locally from your own tag
   list.
-- Updates: asks GitHub at most once a day whether a newer release exists and offers to open
-  its download page. It never installs anything by itself; the check can be turned off in
-  Settings, and updates then stay manual.
+- Benchmark: **Settings > Benchmark** measures scrolling, typing and saving on generated
+  documents of growing size, finds the largest size the computer holds at 60, 90 or 120 fps,
+  and keeps the last ten results.
+- Tables of contents: opens a Word or LibreOffice contents list, rebuilds it from the headings,
+  and saves its own as a live Word content-control TOC or ODT index.
+- AO3 export: suggests characters, pairings and keywords from the chapter's own text, and
+  copies a chapter title or the ticked tags.
+- Updates: asks GitHub at most once a day whether a newer release exists. **Update now**
+  downloads the right build, checks it against `SHA256SUMS` and installs it where the platform
+  allows (Windows installer, AppImage, macOS app); a `.deb`, `.rpm` or failed check falls back
+  to the release page. The check can be turned off in Settings.
 
 `docs/STATUS.md` has the current state and the open items. `PLAN.md` covers the architecture,
 the performance budgets and the phase list. Of the planned work, the main pieces still missing
@@ -63,8 +71,8 @@ A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain bin
 all unsigned.
 
 ```sh
-sudo apt install ./libertum_0.3.1_amd64.deb                  # Debian, Ubuntu, ...
-sudo dnf install ./libertum-0.3.1-1.x86_64.rpm               # Fedora, openSUSE, ...
+sudo apt install ./libertum_0.4.0_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.4.0-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
 The packages put `libertum` in `/usr/bin` and install a desktop entry, the icon and a MIME
@@ -80,8 +88,8 @@ The AppImage carries its own font, input, Wayland and graphics libraries, and on
 host's X11/XCB and glibc:
 
 ```sh
-chmod +x Libertum-0.3.1-x86_64.AppImage
-./Libertum-0.3.1-x86_64.AppImage
+chmod +x Libertum-0.4.0-x86_64.AppImage
+./Libertum-0.4.0-x86_64.AppImage
 ```
 
 Pinch-to-zoom needs a Wayland session. On X11, Ctrl + two-finger scroll zooms.
@@ -114,6 +122,8 @@ the performance budgets in `PLAN.md` §2 are all release numbers.
 
 The Windows installer is packed with `powershell -ExecutionPolicy Bypass -File
 packaging\windows\build-installer.ps1`, which writes `dist\Libertum-Setup-<version>.exe`.
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`, which builds the platform
+bundles, writes `SHA256SUMS` and publishes the release notes from `docs/RELEASE-<version>.md`.
 `packaging\windows\install.ps1` performs the same install by hand from a folder that holds
 `libertum.exe`. The Linux packages and the AppImage have scripts under `packaging/linux/`; the
 macOS bundle and disk image are built by `packaging/macos/build-app.sh` on a Mac.
@@ -136,7 +146,7 @@ A few variables are handy for screenshots and measurements:
 | `LIBERTUM_PERF=1` | Log frame and update timings |
 | `LIBERTUM_AUTOSCROLL=1` | Scroll to the last page and exit (a scrolling benchmark) |
 
-The full list is in `AGENTS.md`.
+The full list is in `CONTRIBUTING.md`.
 
 ## Repository layout
 

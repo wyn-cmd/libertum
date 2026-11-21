@@ -6,6 +6,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod bench;
 mod canvas;
 mod docview;
 mod fps;
@@ -26,6 +27,7 @@ mod script;
 static ALLOCATOR: script::Counting = script::Counting;
 mod settings;
 mod shortcuts;
+mod shot;
 mod spell;
 mod state;
 mod stitch;
@@ -137,9 +139,22 @@ fn window_settings() -> window::Settings {
             titlebar_transparent: true,
             fullsize_content_view: true,
         },
+        // Linux: the Wayland app id and X11 WM_CLASS, which the desktop matches to
+        // `libertum.desktop` (its `StartupWMClass`) to find the installed icon. Left empty,
+        // the dock and taskbar show a generic icon.
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: LINUX_APPLICATION_ID.to_owned(),
+            ..window::settings::PlatformSpecific::default()
+        },
         ..window::Settings::default()
     }
 }
+
+/// The window's application id on Linux; it must equal the desktop entry's file name (without
+/// `.desktop`) and its `StartupWMClass`.
+#[cfg(target_os = "linux")]
+const LINUX_APPLICATION_ID: &str = "libertum";
 
 /// The first command-line argument that is not an option (`-x` or `--x`), as a path.
 fn document_argument(args: impl Iterator<Item = std::ffi::OsString>) -> Option<std::path::PathBuf> {
@@ -147,7 +162,28 @@ fn document_argument(args: impl Iterator<Item = std::ffi::OsString>) -> Option<s
         .find(|path| !path.to_string_lossy().starts_with('-'))
 }
 
+/// How many malloc arenas glibc may create. By default it makes up to eight per core, one for
+/// each thread that allocates, and keeps freed memory in them, so a document laid out on several
+/// threads held about 900 MB where two arenas hold about 350 MB (measured on a 500-page demo).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MALLOC_ARENAS: libc::c_int = 2;
+
+/// Caps glibc's malloc arenas. Must run before the program starts other threads. A
+/// `MALLOC_ARENA_MAX` set in the environment is left alone. Returns
+/// whether the limit was applied.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn limit_malloc_arenas() -> bool {
+    if std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+        return false;
+    }
+    // SAFETY: `mallopt` only sets an allocator tunable; it reads no pointers. It is not
+    // thread-safe against concurrent allocator calls, hence the call at the top of `main`.
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) == 1 }
+}
+
 fn main() -> iced::Result {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    limit_malloc_arenas();
     // `LIBERTUM_LOG=debug` for diagnostics (for example, input method events).
     let level = match std::env::var("LIBERTUM_LOG").ok().as_deref() {
         Some("debug") => tracing::Level::DEBUG,
@@ -193,6 +229,37 @@ mod argument_tests {
         let (rgba, size) = icon.into_raw();
         assert_eq!(size, Size::new(512, 512));
         assert_eq!(rgba.len(), 512 * 512 * 4);
+    }
+
+    /// The icon on Linux depends on the window's id matching the desktop entry.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_application_id_matches_the_desktop_entry() {
+        let settings = window_settings();
+        assert_eq!(
+            settings.platform_specific.application_id,
+            LINUX_APPLICATION_ID
+        );
+        let entry = include_str!("../../../packaging/linux/libertum.desktop");
+        let value = |key: &str| {
+            entry
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        assert_eq!(value("StartupWMClass="), Some(LINUX_APPLICATION_ID));
+        assert_eq!(value("Icon="), Some(LINUX_APPLICATION_ID));
+    }
+
+    /// `mallopt` reports 1 when it accepts the setting. The environment variable is the user's
+    /// override, so the answer depends on whether it is set.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_malloc_arena_limit_is_applied_unless_the_user_set_one() {
+        assert_eq!(
+            limit_malloc_arenas(),
+            std::env::var_os("MALLOC_ARENA_MAX").is_none()
+        );
     }
 
     #[test]

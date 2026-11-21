@@ -57,35 +57,47 @@ pub struct Span {
     pub word: String,
 }
 
-/// The global dictionaries, built on first use. Building a dictionary takes a moment, so the
-/// UI never does it on a keystroke.
+/// The global dictionary, built on first use. Building one takes about 130 ms and holds about
+/// 45 MB, so the UI never does it on a keystroke, and it is built exactly once: the first
+/// background spell check to ask builds it while the others wait for the lock. (Checking the
+/// cache and building outside the lock let every pool thread that asked while it was empty
+/// build its own copy, up to sixteen at once.) Only the language in use is kept.
 fn dictionary(language: Language) -> Result<Arc<Dictionary>, String> {
     static CACHE: OnceLock<Mutex<HashMap<Language, Arc<Dictionary>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(dict) = cache
+    dictionary_in(cache, language, build_dictionary)
+}
+
+/// [`dictionary`] over an explicit cache and builder, so a test can count the builds.
+fn dictionary_in(
+    cache: &Mutex<HashMap<Language, Arc<Dictionary>>>,
+    language: Language,
+    build: impl FnOnce(Language) -> Result<Dictionary, String>,
+) -> Result<Arc<Dictionary>, String> {
+    let mut cache = cache
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&language)
-        .cloned()
-    {
-        return Ok(dict);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(dict) = cache.get(&language) {
+        return Ok(dict.clone());
     }
+    let dict = Arc::new(build(language)?);
+    // A checker already running keeps its own `Arc` to the old language's dictionary.
+    cache.clear();
+    cache.insert(language, dict.clone());
+    Ok(dict)
+}
+
+fn build_dictionary(language: Language) -> Result<Dictionary, String> {
     let (aff, dic) = language.files();
     // The British dictionary file starts with a UTF-8 byte-order mark; zspell's parser
     // expects the count on the first line.
     let aff = aff.strip_prefix('\u{feff}').unwrap_or(aff);
     let dic = dic.strip_prefix('\u{feff}').unwrap_or(dic);
-    let dict = zspell::builder()
+    zspell::builder()
         .config_str(aff)
         .dict_str(dic)
         .build()
-        .map_err(|error| error.to_string())?;
-    let dict = Arc::new(dict);
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(language, dict.clone());
-    Ok(dict)
+        .map_err(|error| error.to_string())
 }
 
 /// Checks `text` and returns the misspelt spans, skipping the personal and per-document
@@ -253,6 +265,42 @@ mod tests {
             british.iter().any(|(_, _, word)| word == "color"),
             "the British dictionary should question the American spelling: {british:?}"
         );
+    }
+
+    #[test]
+    fn threads_asking_together_build_the_dictionary_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Mutex::new(HashMap::new());
+        let builds = AtomicUsize::new(0);
+        let dicts: Vec<Arc<Dictionary>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        dictionary_in(&cache, Language::British, |language| {
+                            builds.fetch_add(1, Ordering::SeqCst);
+                            build_dictionary(language)
+                        })
+                        .expect("the bundled dictionary builds")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("no panic"))
+                .collect()
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(dicts.iter().all(|d| Arc::ptr_eq(d, &dicts[0])));
+    }
+
+    #[test]
+    fn only_the_language_in_use_is_kept() {
+        let cache = Mutex::new(HashMap::new());
+        dictionary_in(&cache, Language::British, build_dictionary).expect("builds");
+        dictionary_in(&cache, Language::American, build_dictionary).expect("builds");
+        let cache = cache.lock().expect("not poisoned");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&Language::American));
     }
 
     #[test]

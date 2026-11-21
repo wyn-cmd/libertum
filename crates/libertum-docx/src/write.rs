@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use libertum_formats_common::toc::LIBERTUM_TOC_TAG;
 use libertum_model::{
     Align, Block, BlockId, CharFormat, CrossRefKind, Document, InlineImage, LineSpacing, ListStyle,
     Media, NoteKind, Orientation, PageSetup, ParaFormat, Paragraph, Section, StyleId, StyleSheet,
@@ -58,6 +59,7 @@ pub(crate) fn build(
     document: &Document,
     extras: &Extras,
     origin: Option<&Package>,
+    toc_pages: &HashMap<BlockId, u32>,
 ) -> Result<Package, DocxError> {
     let note_ids = note_ids(document);
     let footnotes_part = notes_part(NoteKind::Footnote, &note_ids.footnotes);
@@ -72,8 +74,14 @@ pub(crate) fn build(
     furniture_edits.clone().apply(&mut staged);
     let watermark_edits = crate::watermark::plan(document, &mut extras, Some(&staged));
     let header_edits = furniture_edits.then(watermark_edits);
-    let (document_part, media) = document_xml(document, &extras, &note_ids, &table_styles);
-    let styles_part = styles_xml(&document.styles, &table_styles);
+    let (document_part, media) =
+        document_xml(document, &extras, &note_ids, &table_styles, toc_pages);
+    let mut styles_part = styles_xml(&document.styles, &table_styles);
+    if let Some(toc_styles) = toc_styles_xml(document)
+        && let Some(end) = styles_part.rfind("</w:styles>")
+    {
+        styles_part.insert_str(end, &toc_styles);
+    }
     let numbering_part = numbering_xml(document);
 
     let mut package = match origin {
@@ -564,21 +572,36 @@ struct Counters {
     /// runs to the end of its paragraph, so Word's own refresh of a `REF` field shows the
     /// paragraph text, as the model says it does.
     text_targets: HashSet<String>,
+    /// Block ids of the headings the table of contents points at: each gets a `_Toc` bookmark.
+    toc_targets: HashSet<u64>,
+    /// Page number of each of those headings, as the layout resolved them.
+    toc_pages: HashMap<u64, u32>,
+    /// Counter for the ids of the content controls that wrap a table of contents.
+    controls: u32,
 }
 
 impl Counters {
-    fn new(document: &Document) -> Self {
+    fn new(document: &Document, toc_pages: &HashMap<BlockId, u32>) -> Self {
         let text_targets = document
             .paragraphs()
             .flat_map(|paragraph| paragraph.cross_refs())
             .filter(|cross_ref| cross_ref.kind == CrossRefKind::Text)
             .map(|cross_ref| cross_ref.target.to_lowercase())
             .collect();
+        let toc_targets = document
+            .paragraphs()
+            .filter_map(|paragraph| paragraph.props.toc_target)
+            .map(|target| target.0)
+            .filter(|target| *target != 0)
+            .collect();
         Self {
             bookmarks: 0,
             drawings: 0,
             media: Vec::new(),
             text_targets,
+            toc_targets,
+            toc_pages: toc_pages.iter().map(|(id, page)| (id.0, *page)).collect(),
+            controls: 0,
         }
     }
 
@@ -610,6 +633,7 @@ fn document_xml(
     extras: &Extras,
     note_ids: &NoteIds,
     table_styles: &TableStyles,
+    toc_pages: &HashMap<BlockId, u32>,
 ) -> (String, Vec<MediaPart>) {
     let paragraphs: Vec<&Paragraph> = document
         .body()
@@ -627,14 +651,16 @@ fn document_xml(
     }
 
     let list_ids = list_ids(document);
-    let mut ids = Counters::new(document);
+    let mut ids = Counters::new(document, toc_pages);
+    let body_blocks: Vec<&Block> = document.body().iter().collect();
+    let toc_runs = toc_runs(&body_blocks);
     let mut out = String::with_capacity(document.body().len() * 160);
     out.push_str(XML_DECL);
     out.push_str(&format!(
         "<w:document xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\" xmlns:wp=\"{WP_NS}\"><w:body>"
     ));
     let mut paragraph_index = 0usize;
-    for block in document.body().iter() {
+    for (body_index, block) in document.body().iter().enumerate() {
         match block {
             Block::Paragraph(paragraph) => {
                 let index = paragraph_index;
@@ -652,9 +678,32 @@ fn document_xml(
                 } else {
                     String::new()
                 };
-                out.push_str(&paragraph_xml(
-                    paragraph, &list_ids, note_ids, &sect, &mut ids,
-                ));
+                if toc_runs.iter().any(|run| run.open_at == body_index) {
+                    out.push_str(&toc_open_xml(&mut ids));
+                }
+                if paragraph.props.toc_target.is_some() {
+                    let run = toc_runs
+                        .iter()
+                        .find(|run| (run.first_entry..=run.last_entry).contains(&body_index));
+                    let width = document
+                        .sections
+                        .get(section_of[index])
+                        .map_or(9026, |section| text_width_twips(section.page));
+                    out.push_str(&toc_entry_xml(
+                        paragraph,
+                        run.is_some_and(|run| run.first_entry == body_index),
+                        run.is_some_and(|run| run.last_entry == body_index),
+                        width,
+                        &ids,
+                    ));
+                } else {
+                    out.push_str(&paragraph_xml(
+                        paragraph, &list_ids, note_ids, &sect, &mut ids,
+                    ));
+                }
+                if toc_runs.iter().any(|run| run.last_entry == body_index) {
+                    out.push_str("</w:sdtContent></w:sdt>");
+                }
             }
             Block::Table(table) => out.push_str(&table_xml(
                 table,
@@ -797,6 +846,16 @@ fn paragraph_xml(
         out.push_str(&ppr);
         out.push_str("</w:pPr>");
     }
+    // A heading the table of contents points at carries the bookmark its entry links to.
+    let toc_bookmark = ids.toc_targets.contains(&paragraph.id.0).then(|| {
+        let id = ids.bookmarks;
+        ids.bookmarks += 1;
+        out.push_str(&format!(
+            "<w:bookmarkStart w:id=\"{id}\" w:name=\"{}\"/>",
+            toc_bookmark_name(paragraph.id)
+        ));
+        id
+    });
     let text = paragraph.text();
     let references = note_references(paragraph, note_ids);
     enum Anchor<'a> {
@@ -921,8 +980,156 @@ fn paragraph_xml(
     for id in pending_ends {
         out.push_str(&format!("<w:bookmarkEnd w:id=\"{id}\"/>"));
     }
+    if let Some(id) = toc_bookmark {
+        out.push_str(&format!("<w:bookmarkEnd w:id=\"{id}\"/>"));
+    }
     out.push_str("</w:p>");
     out
+}
+
+// ------------------------------------------------------------------ table of contents
+
+/// A table of contents in the body: the blocks that go inside one content control. The control
+/// opens at `open_at` (the title above the entries, when there is one) and closes after
+/// `last_entry`.
+struct TocRun {
+    open_at: usize,
+    first_entry: usize,
+    last_entry: usize,
+}
+
+fn toc_runs(blocks: &[&Block]) -> Vec<TocRun> {
+    let is_entry = |block: &Block| {
+        block
+            .as_paragraph()
+            .is_some_and(|paragraph| paragraph.props.toc_target.is_some())
+    };
+    let mut runs = Vec::new();
+    let mut index = 0usize;
+    while index < blocks.len() {
+        if !is_entry(blocks[index]) {
+            index += 1;
+            continue;
+        }
+        let first_entry = index;
+        while index < blocks.len() && is_entry(blocks[index]) {
+            index += 1;
+        }
+        let title = first_entry
+            .checked_sub(1)
+            .filter(|before| matches!(blocks[*before], Block::Paragraph(_)));
+        runs.push(TocRun {
+            open_at: title.unwrap_or(first_entry),
+            first_entry,
+            last_entry: index - 1,
+        });
+    }
+    runs
+}
+
+/// The name of the bookmark on the heading an entry points at, in the form Word uses.
+fn toc_bookmark_name(heading: BlockId) -> String {
+    format!("_Toc{}", heading.0)
+}
+
+/// Width of the text area in twips, where a table of contents puts its right-aligned page
+/// numbers.
+fn text_width_twips(page: libertum_model::PageSetup) -> u32 {
+    let (width, _) = paper_points(page);
+    ((width - page.margins.left - page.margins.right).max(72.0) * 20.0).round() as u32
+}
+
+/// How deep an entry sits, 1 to 9: Libertum indents each level by 18 pt.
+fn toc_level(paragraph: &Paragraph) -> usize {
+    let indent = paragraph
+        .props
+        .format
+        .indent_left_pt
+        .unwrap_or(0.0)
+        .max(0.0);
+    ((indent / 18.0).round() as usize + 1).clamp(1, 9)
+}
+
+/// Opens the content control Word uses for a table of contents. Its tag says Libertum wrote it,
+/// so reading it back needs no warning.
+fn toc_open_xml(ids: &mut Counters) -> String {
+    ids.controls += 1;
+    format!(
+        "<w:sdt><w:sdtPr><w:tag w:val=\"{LIBERTUM_TOC_TAG}\"/><w:id w:val=\"{}\"/><w:docPartObj><w:docPartGallery w:val=\"Table of Contents\"/><w:docPartUnique/></w:docPartObj></w:sdtPr><w:sdtContent>",
+        1_000_000 + ids.controls
+    )
+}
+
+/// One entry of the table of contents: a paragraph in the `TOC n` style holding the heading's
+/// text as a link to its `_Toc` bookmark, then a right-aligned tab and a `PAGEREF` field with
+/// the page number. The first entry also opens the `TOC` field and the last closes it, as Word
+/// writes it, so Word's Update Table rebuilds the whole list.
+fn toc_entry_xml(
+    paragraph: &Paragraph,
+    first: bool,
+    last: bool,
+    width_twips: u32,
+    ids: &Counters,
+) -> String {
+    let target = paragraph
+        .props
+        .toc_target
+        .filter(|target| target.0 != 0)
+        .map(|target| (target, ids.toc_pages.get(&target.0).copied()));
+    let mut out = format!(
+        "<w:p><w:pPr><w:pStyle w:val=\"TOC{}\"/>",
+        toc_level(paragraph)
+    );
+    if matches!(target, Some((_, Some(_)))) {
+        out.push_str(&format!(
+            "<w:tabs><w:tab w:val=\"right\" w:leader=\"dot\" w:pos=\"{width_twips}\"/></w:tabs>"
+        ));
+    }
+    out.push_str("</w:pPr>");
+    if first {
+        out.push_str(
+            "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC \\o \"1-9\" \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
+        );
+    }
+    let text = run_xml(paragraph.text(), &CharFormat::default());
+    match target {
+        Some((heading, page)) => {
+            let name = toc_bookmark_name(heading);
+            out.push_str(&format!(
+                "<w:hyperlink w:anchor=\"{name}\" w:history=\"1\">{text}"
+            ));
+            if let Some(page) = page {
+                out.push_str(&format!(
+                    "<w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGEREF {name} \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>{page}</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+                ));
+            }
+            out.push_str("</w:hyperlink>");
+        }
+        None => out.push_str(&text),
+    }
+    if last {
+        out.push_str("<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>");
+    }
+    out.push_str("</w:p>");
+    out
+}
+
+/// The `TOC 1` to `TOC 9` paragraph styles, written when the document has a table of contents.
+/// Word's own definitions are the same shape: based on Normal, indented a level at a time.
+fn toc_styles_xml(document: &Document) -> Option<String> {
+    document
+        .paragraphs()
+        .any(|paragraph| paragraph.props.toc_target.is_some())
+        .then(|| {
+            (1..=9)
+                .map(|level| {
+                    format!(
+                        "<w:style w:type=\"paragraph\" w:styleId=\"TOC{level}\"><w:name w:val=\"toc {level}\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:uiPriority w:val=\"39\"/><w:unhideWhenUsed/><w:pPr><w:spacing w:after=\"100\"/><w:ind w:left=\"{}\"/></w:pPr></w:style>",
+                        (level - 1) * 360
+                    )
+                })
+                .collect()
+        })
 }
 
 /// The field instruction for a cross-reference: `REF` for the text, `PAGEREF` for the page.

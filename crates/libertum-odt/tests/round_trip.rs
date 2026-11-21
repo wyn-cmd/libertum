@@ -1283,3 +1283,183 @@ fn a_watermark_shares_a_header_with_its_text_and_page_number() {
             .contains("custom-shape")
     );
 }
+
+// ------------------------------------------------------------------ table of contents
+
+fn toc_fixture() -> Vec<u8> {
+    // Written by hand to the structure LibreOffice uses (a `text:table-of-content` holding its
+    // source description and an index body of entries linking to `__RefHeading` bookmarks),
+    // on the same package as rich.odt. It is not an export from LibreOffice itself.
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/odt/toc.odt"
+    ))
+    .expect("toc.odt fixture")
+}
+
+fn summary(doc: &Document) -> Vec<(String, bool)> {
+    doc.paragraphs()
+        .map(|p| (p.text().to_owned(), p.props.toc_target.is_some()))
+        .collect()
+}
+
+#[test]
+fn a_libreoffice_table_of_contents_opens_with_a_warning_and_is_marked_for_rebuilding() {
+    let odt = Odt::parse(&toc_fixture()).expect("a LibreOffice TOC opens");
+    assert!(
+        odt.warnings()
+            .iter()
+            .any(|w| w == libertum_formats_common::toc::TOC_REBUILT_WARNING)
+    );
+    assert_eq!(
+        summary(odt.document()),
+        vec![
+            ("My Novel".to_owned(), false),
+            ("Table of Contents".to_owned(), false),
+            (String::new(), true),
+            ("Chapter One".to_owned(), false),
+            ("It was a dark night.".to_owned(), false),
+            ("Chapter Two".to_owned(), false),
+            ("The morning came.".to_owned(), false),
+        ]
+    );
+    let marker = odt.document().paragraphs().nth(2).expect("marker");
+    assert_eq!(marker.props.toc_target, Some(BlockId(0)));
+    // LibreOffice's own heading anchors are not kept as bookmarks.
+    assert!(
+        odt.document()
+            .paragraphs()
+            .all(|p| p.bookmarks().is_empty())
+    );
+    // Headings stay headings.
+    let levels: Vec<_> = odt
+        .document()
+        .paragraphs()
+        .filter_map(|p| p.props.outline_level)
+        .collect();
+    assert_eq!(levels, vec![1, 1]);
+}
+
+#[test]
+fn other_indexes_are_still_refused() {
+    let result = Odt::parse(&package_with_content(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.3">
+  <office:body><office:text><text:illustration-index text:name="Figures"><text:index-body><text:p>Figure 1</text:p></text:index-body></text:illustration-index></office:text></office:body>
+</office:document-content>"#,
+    ));
+    assert!(matches!(result, Err(OdtError::Unsupported { .. })));
+}
+
+fn toc_document() -> Document {
+    let mut document = Document::from_blocks(vec![
+        Block::Paragraph(
+            Paragraph::new(BlockId(1), "Contents").with_props(ParaProps {
+                style: StyleId::TITLE,
+                ..ParaProps::default()
+            }),
+        ),
+        Block::Paragraph(
+            Paragraph::new(BlockId(2), "Chapter One").with_props(ParaProps {
+                toc_target: Some(BlockId(4)),
+                ..ParaProps::default()
+            }),
+        ),
+        Block::Paragraph(
+            Paragraph::new(BlockId(3), "A Section").with_props(ParaProps {
+                toc_target: Some(BlockId(6)),
+                format: ParaFormat {
+                    indent_left_pt: Some(18.0),
+                    ..ParaFormat::default()
+                },
+                ..ParaProps::default()
+            }),
+        ),
+        Block::Paragraph(
+            Paragraph::new(BlockId(4), "Chapter One").with_props(ParaProps {
+                style: StyleId::HEADING_1,
+                outline_level: Some(1),
+                ..ParaProps::default()
+            }),
+        ),
+        Block::Paragraph(Paragraph::new(BlockId(5), "Words.")),
+        Block::Paragraph(
+            Paragraph::new(BlockId(6), "A Section").with_props(ParaProps {
+                style: StyleId::HEADING_2,
+                outline_level: Some(2),
+                ..ParaProps::default()
+            }),
+        ),
+        Block::Paragraph(Paragraph::new(BlockId(7), "More words.")),
+    ]);
+    document.sections = vec![Section::default()];
+    document
+}
+
+#[test]
+fn a_libertum_table_of_contents_is_saved_the_way_libreoffice_saves_one() {
+    let mut odt = Odt::new(toc_document());
+    odt.set_toc_pages([(BlockId(4), 1), (BlockId(6), 3)].into_iter().collect());
+    let bytes = odt.to_bytes().expect("write");
+    let xml = zip_text(&bytes, "content.xml").expect("content.xml");
+
+    assert!(xml.contains("<text:table-of-content text:name=\"libertum-toc\">"));
+    // The ODF schema puts the source description before the body.
+    let source = xml.find("<text:table-of-content-source").expect("source");
+    let body = xml.find("<text:index-body>").expect("body");
+    assert!(source < body);
+    // One entry template per level, each naming a style that exists.
+    assert_eq!(
+        xml.matches("<text:table-of-content-entry-template").count(),
+        9
+    );
+    assert!(xml.contains("<text:index-title text:name=\"libertum-toc_Head\">"));
+    // Entries link to the headings' bookmarks and carry the page number after a tab.
+    assert!(xml.contains("xlink:href=\"#_Toc4\""));
+    assert!(xml.contains("Chapter One<text:tab/>1</text:a>"));
+    assert!(xml.contains("A Section<text:tab/>3</text:a>"));
+    assert!(xml.contains("<text:bookmark-start text:name=\"_Toc4\"/>"));
+    assert!(xml.contains("<text:bookmark-end text:name=\"_Toc6\"/>"));
+    assert!(xml.contains("text:style-name=\"Contents_20_2\""));
+    let styles = zip_text(&bytes, "styles.xml").expect("styles.xml");
+    assert!(styles.contains("style:name=\"Contents_20_1\""));
+    assert!(styles.contains("style:name=\"Contents_20_9\""));
+    assert!(styles.contains("style:leader-style=\"dotted\" style:leader-text=\".\""));
+}
+
+#[test]
+fn a_libertum_table_of_contents_comes_back_without_a_warning_and_without_stray_bookmarks() {
+    let mut odt = Odt::new(toc_document());
+    odt.set_toc_pages([(BlockId(4), 1), (BlockId(6), 3)].into_iter().collect());
+    let reread = Odt::parse(&odt.to_bytes().expect("write")).expect("reopen");
+    assert!(
+        reread.warnings().is_empty(),
+        "Libertum's own table of contents needs no warning: {:?}",
+        reread.warnings()
+    );
+    assert_eq!(
+        summary(reread.document()),
+        vec![
+            ("Contents".to_owned(), false),
+            (String::new(), true),
+            ("Chapter One".to_owned(), false),
+            ("Words.".to_owned(), false),
+            ("A Section".to_owned(), false),
+            ("More words.".to_owned(), false),
+        ]
+    );
+    assert!(
+        reread
+            .document()
+            .paragraphs()
+            .all(|p| p.bookmarks().is_empty())
+    );
+}
+
+#[test]
+fn entries_are_saved_without_page_numbers_when_the_layout_has_none_to_give() {
+    let bytes = Odt::new(toc_document()).to_bytes().expect("write");
+    let xml = zip_text(&bytes, "content.xml").expect("content.xml");
+    assert!(xml.contains("xlink:href=\"#_Toc4\">Chapter One</text:a>"));
+    assert!(!xml.contains("<text:tab/>"));
+}

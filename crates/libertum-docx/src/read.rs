@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use libertum_formats_common::media::media_from_bytes;
+use libertum_formats_common::toc::TOC_REBUILT_WARNING;
 use libertum_model::{
     Align, Block, BlockId, Bookmark, BorderSides, Borders, CharFormat, CrossRef, CrossRefKind,
     Document, InlineImage, Ligatures, LineSpacing, ListItem, ListStyle, MAX_LIST_LEVEL,
@@ -22,6 +23,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::package::Package;
+use crate::toc;
 use crate::xml::{self, XmlNode};
 use crate::{DocxError, Extras, SectionExtras};
 
@@ -67,6 +69,15 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Parsed, DocxError> {
         }
         if body.break_after.contains(&paragraph.id) {
             open_next = true;
+        }
+        // Word marks a heading by its style: the style carries the outline level and the
+        // paragraph only names the style. The model keeps the level on the paragraph (the
+        // editor copies it there when a style is applied), and the table of contents and the
+        // Headers pane read it from there, so a Word heading needs it filled in.
+        if paragraph.props.outline_level.is_none()
+            && let Some(level) = styles.sheet.outline_level(paragraph.props.style)
+        {
+            paragraph.props.outline_level = Some(level);
         }
     }
 
@@ -954,6 +965,9 @@ fn parse_body(
     let mut extras: Extras = Vec::new();
     let mut body_sect: Option<XmlNode> = None;
     let mut break_after = Vec::new();
+    // While Libertum is replacing a table of contents that was written as a bare field, the
+    // entries between the field's start and its end are skipped; this counts the open fields.
+    let mut toc_skip: Option<i32> = None;
 
     loop {
         match reader.read_event().map_err(|e| xml::xml_error(PART, e))? {
@@ -964,6 +978,40 @@ fn parse_body(
                 match name.as_str() {
                     "p" => {
                         let node = xml::read_node(&mut reader, &start, PART)?;
+                        let marks = toc::field_marks(&node);
+                        if let Some(depth) = toc_skip {
+                            // An entry of the table of contents being rebuilt.
+                            let depth = depth + marks.begins - marks.ends;
+                            toc_skip = (depth > 0).then_some(depth);
+                            continue;
+                        }
+                        if marks
+                            .first_instruction
+                            .as_deref()
+                            .is_some_and(toc::is_supported_toc)
+                        {
+                            // A table of contents written as a bare field, with no content
+                            // control around it and so no title of its own.
+                            // An ordinary paragraph right above it ("Contents") is the title.
+                            // A heading above it is not: the table of contents would leave it
+                            // out, so an empty title goes in between.
+                            let titled = matches!(
+                                blocks.last(),
+                                Some(Block::Paragraph(above))
+                                    if above.props.outline_level.is_none()
+                                        && styles.sheet.outline_level(above.props.style).is_none()
+                            );
+                            if !titled {
+                                blocks.push(Block::Paragraph(toc::empty_title(BlockId(next_id))));
+                                next_id += 1;
+                            }
+                            blocks.push(Block::Paragraph(toc::marker(BlockId(next_id))));
+                            next_id += 1;
+                            warnings.push(TOC_REBUILT_WARNING.to_owned());
+                            let depth = marks.begins - marks.ends;
+                            toc_skip = (depth > 0).then_some(depth);
+                            continue;
+                        }
                         let (mut parts, sect) =
                             parse_paragraph(&node, styles, numbering, notes, images, warnings)?;
                         for paragraph in &mut parts {
@@ -994,7 +1042,43 @@ fn parse_body(
                         blocks.push(Block::Table(table));
                     }
                     "sectPr" => body_sect = Some(xml::read_node(&mut reader, &start, PART)?),
-                    "sdt" | "customXml" | "altChunk" => {
+                    "sdt" => {
+                        let node = xml::read_node(&mut reader, &start, PART)?;
+                        if !toc::is_toc_control(&node) {
+                            return Err(DocxError::Unsupported {
+                                part: PART.to_owned(),
+                                what: "a content control".to_owned(),
+                            });
+                        }
+                        let (title, supported) = toc::split_control(&node);
+                        if !supported {
+                            return Err(DocxError::Unsupported {
+                                part: PART.to_owned(),
+                                what: "a table of contents built from something other than \
+                                       headings"
+                                    .to_owned(),
+                            });
+                        }
+                        // The control's first paragraph is its title; the entries are rebuilt.
+                        let mut parts = match title {
+                            Some(title) => {
+                                parse_paragraph(title, styles, numbering, notes, images, warnings)?
+                                    .0
+                            }
+                            None => vec![toc::empty_title(BlockId(0))],
+                        };
+                        for paragraph in &mut parts {
+                            paragraph.id = BlockId(next_id);
+                            next_id += 1;
+                        }
+                        blocks.extend(parts.into_iter().map(Block::Paragraph));
+                        blocks.push(Block::Paragraph(toc::marker(BlockId(next_id))));
+                        next_id += 1;
+                        if !toc::is_ours(&node) {
+                            warnings.push(TOC_REBUILT_WARNING.to_owned());
+                        }
+                    }
+                    "customXml" | "altChunk" => {
                         return Err(DocxError::Unsupported {
                             part: PART.to_owned(),
                             what: format!("a {name} block"),
@@ -1394,8 +1478,11 @@ fn parse_paragraph(
                 let name = child.attr("name").unwrap_or_default();
                 // Word's hidden bookmarks start with an underscore (`_GoBack`, `_Toc...`); keep
                 // one only when a cross-reference points at it.
-                let wanted =
-                    !name.starts_with('_') || images.ref_targets.contains(&name.to_lowercase());
+                // The `_Toc` ones are the table of contents' own links to its headings, which
+                // Libertum rebuilds, so they are never kept.
+                let wanted = !name.starts_with('_')
+                    || (images.ref_targets.contains(&name.to_lowercase())
+                        && !name.to_ascii_lowercase().starts_with("_toc"));
                 if !name.is_empty() && wanted {
                     let segment = segments.last_mut().expect("segment");
                     let offset = segment.text.len();

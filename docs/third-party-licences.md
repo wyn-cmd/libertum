@@ -1,6 +1,6 @@
 # Third-party licences
 
-Dependencies are MIT, Apache-2.0, ISC, BSD or Zlib (AGENTS.md rule 4). This file records the cases that need more than that: embedded data with its own licence, and notices that must ship with the binary.
+Dependencies are MIT, Apache-2.0, ISC, BSD or Zlib (CONTRIBUTING.md rule 4). This file records the cases that need more than that: embedded data with its own licence, and notices that must ship with the binary.
 
 ## Hyphenation patterns (`hypher` 0.1.8)
 
@@ -25,7 +25,7 @@ Lucide icons (ISC), with the licence in `crates/libertum-app/assets/icons/`.
 ## Crates added for the native format (2026-11-11)
 
 `serde` (with the `rc` feature) and `serde_json` are MIT OR Apache-2.0, so the permissive-only rule in
-AGENTS.md is satisfied. They were added to the workspace for `libertum-native` and the serde derives on
+CONTRIBUTING.md is satisfied. They were added to the workspace for `libertum-native` and the serde derives on
 `libertum-model`. The ZIP reader and writer was already a dependency of the DOCX and ODT crates (`zip`, MIT).
 No embedded data files were added, so the notices this application must ship are unchanged.
 
@@ -33,7 +33,7 @@ No embedded data files were added, so the notices this application must ship are
 
 `printpdf` 0.12.9 and `lopdf` 0.44 are MIT. printpdf brings `allsorts`/`allsorts-azul`, `time` and
 `image` transitively; those are MIT or Apache-2.0. No font or ICC data is shipped: fonts come from
-the user's system and are embedded (subset) in the exported PDF only, and the sRGB profile used
+the host system and are embedded (subset) in the exported PDF only, and the sRGB profile used
 for PDF/A's output intent is generated in `crates/libertum-render/src/pdf.rs`, so there is no
 third-party profile licence to carry.
 
@@ -58,3 +58,7 @@ The bundled dictionaries:
 | English (American) | SCOWL `en_US` via LibreOffice dictionaries | SCOWL permission (with BSD, WordNet and UKACD notices) | `crates/libertum-app/assets/dictionaries/en_US.{aff,dic}`, `LICENSE_en_US.txt` |
 
 Both licence files are kept beside the dictionaries and must be included in packaged notices.
+
+## AO3 rating and warning names
+
+`libertum-export` (`AO3_RATINGS`, `AO3_WARNINGS`) carries the names of the ratings and archive warnings that AO3's posting form offers, so the writer picks them instead of typing them. They are short factual labels, not AO3 code or text, and no AO3 content is bundled beyond them. They were taken from AO3's own pages (the Terms of Service FAQ, the Tags FAQ and the Posting a Work tutorial) through a web search on 2026-11-21; the live form was not read because AO3 rate-limited the request. "Underage Sex" is the name a 2024 AO3 guide gives; the older Tags FAQ says "Underage". Re-check both lists against the live form when the rate limit allows.

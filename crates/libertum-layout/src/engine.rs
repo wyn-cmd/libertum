@@ -134,12 +134,20 @@ pub struct LayoutOptions {
     /// so a line always fits on a page. The pagination state sets this from the page size.
     pub max_image_height_pt: f32,
     /// Threads used to shape paragraphs ahead of pagination: 0 picks one per core (at most
-    /// [`MAX_LAYOUT_THREADS`]), 1 keeps everything on the calling thread.
+    /// [`DEFAULT_LAYOUT_THREADS`]), 1 keeps everything on the calling thread, and an explicit
+    /// count is honoured up to [`MAX_LAYOUT_THREADS`].
     pub threads: usize,
 }
 
-/// Most threads the engine uses to lay out paragraphs ahead of pagination.
+/// Most threads the engine uses to lay out paragraphs ahead of pagination, however many are asked
+/// for.
 pub const MAX_LAYOUT_THREADS: usize = 8;
+
+/// Threads used when the count is left to the engine (`threads: 0`). Four: the 500-page demo
+/// stops gaining there (full pagination: about 600 ms with one thread, 620 to 650 ms with two
+/// or four, 920 to 1,070 ms with eight), and a four-core machine keeps the count it had before
+/// the cap (docs/decisions.md, 2026-11-20 and 2026-11-21).
+pub const DEFAULT_LAYOUT_THREADS: usize = 4;
 
 impl Default for LayoutOptions {
     fn default() -> Self {
@@ -906,9 +914,11 @@ impl Engine {
     }
 
     /// How many threads a batch of `jobs` paragraphs may use.
-    fn worker_count(&self, jobs: usize) -> usize {
+    pub(crate) fn worker_count(&self, jobs: usize) -> usize {
         let wanted = if self.opts.threads == 0 {
-            std::thread::available_parallelism().map_or(1, |n| n.get())
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(DEFAULT_LAYOUT_THREADS)
         } else {
             self.opts.threads
         };

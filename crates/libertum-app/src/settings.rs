@@ -93,6 +93,9 @@ pub struct Settings {
     /// The local AO3 tag vocabulary: what suggested tags are ranked against. Nothing
     /// leaves this file; see `libertum_export::tags`.
     pub tags: Vec<libertum_export::Tag>,
+    /// Also suggest characters, pairings and keywords found in the chapter's own text, with no
+    /// vocabulary needed (`libertum_export::auto_suggestions`). On by default; local only.
+    pub auto_suggest_tags: bool,
     /// Ask GitHub once a day whether a newer release exists. On by default; the check only
     /// reads the public releases API and never installs anything.
     pub check_for_updates: bool,
@@ -347,6 +350,7 @@ impl Default for Settings {
             units: UnitsPreference::Auto,
             chapter_headings: libertum_export::ChapterLevels::default(),
             tags: Vec::new(),
+            auto_suggest_tags: true,
             check_for_updates: true,
             spellcheck: true,
             spellcheck_language: SpellLanguage::British,
@@ -484,6 +488,7 @@ mod tests {
                     libertum_export::TagCategory::Relationship,
                 ),
             ],
+            auto_suggest_tags: false,
             check_for_updates: false,
             spellcheck: false,
             spellcheck_language: crate::spell::Language::American,
@@ -495,7 +500,7 @@ mod tests {
             dev_mode: true,
             mcp_enabled: true,
             mcp_allow_edits: true,
-            mcp_trusted_clients: vec!["Claude Desktop".to_owned()],
+            mcp_trusted_clients: vec!["Example Editor".to_owned()],
             mcp_servers: vec![McpServerConfig {
                 name: "Notes".to_owned(),
                 command_line: "npx -y some-server".to_owned(),
@@ -681,15 +686,15 @@ mcp_allow_edits = true
     #[test]
     fn trusted_clients_are_remembered_once_saved_and_forgotten() {
         let mut s = Settings::default();
-        assert!(!s.mcp_trusts("Claude Desktop"));
-        s.trust_mcp_client("Claude Desktop");
-        s.trust_mcp_client("Claude Desktop");
-        assert_eq!(s.mcp_trusted_clients, ["Claude Desktop"]);
+        assert!(!s.mcp_trusts("Example Editor"));
+        s.trust_mcp_client("Example Editor");
+        s.trust_mcp_client("Example Editor");
+        assert_eq!(s.mcp_trusted_clients, ["Example Editor"]);
         let back = Settings::from_toml(&s.to_toml().expect("toml")).expect("parse");
-        assert!(back.mcp_trusts("Claude Desktop"));
+        assert!(back.mcp_trusts("Example Editor"));
         assert!(!back.mcp_trusts("Someone else"));
         s.forget_mcp_clients();
-        assert!(!s.mcp_trusts("Claude Desktop"));
+        assert!(!s.mcp_trusts("Example Editor"));
     }
 
     #[test]

@@ -50,6 +50,8 @@ pub struct Odt {
     document: Document,
     origin: Option<package::Package>,
     warnings: Vec<String>,
+    /// The page each table-of-contents heading is on (see [`Odt::set_toc_pages`]).
+    toc_pages: std::collections::HashMap<libertum_model::BlockId, u32>,
 }
 
 impl Odt {
@@ -60,6 +62,7 @@ impl Odt {
             document: parsed.document,
             origin: Some(parsed.package),
             warnings: parsed.warnings,
+            toc_pages: Default::default(),
         })
     }
 
@@ -75,7 +78,19 @@ impl Odt {
             document,
             origin: None,
             warnings: Vec::new(),
+            toc_pages: Default::default(),
         }
+    }
+
+    /// Gives the writer the page number of each heading a table-of-contents entry points at
+    /// (keyed by the heading's block id), so the entries are saved with their page numbers
+    /// until LibreOffice next updates the index. Without them the entries are saved without
+    /// page numbers.
+    pub fn set_toc_pages(
+        &mut self,
+        pages: std::collections::HashMap<libertum_model::BlockId, u32>,
+    ) {
+        self.toc_pages = pages;
     }
 
     pub fn document(&self) -> &Document {
@@ -99,7 +114,7 @@ impl Odt {
 
     /// Writes the document as an ODT package.
     pub fn to_bytes(&self) -> Result<Vec<u8>, OdtError> {
-        let package = write::build(&self.document, self.origin.as_ref())?;
+        let package = write::build(&self.document, self.origin.as_ref(), &self.toc_pages)?;
         package.write_odf()
     }
 
