@@ -244,6 +244,10 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install the fontconfig headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev
       - name: Bench the base commit
         run: |
           git worktree add base "${{ github.event.pull_request.base.sha }}"
