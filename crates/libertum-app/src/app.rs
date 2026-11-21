@@ -1031,6 +1031,10 @@ pub struct App {
     /// again, which would stop it dead while still moving.
     fling_gliding: bool,
     trackpad_at: Option<Instant>,
+    /// Trackpad movement received since the last frame, physical pixels. It is applied in
+    /// [`App::coast`] on the next vsync, so the page moves once per displayed frame however
+    /// unevenly the pad's events arrive.
+    trackpad_pending: (f32, f32),
     last_frame: Option<Instant>,
     /// Consecutive Escape presses and when the last one arrived: three in a row go home.
     escape_presses: (u8, Instant),
@@ -1158,6 +1162,7 @@ impl App {
             fling: (0.0, 0.0),
             fling_gliding: false,
             trackpad_at: None,
+            trackpad_pending: (0.0, 0.0),
             last_frame: None,
             escape_presses: (0, Instant::now()),
             stitch_sources: Vec::new(),
@@ -2232,6 +2237,7 @@ impl App {
                         self.last_frame = Some(Instant::now());
                     }
                     self.fling = (0.0, 0.0);
+                    self.trackpad_pending = (0.0, 0.0);
                     // A notch the other way cancels what is left instead of fighting it.
                     let add = |pending: f32, delta: f32| {
                         if pending != 0.0 && delta != 0.0 && pending.signum() != delta.signum() {
@@ -2249,18 +2255,24 @@ impl App {
                     // A trackpad (or a drag past the edge): follow it exactly, and note how
                     // fast the finger is moving so the page can carry on when it lifts.
                     let now = Instant::now();
+                    // The frame clock was not running if no gesture was in progress: time
+                    // the first frame from this event.
+                    let clock_was_off = !self.trackpad_active(now);
                     self.scroll_pending = (0.0, 0.0);
                     let (px, py) = (dx * sf, dy * sf);
-                    self.scroll.0 += px;
-                    self.scroll.1 += py;
+                    // Queued, not applied: the next frame moves the page by everything that
+                    // arrived since the last one.
+                    self.trackpad_pending.0 += px;
+                    self.trackpad_pending.1 += py;
                     self.track_fling(now, (px, py));
-                    if self.fling != (0.0, 0.0) && self.last_frame.is_none_or(|t| now > t) {
+                    if clock_was_off || self.last_frame.is_none() {
                         self.last_frame = Some(now);
                     }
                 }
             }
             CanvasEvent::ScrollTo { x, y } => {
                 self.scroll_pending = (0.0, 0.0);
+                self.trackpad_pending = (0.0, 0.0);
                 self.fling = (0.0, 0.0);
                 self.scroll.0 = x.unwrap_or(self.scroll.0);
                 self.scroll.1 = y.unwrap_or(self.scroll.1);
@@ -2682,6 +2694,7 @@ impl App {
     fn reveal_vertical(&mut self, top: f32, bottom: f32) {
         // Showing the caret wins over a wheel glide still in progress.
         self.scroll_pending = (0.0, 0.0);
+        self.trackpad_pending = (0.0, 0.0);
         self.fling = (0.0, 0.0);
         let m = self.metrics();
         let vp = self.viewport_physical();
@@ -3098,6 +3111,12 @@ impl App {
             })
             .clamp(0.0, 0.05);
         self.last_frame = Some(now);
+        if self.trackpad_pending != (0.0, 0.0) {
+            self.scroll.0 += self.trackpad_pending.0;
+            self.scroll.1 += self.trackpad_pending.1;
+            self.trackpad_pending = (0.0, 0.0);
+            self.clamp_scroll();
+        }
         self.fling_step(now, dt);
         if dt == 0.0 || self.scroll_pending == (0.0, 0.0) {
             return;
@@ -3117,6 +3136,16 @@ impl App {
         self.scroll_pending = (self.scroll_pending.0 - sx, self.scroll_pending.1 - sy);
         self.trim_pending_to_edges();
         self.clamp_scroll();
+    }
+
+    /// A trackpad gesture is in progress: movement is queued for the next frame, or an event
+    /// arrived within [`TRACKPAD_ACTIVE`]. The frame clock runs only while this holds (or a
+    /// glide is under way), so a still window asks the GPU for nothing.
+    fn trackpad_active(&self, now: Instant) -> bool {
+        self.trackpad_pending != (0.0, 0.0)
+            || self
+                .trackpad_at
+                .is_some_and(|at| now.saturating_duration_since(at).as_secs_f32() < TRACKPAD_ACTIVE)
     }
 
     /// Updates the finger's velocity from one trackpad event that moved the view by `moved`
@@ -3235,6 +3264,7 @@ impl App {
         self.bookmark_draft = None;
         self.scroll = (0.0, 0.0);
         self.scroll_pending = (0.0, 0.0);
+        self.trackpad_pending = (0.0, 0.0);
         self.fling = (0.0, 0.0);
         self.canvas_focused = false;
         self.ime_preedit = None;
@@ -3864,7 +3894,9 @@ impl App {
             window::close_requests().map(|_| Message::CloseRequested),
         ];
         let autoscrolling = self.autoscroll.as_ref().is_some_and(AutoScroll::active);
-        let coasting = self.scroll_pending != (0.0, 0.0) || self.fling != (0.0, 0.0);
+        let coasting = self.scroll_pending != (0.0, 0.0)
+            || self.fling != (0.0, 0.0)
+            || self.trackpad_active(Instant::now());
         if autoscrolling || coasting || self.bench.is_some() || self.state.sidebar_animating() {
             subs.push(window::frames().map(Message::Frame));
         }
@@ -5080,6 +5112,7 @@ impl App {
             Message::GoToPage(page) => {
                 let m = self.metrics();
                 self.scroll_pending = (0.0, 0.0);
+                self.trackpad_pending = (0.0, 0.0);
                 self.fling = (0.0, 0.0);
                 self.scroll.1 = m.page_top(page) - m.pad;
                 self.clamp_scroll();
@@ -8158,6 +8191,9 @@ const SCROLL_GLIDE_RATE: f32 = 20.0;
 /// second (about a sixth of a second to halve; the page travels speed / rate in all); and it
 /// ends below the minimum speed. The cap stops one noisy event from launching the page; it was 12,000 px/s and is now 24,000, so a hard flick travels twice as far.
 const FLING_SAMPLE_WINDOW: f32 = 0.1;
+/// The frame clock keeps running this long (seconds) after the last trackpad event, so a
+/// gesture is drawn on every vsync; after it the window goes back to redrawing only on change.
+const TRACKPAD_ACTIVE: f32 = 0.1;
 const FLING_IDLE: f32 = 0.04;
 const FLING_DECAY_RATE: f32 = 4.0;
 /// How much the newest event counts in the velocity (the rest is what came before). High, so
@@ -11971,15 +12007,19 @@ mod tests {
         }));
         assert_eq!(app.scroll_pending.1, -notch);
 
-        // A trackpad delta is applied as it comes and ends any glide.
+        // A trackpad delta is queued and ends any glide; the next frame applies all of it.
         let before = app.scroll.1;
         let _ = app.update(Message::Canvas(CanvasEvent::Wheel {
             dx: 0.0,
             dy: 7.5,
             stepped: false,
         }));
-        assert_eq!(app.scroll.1, before + 7.5);
+        assert_eq!(app.scroll.1, before, "not applied until a frame");
+        assert_eq!(app.trackpad_pending.1, 7.5);
         assert_eq!(app.scroll_pending, (0.0, 0.0));
+        app.coast(Instant::now());
+        assert_eq!(app.scroll.1, before + 7.5);
+        assert_eq!(app.trackpad_pending, (0.0, 0.0));
 
         // At the top edge a notch upwards asks for nothing, so no frames are run for it.
         app.scroll = (0.0, 0.0);
@@ -11997,6 +12037,43 @@ mod tests {
         }));
         app.ensure_caret_visible();
         assert_eq!(app.scroll_pending, (0.0, 0.0));
+    }
+
+    #[test]
+    fn trackpad_events_arriving_between_frames_move_the_page_once_and_the_clock_stops_when_still() {
+        let mut app = scrolling_app();
+        app.scroll = (0.0, 100.0);
+        let wheel = |dy| {
+            Message::Canvas(CanvasEvent::Wheel {
+                dx: 0.0,
+                dy,
+                stepped: false,
+            })
+        };
+        // Three events within one frame: the page moves by their sum, once.
+        let _ = app.update(wheel(4.0));
+        let _ = app.update(wheel(5.0));
+        let _ = app.update(wheel(6.0));
+        assert_eq!(app.scroll.1, 100.0);
+        assert!(
+            app.trackpad_active(Instant::now()),
+            "frames run during the gesture"
+        );
+        app.coast(Instant::now());
+        assert_eq!(app.scroll.1, 115.0);
+        // A programmatic jump drops anything still queued.
+        let _ = app.update(wheel(9.0));
+        let _ = app.update(Message::GoToPage(0));
+        let at = app.scroll.1;
+        app.coast(Instant::now());
+        assert_eq!(
+            app.scroll.1, at,
+            "a stale delta must not move the page after a jump"
+        );
+        // Once the events stop and the queue is empty, the gesture is over and nothing asks
+        // for frames: an idle window costs no GPU work.
+        let later = Instant::now() + Duration::from_millis(500);
+        assert!(!app.trackpad_active(later));
     }
 
     #[test]

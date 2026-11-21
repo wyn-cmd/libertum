@@ -62,7 +62,7 @@ To assemble a release by hand, download the CI run's artifacts (`gh run download
 1. **`Libertum-Setup-<version>.exe`**, attached under that exact name (the updater looks for it; `Libertum-Setup.exe` stays as the fixed-name copy).
 2. **A `SHA256SUMS` file** listing every attached file, made after all the files are collected: `sha256sum <files> > SHA256SUMS` (Git Bash on Windows has `sha256sum`), then attach it. It must include each file name exactly as attached. The macOS artifact also holds `Libertum-<version>-macos-<arch>.zip` (the app, for the updater); attach it next to the `.dmg`.
 
-The updater checks each download against `SHA256SUMS` from the same release, so it catches a damaged download, not a tampered release (nothing is code-signed).
+The updater checks each download against `SHA256SUMS` from the same release, so it catches a damaged download, not a tampered release (nothing is code-signed). On Linux a `.deb` or `.rpm` is installed through `pkexec`, so the release files must keep the names the updater looks for (`libertum_<version>_amd64.deb`, `libertum-<version>-1.x86_64.rpm`); without `pkexec`, the updater downloads the package and shows the command instead.
 
 ## Workspace layout
 

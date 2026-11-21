@@ -5,16 +5,19 @@
 //!
 //! - **Windows**: run the release's setup program silently once Libertum has closed.
 //! - **Linux AppImage**: replace the AppImage file, then start the new one.
-//! - **Linux `.deb` / `.rpm`**: download the package and show the exact command to run
-//!   (installing a package needs administrator rights, so Libertum never does it).
+//! - **Linux `.deb` / `.rpm`**: download the package and install it through `pkexec`, the
+//!   desktop's own administrator prompt (the password dialog is polkit's, not Libertum's).
+//!   Without `pkexec` the package is downloaded and its install command shown instead.
 //! - **macOS**: replace `Libertum.app` from the release's zip, then open the new one.
 //! - Anything else (a build run from a source tree, a folder Libertum cannot write to): the
 //!   release page, as before.
 //!
 //! [`prepare`] does the slow part on a background thread: it downloads the file and checks it
-//! against the release's `SHA256SUMS`. It changes nothing that is in use. The step that
-//! replaces the running program is [`Staged::apply`], which the app calls as it quits, so
-//! the usual unsaved-changes prompt still comes first.
+//! against the release's `SHA256SUMS`. A package is installed during this step, while the
+//! window is still open, so a refused password or a failed install is reported and the
+//! installed version is left as it was. The step that replaces the running program is
+//! [`Staged::apply`], which the app calls as it quits, so the usual unsaved-changes prompt
+//! still comes first.
 //!
 //! The checksum file comes from the same release as the download, so it catches a damaged or
 //! truncated download, not a release that was itself tampered with (nothing is code-signed).
@@ -45,6 +48,9 @@ pub struct Host {
     pub appimage: Option<PathBuf>,
     /// Package tools found on `PATH` (`dpkg`, `dnf`, `zypper`, `rpm`).
     pub tools: Vec<&'static str>,
+    /// `pkexec` was found, so a package can be installed through polkit's password prompt
+    /// without the user copying a command anywhere.
+    pub pkexec: bool,
 }
 
 impl Host {
@@ -61,6 +67,7 @@ impl Host {
                 .map(PathBuf::from)
                 .filter(|path| path.is_file()),
             tools,
+            pkexec: on_path("pkexec"),
         }
     }
 
@@ -90,6 +97,13 @@ pub enum Plan {
     Windows { installer: Asset },
     /// Replace the AppImage at `target`.
     AppImage { image: Asset, target: PathBuf },
+    /// Download a package and install it with `pkexec` (polkit's password prompt), then
+    /// start `restart` once Libertum has closed.
+    PackageAuto {
+        package: Asset,
+        tool: PackageTool,
+        restart: PathBuf,
+    },
     /// Download a package and show the command that installs it.
     Package { package: Asset, tool: PackageTool },
     /// Replace the app bundle at `bundle` from the release's zip.
@@ -152,9 +166,17 @@ pub fn plan(host: &Host, release: &Release) -> Plan {
             } else {
                 None
             }
-            .map_or(Plan::Page, |(package, tool)| Plan::Package {
-                package,
-                tool,
+            .map_or(Plan::Page, |(package, tool)| {
+                match &host.exe {
+                    // polkit asks for the administrator password itself, so the update needs
+                    // no command line from the user.
+                    Some(restart) if host.pkexec => Plan::PackageAuto {
+                        package,
+                        tool,
+                        restart: restart.clone(),
+                    },
+                    _ => Plan::Package { package, tool },
+                }
             })
         }
         _ => Plan::Page,
@@ -184,6 +206,10 @@ enum Step {
         work: PathBuf,
         new_app: PathBuf,
         bundle: PathBuf,
+    },
+    /// The package is already installed; start this program after Libertum closes.
+    Restart {
+        exe: PathBuf,
     },
 }
 
@@ -219,6 +245,23 @@ pub fn prepare(release: &Release, plan: Plan) -> Result<Prepared, String> {
                 return Err(error);
             }
             Ok(Prepared::Restart(Staged(Step::AppImage { new, target })))
+        }
+        Plan::PackageAuto {
+            package,
+            tool,
+            restart,
+        } => {
+            // Root can read the temporary folder and the package manager copies the file
+            // into its cache, so nothing is left in the user's folders.
+            let dir = std::env::temp_dir().join(format!("libertum-update-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let file = download_verified(&package, &sums, &dir, &package.name)?;
+            if let Err(error) = install_package(tool, &file) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(error);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            Ok(Prepared::Restart(Staged(Step::Restart { exe: restart })))
         }
         Plan::Package { package, tool } => {
             let dir = downloads_dir();
@@ -281,12 +324,13 @@ impl Staged {
                     let _ = std::fs::remove_file(&new);
                     error.to_string()
                 })
-                .and_then(|()| start_appimage(&target)),
+                .and_then(|()| start_new_version(&target)),
             Step::Mac {
                 work,
                 new_app,
                 bundle,
             } => swap_mac_app(&work, &new_app, &bundle),
+            Step::Restart { exe } => start_new_version(&exe),
         };
         if let Err(error) = started {
             tracing::warn!(%error, "the update could not be started");
@@ -301,9 +345,9 @@ fn replace_file(new: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(new, target)
 }
 
-/// Starts the new AppImage on its own, cut loose from this process and from the old image's
-/// mount, which is about to go away.
-fn start_appimage(image: &Path) -> Result<(), String> {
+/// Starts the new version on its own, cut loose from this process and from the old image's
+/// mount (an AppImage's), which is about to go away.
+fn start_new_version(image: &Path) -> Result<(), String> {
     let mut command = Command::new(image);
     for variable in ["APPIMAGE", "APPDIR", "ARGV0", "OWD"] {
         command.env_remove(variable);
@@ -378,6 +422,60 @@ fn downloads_dir() -> PathBuf {
         })
         .or(home.filter(|path| path.is_dir()))
         .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Installs a downloaded package through `pkexec`, so polkit puts up its own password
+/// dialog and the user types nothing into a terminal. The output is captured rather than
+/// printed: a dismissed prompt or a failed install is shown in the update window.
+fn install_package(tool: PackageTool, file: &Path) -> Result<(), String> {
+    let mut command = Command::new("pkexec");
+    match tool {
+        PackageTool::Apt => {
+            command.args(["apt-get", "install", "-y"]).arg(file);
+            // No debconf or configuration questions: there is nothing to ask about.
+            command.env("DEBIAN_FRONTEND", "noninteractive");
+        }
+        PackageTool::Dnf => {
+            command.args(["dnf", "install", "-y"]).arg(file);
+        }
+        PackageTool::Zypper => {
+            // The packages are unsigned; without this zypper would stop at that question.
+            command
+                .args([
+                    "zypper",
+                    "--non-interactive",
+                    "install",
+                    "--allow-unsigned-rpm",
+                ])
+                .arg(file);
+        }
+        PackageTool::Rpm => {
+            command.args(["rpm", "-U", "--replacepkgs"]).arg(file);
+        }
+    }
+    hide_console_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("could not run pkexec: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "the package could not be installed: {}",
+        last_line(&String::from_utf8_lossy(&output.stderr))
+    ))
+}
+
+/// The last non-empty line of a program's error output, for a one-line message; a command
+/// that failed silently says so.
+fn last_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("no reason was given")
+        .chars()
+        .take(500)
+        .collect()
 }
 
 /// The terminal command that installs `file`, with the full path quoted for the shell.
@@ -596,6 +694,51 @@ mod tests {
             plan(&host("linux", "/home/a/libertum"), &release(ALL)),
             Plan::Page
         );
+    }
+
+    #[test]
+    fn a_package_installs_itself_when_pkexec_is_available() {
+        let mut deb = host("linux", "/usr/bin/libertum");
+        deb.tools = vec!["dpkg"];
+        deb.pkexec = true;
+        assert_eq!(
+            plan(&deb, &release(ALL)),
+            Plan::PackageAuto {
+                package: asset("libertum_0.4.0_amd64.deb"),
+                tool: PackageTool::Apt,
+                restart: PathBuf::from("/usr/bin/libertum"),
+            }
+        );
+
+        let mut rpm = host("linux", "/usr/bin/libertum");
+        rpm.tools = vec!["rpm", "zypper"];
+        rpm.pkexec = true;
+        assert_eq!(
+            plan(&rpm, &release(ALL)),
+            Plan::PackageAuto {
+                package: asset("libertum-0.4.0-1.x86_64.rpm"),
+                tool: PackageTool::Zypper,
+                restart: PathBuf::from("/usr/bin/libertum"),
+            }
+        );
+
+        // Without `pkexec` the package is still offered as a command to run.
+        let mut manual = host("linux", "/usr/bin/libertum");
+        manual.tools = vec!["dpkg"];
+        assert!(matches!(
+            plan(&manual, &release(ALL)),
+            Plan::Package {
+                tool: PackageTool::Apt,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_last_error_line_is_short_and_never_empty() {
+        assert_eq!(last_line("first\n  second  \n\n"), "second");
+        assert_eq!(last_line("   "), "no reason was given");
+        assert_eq!(last_line(&"x".repeat(600)).chars().count(), 500);
     }
 
     #[test]

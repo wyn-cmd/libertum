@@ -2788,7 +2788,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libertum-app"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "directories",
  "iced",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-docx"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libertum-formats-common",
  "libertum-model",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-editor"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "criterion",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-export"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "libertum-model",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-formats-common"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "image",
  "libertum-model",
@@ -2869,14 +2869,14 @@ dependencies = [
 
 [[package]]
 name = "libertum-installer"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "libertum-layout"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "criterion",
  "hypher",
@@ -2886,11 +2886,11 @@ dependencies = [
 
 [[package]]
 name = "libertum-library"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "libertum-markdown"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "comrak",
  "libertum-formats-common",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-mcp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-model"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "proptest",
  "serde",
@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-native"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libertum-model",
  "proptest",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-odt"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libertum-formats-common",
  "libertum-model",
@@ -2946,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-render"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "image",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-rtf"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "encoding_rs",
  "libertum-formats-common",

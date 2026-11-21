@@ -2,7 +2,13 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-21 (release 0.4.0: benchmark, live DOCX and ODT tables of contents, AO3 tag suggestions, memory and Linux icon fixes)._
+_Last updated: 2026-11-21 (release 0.4.1: trackpad scrolling moves once per frame; `.deb` and `.rpm` updates install themselves)._
+
+## Release 0.4.1 (2026-11-21)
+
+- Trackpad movement is queued between frames and applied once per displayed frame in `App::coast`, so a fast gesture no longer does several times the work between two frames; the frame clock still stops when the pad is still.
+- Linux `.deb` and `.rpm` installs update themselves: the package is downloaded, checked and installed with `pkexec` (the desktop's polkit password prompt) before Libertum quits, then the new version starts. No `pkexec`, a dismissed prompt or a failed install falls back cleanly (the last one with the reason in the update window).
+- Release notes in `docs/RELEASE-0.4.1.md`; built and published by `.github/workflows/release.yml`.
 
 ## Release 0.4.0 (2026-11-21)
 

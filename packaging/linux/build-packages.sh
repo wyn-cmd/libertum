@@ -176,7 +176,7 @@ Architecture: $deb_arch
 Maintainer: Libertum <noreply@libertum.invalid>
 Installed-Size: $(du -sk "$debroot" | cut -f1)
 Depends: $deb_depends
-Recommends: shared-mime-info, desktop-file-utils, curl
+Recommends: shared-mime-info, desktop-file-utils, curl, pkexec
 Section: editors
 Priority: optional
 Homepage: https://github.com/wyn-cmd/libertum
@@ -230,8 +230,9 @@ License: Proprietary
 Group: Applications/Editors
 URL: https://github.com/wyn-cmd/libertum
 AutoReqProv: no
-# The update check uses the system curl; the app works without it.
-Recommends: curl
+# The update check uses the system curl and the package updater its pkexec; the app works
+# without either.
+Recommends: curl, pkexec
 $requires
 %global debug_package %{nil}
 %global _build_id_links none
