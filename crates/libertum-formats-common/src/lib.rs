@@ -8,5 +8,6 @@
 
 pub mod colour;
 pub mod media;
+pub mod toc;
 pub mod units;
 pub mod xml;

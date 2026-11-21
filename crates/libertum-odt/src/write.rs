@@ -12,11 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use libertum_formats_common::toc::LIBERTUM_TOC_TAG;
 use libertum_formats_common::{colour, units};
 use libertum_model::{
-    Align, Block, Borders, CharFormat, CrossRef, CrossRefKind, Document, HfKind, HfVariant,
-    InlineImage, LineSpacing, ListStyle, Media, Orientation, ParaFormat, Paragraph, Section,
-    StyleId, TabStopKind, Table, VerticalAlign,
+    Align, Block, BlockId, Borders, CharFormat, CrossRef, CrossRefKind, Document, HfKind,
+    HfVariant, InlineImage, LineSpacing, ListStyle, Media, Orientation, ParaFormat, Paragraph,
+    Section, StyleId, TabStopKind, Table, VerticalAlign,
 };
 
 use crate::package::Package;
@@ -40,8 +41,12 @@ const NS: &str = concat!(
     "xmlns:xlink=\"http://www.w3.org/1999/xlink\""
 );
 
-pub(crate) fn build(document: &Document, origin: Option<&Package>) -> Result<Package, OdtError> {
-    let mut writer = Writer::new(document, origin);
+pub(crate) fn build(
+    document: &Document,
+    origin: Option<&Package>,
+    toc_pages: &HashMap<BlockId, u32>,
+) -> Result<Package, OdtError> {
+    let mut writer = Writer::new(document, origin, toc_pages);
     let body = writer.write_body(document);
     let content = writer.content_xml(body);
     let styles = writer.styles_xml(document);
@@ -238,10 +243,21 @@ struct Writer<'a> {
     endnote_number: u32,
     /// List groups already started, so a later run continues their numbering.
     groups_written: HashSet<u64>,
+    /// Block ids of the headings the table of contents points at: each gets a `_Toc` bookmark.
+    toc_targets: HashSet<u64>,
+    /// Page number of each of those headings, as the layout resolved them.
+    toc_pages: HashMap<u64, u32>,
+    /// Width of the text area in points, where the entries put their page numbers.
+    toc_width_pt: f32,
+    has_toc: bool,
 }
 
 impl<'a> Writer<'a> {
-    fn new(document: &Document, origin: Option<&'a Package>) -> Self {
+    fn new(
+        document: &Document,
+        origin: Option<&'a Package>,
+        toc_pages: &HashMap<BlockId, u32>,
+    ) -> Self {
         let mut used = HashSet::new();
         let mut style_names = Vec::with_capacity(document.styles.paragraph.len());
         for (index, style) in document.styles.paragraph.iter().enumerate() {
@@ -291,6 +307,26 @@ impl<'a> Writer<'a> {
             note_number: 0,
             endnote_number: 0,
             groups_written: HashSet::new(),
+            toc_targets: document
+                .paragraphs()
+                .filter_map(|paragraph| paragraph.props.toc_target)
+                .map(|target| target.0)
+                .filter(|target| *target != 0)
+                .collect(),
+            toc_pages: toc_pages.iter().map(|(id, page)| (id.0, *page)).collect(),
+            toc_width_pt: document.sections.first().map_or(451.0, |section| {
+                let (width, _) = match section.page.orientation {
+                    libertum_model::Orientation::Portrait => section.page.paper.points(),
+                    libertum_model::Orientation::Landscape => {
+                        let (w, h) = section.page.paper.points();
+                        (h, w)
+                    }
+                };
+                (width - section.page.margins.left - section.page.margins.right).max(72.0)
+            }),
+            has_toc: document
+                .paragraphs()
+                .any(|paragraph| paragraph.props.toc_target.is_some()),
         }
     }
 
@@ -309,6 +345,15 @@ impl<'a> Writer<'a> {
         let mut index = 0usize;
         while index < blocks.len() {
             match blocks[index] {
+                Block::Paragraph(paragraph)
+                    if paragraph.props.toc_target.is_some()
+                        || is_entry(blocks.get(index + 1).copied()) =>
+                {
+                    // A table of contents: its title (the paragraph above the entries) and
+                    // the entries go inside one `text:table-of-content`.
+                    let titled = paragraph.props.toc_target.is_none();
+                    index = self.write_toc(&blocks, index, titled, &mut out);
+                }
                 Block::Paragraph(paragraph) => match paragraph.props.list {
                     Some(item) => {
                         let mut run: Vec<&Paragraph> = Vec::new();
@@ -343,6 +388,92 @@ impl<'a> Writer<'a> {
         out
     }
 
+    /// Writes a table of contents as `text:table-of-content`, the way LibreOffice does: a
+    /// description of how to build it from the headings (so Update Index rebuilds it) and the
+    /// entries as they stand, each a link to the heading's bookmark with its page number.
+    /// `start` is the title paragraph when `titled`, else the first entry. Returns the index
+    /// of the first block after the table of contents.
+    fn write_toc(
+        &mut self,
+        blocks: &[&Block],
+        start: usize,
+        titled: bool,
+        out: &mut String,
+    ) -> usize {
+        let mut index = start;
+        let title = if titled {
+            index += 1;
+            blocks[start].as_paragraph()
+        } else {
+            None
+        };
+        let first_entry = index;
+        while is_entry(blocks.get(index).copied()) {
+            index += 1;
+        }
+        out.push_str(&format!(
+            "<text:table-of-content text:name=\"{LIBERTUM_TOC_TAG}\"><text:table-of-content-source text:outline-level=\"9\" text:use-outline-level=\"true\">"
+        ));
+        for level in 1..=9 {
+            out.push_str(&format!(
+                "<text:table-of-content-entry-template text:outline-level=\"{level}\" text:style-name=\"Contents_20_{level}\"><text:index-entry-link-start/><text:index-entry-text/><text:index-entry-tab-stop style:type=\"right\" style:leader-char=\".\"/><text:index-entry-page-number/><text:index-entry-link-end/></text:table-of-content-entry-template>"
+            ));
+        }
+        out.push_str("</text:table-of-content-source><text:index-body>");
+        if let Some(title) = title {
+            out.push_str(&format!(
+                "<text:index-title text:name=\"{LIBERTUM_TOC_TAG}_Head\">"
+            ));
+            self.write_paragraph(title, out);
+            out.push_str("</text:index-title>");
+        }
+        for block in &blocks[first_entry..index] {
+            let Some(entry) = block.as_paragraph() else {
+                continue;
+            };
+            self.written += 1;
+            out.push_str(&self.toc_entry(entry));
+        }
+        out.push_str("</text:index-body></text:table-of-content>");
+        index
+    }
+
+    /// One entry paragraph: the heading's text as a link to its bookmark, then the page number
+    /// after a tab (the style's right tab stop, dotted, puts it at the margin).
+    fn toc_entry(&self, entry: &Paragraph) -> String {
+        let level = toc_level(entry);
+        let text = escape_text(entry.text());
+        let body = match entry.props.toc_target.filter(|target| target.0 != 0) {
+            Some(heading) => {
+                let page = self
+                    .toc_pages
+                    .get(&heading.0)
+                    .map(|page| format!("<text:tab/>{page}"))
+                    .unwrap_or_default();
+                format!(
+                    "<text:a xlink:type=\"simple\" xlink:href=\"#{}\">{text}{page}</text:a>",
+                    toc_bookmark_name(heading)
+                )
+            }
+            None => text.to_string(),
+        };
+        format!("<text:p text:style-name=\"Contents_20_{level}\">{body}</text:p>")
+    }
+
+    /// The `Contents 1` to `Contents 9` paragraph styles the entries use: indented a level at
+    /// a time, with a dotted right tab stop at the margin for the page number.
+    fn toc_styles_xml(&self) -> String {
+        let position = trim_number(self.toc_width_pt);
+        (1..=9)
+            .map(|level| {
+                format!(
+                    "<style:style style:name=\"Contents_20_{level}\" style:display-name=\"Contents {level}\" style:family=\"paragraph\" style:parent-style-name=\"Standard\" style:class=\"index\"><style:paragraph-properties fo:margin-left=\"{}pt\"><style:tab-stops><style:tab-stop style:position=\"{position}pt\" style:type=\"right\" style:leader-style=\"dotted\" style:leader-text=\".\"/></style:tab-stops></style:paragraph-properties></style:style>",
+                    (level - 1) * 18
+                )
+            })
+            .collect()
+    }
+
     fn write_paragraph(&mut self, paragraph: &Paragraph, out: &mut String) {
         let section = if paragraph.props.section_start && self.written > 0 {
             self.section += 1;
@@ -372,7 +503,18 @@ impl<'a> Writer<'a> {
                 escape_attr(&style)
             )),
         }
+        // A heading the table of contents points at carries the bookmark its entry links to.
+        let toc_bookmark = self
+            .toc_targets
+            .contains(&paragraph.id.0)
+            .then(|| toc_bookmark_name(paragraph.id));
+        if let Some(name) = &toc_bookmark {
+            out.push_str(&format!("<text:bookmark-start text:name=\"{name}\"/>"));
+        }
         self.write_runs(paragraph, out);
+        if let Some(name) = &toc_bookmark {
+            out.push_str(&format!("<text:bookmark-end text:name=\"{name}\"/>"));
+        }
         for note in paragraph.notes() {
             let (class, number) = match note.kind {
                 libertum_model::NoteKind::Footnote => {
@@ -938,6 +1080,9 @@ impl<'a> Writer<'a> {
             out.push_str(&format!(
                 "<style:style style:name=\"{name}\" style:family=\"paragraph\" style:parent-style-name=\"{parent}\" style:class=\"extra\"/>"
             ));
+        }
+        if self.has_toc {
+            out.push_str(&self.toc_styles_xml());
         }
         out.push_str("</office:styles>");
 
@@ -1928,6 +2073,30 @@ fn trim_number(value: f32) -> String {
     } else {
         format!("{value}")
     }
+}
+
+/// True when `block` is a paragraph that is an entry of the table of contents.
+fn is_entry(block: Option<&Block>) -> bool {
+    block
+        .and_then(Block::as_paragraph)
+        .is_some_and(|paragraph| paragraph.props.toc_target.is_some())
+}
+
+/// The name of the bookmark on the heading an entry points at. The leading underscore is what
+/// the reader takes for an anchor of the program's own, so it is not read back as a bookmark.
+fn toc_bookmark_name(heading: BlockId) -> String {
+    format!("_Toc{}", heading.0)
+}
+
+/// How deep an entry sits, 1 to 9: Libertum indents each level by 18 pt.
+fn toc_level(paragraph: &Paragraph) -> usize {
+    let indent = paragraph
+        .props
+        .format
+        .indent_left_pt
+        .unwrap_or(0.0)
+        .max(0.0);
+    ((indent / 18.0).round() as usize + 1).clamp(1, 9)
 }
 
 fn master_name(index: usize) -> String {

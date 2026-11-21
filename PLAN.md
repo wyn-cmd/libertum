@@ -14,13 +14,13 @@ This is the working plan for the application, phase by phase. Read the whole doc
 | GUI toolkit | **Iced** (latest stable release at the time of implementation) |
 | Text shaping and layout | **parley** (Linebender), with **swash** for glyph rasterisation |
 | Rendering of page content | CPU rasterisation per page (tiny-skia + swash) into cached bitmaps shown inside Iced. The window compositor is always wgpu; a GPU page renderer (vello) exists as an experimental backend but is not offered in the UI (§4.5) |
-| Default format for new documents | **ODT**. The user can change the default to DOCX in Settings |
+| Default format for new documents | **ODT**. The writer can change the default to DOCX in Settings |
 | DOCX/ODT support (v1) | Core text, page layout, and book features (§6). Comments and tracked changes are out of scope for v1 but must be **preserved** on save |
 | Markdown mode | WYSIWYG, using the same editor as DOCX. Unedited blocks keep their original source text on save (§7) |
 | Minimum hardware | 4 GB RAM, older integrated GPU (around 2015 dual-core laptop) |
 | Packaging | GitHub Actions matrix build, done last (Phase 9) |
 
-### Assumptions (flag to the user if any turn out wrong)
+### Assumptions (flag any that turn out wrong)
 
 - There is no proprietary native format. DOCX, ODT and Markdown are first-class formats. A new document defaults to ODT, and Settings can change that to DOCX.
 - PDF export, spellcheck and printing are post-v1, except where a phase lists them as optional.
@@ -147,7 +147,7 @@ This crate is UI-agnostic and testable without a window.
 - Commands: type, delete, backspace, word delete, cut/copy/paste (rich internal format plus plain text; paste DOCX/HTML as plain text in v1 and record this as a known limitation), select all, undo/redo, toggle bold/italic/underline/strike, apply styles, and the list operations.
 - Hit-testing: map a point in page coordinates to a `DocPosition` using cached line layouts.
 - Find and replace: search per paragraph with an incremental results list, and never block the UI. Use a worker for whole-document searches over about 200 pages.
-- IME: composition text must render inline with an underline. **Verify Iced's current IME support in Phase 0.** If it is missing or incomplete, record it as a blocking risk and report to the user before continuing.
+- IME: composition text must render inline with an underline. **Verify Iced's current IME support in Phase 0.** If it is missing or incomplete, record it as a blocking risk and report it before continuing.
 
 ### 4.4 Rendering (`libertum-render` + canvas widget in `libertum-app`)
 
@@ -218,9 +218,9 @@ Visual reference: Apple Pages. It should be clean, roomy, and use neutral greys.
 
 **Keyboard shortcuts:** platform-standard. Use `Cmd` on macOS and `Ctrl` elsewhere, through a single shortcut map.
 
-**Settings:** stored as TOML in the platform config directory (`directories` crate). Settings cover theme, default font, **default format for new documents (ODT, or DOCX)**, autosave interval, sidebar state, and recent files. A new document's first "Save" dialog preselects the default format, and the user can still pick another.
+**Settings:** stored as TOML in the platform config directory (`directories` crate). Settings cover theme, default font, **default format for new documents (ODT, or DOCX)**, autosave interval, sidebar state, and recent files. A new document's first "Save" dialog preselects the default format, and the writer can still pick another.
 
-**Autosave and recovery:** every 60 s, and on focus loss, write a recovery snapshot to the platform data directory, never over the user's file. On launch, offer to restore after a crash.
+**Autosave and recovery:** every 60 s, and on focus loss, write a recovery snapshot to the platform data directory, never over the open file. On launch, offer to restore after a crash.
 
 ---
 
@@ -230,7 +230,7 @@ Visual reference: Apple Pages. It should be clean, roomy, and use neutral greys.
 
 **Anything Libertum does not understand must survive open → edit → save unchanged, as far as possible.** This is what makes the DOCX/ODT support "native" rather than "import".
 
-A **native Libertum format** (`.lbtd`) that stores the model and the view state one-to-one is specified in `docs/format-libertum-native.md` and **implemented** in `crates/libertum-native` (2026-11-11): the app opens and saves it, and crash recovery uses it. ODT remains the built-in default format until the user chooses otherwise in Settings.
+A **native Libertum format** (`.lbtd`) that stores the model and the view state one-to-one is specified in `docs/format-libertum-native.md` and **implemented** in `crates/libertum-native` (2026-11-11): the app opens and saves it, and crash recovery uses it. ODT remains the built-in default format until the writer chooses otherwise in Settings.
 
 - Keep every unknown package part (comments, custom XML, themes, glossary, etc.) as raw bytes and write it back with its relationships intact.
 - Unknown elements inside a paragraph or run become `InlineObject::Opaque` or carry opaque attributes, and are re-emitted in place.
@@ -309,7 +309,7 @@ DOCX, ODT and RTF all target this table; RTF additionally writes a cached `\fldr
 
 ## 7. Markdown mode (`libertum-markdown`)
 
-The user chose WYSIWYG Markdown editing in the same editor. The known risk is that regenerating Markdown on save reformats the user's file (changing `*` to `_`, re-wrapping lines, renumbering lists). Mitigation:
+WYSIWYG Markdown editing in the same editor was chosen. The known risk is that regenerating Markdown on save reformats the writer's file (changing `*` to `_`, re-wrapping lines, renumbering lists). Mitigation:
 
 - Parse with `comrak` (CommonMark + GFM: tables, strikethrough, task lists, footnotes, autolinks) **with source positions enabled**.
 - Each imported block stores its original source slice and a `source_dirty: bool` flag. On save, clean blocks emit their original bytes exactly, and only dirty blocks are re-serialised.
@@ -345,7 +345,7 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 - **Spike B, IME:** confirm whether Iced exposes IME composition events on all three OSes.
 - **Spike C, parley features:** confirm inline boxes (for images and footnote markers), per-span styles, and hit-testing/cursor APIs.
 - **Spike D, GPU path:** render the same 500 pages with vello inside Iced's wgpu renderer. Confirm the wgpu versions are compatible (or that offscreen rendering works), and measure the same budgets as Spike A.
-- Write `docs/spikes.md` with the findings. **Stop and report to the user if any spike fails.** The fallbacks (cosmic-text rendering, or a different toolkit) are the user's decision.
+- Write `docs/spikes.md` with the findings. **Stop and report it if any spike fails.** The fallbacks (cosmic-text rendering, or a different toolkit) are the writer's decision.
 
 ✅ Acceptance: scrolling 500 generated pages at 60 fps on the min-spec target in CPU mode, GPU mode working on a capable machine, and the spike report is written.
 
@@ -390,7 +390,7 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 
 ### Phase 6 — Book features
 
-> Pulled forward (2026-11-10, at the user's request): a **tables** slice is implemented — `Block::Table`, row-based pagination with repeated header rows, cell editing and a Table menu, plus DOCX round-trip. See `docs/decisions.md`. Footnotes, endnotes, bookmarks, images and table styles remain.
+> Pulled forward (2026-11-10, at the maintainer's request): a **tables** slice is implemented — `Block::Table`, row-based pagination with repeated header rows, cell editing and a Table menu, plus DOCX round-trip. See `docs/decisions.md`. Footnotes, endnotes, bookmarks, images and table styles remain.
 >
 > Audited 2026-11-11 (third pass): **done.** The navigation slice, tables/TOC, footnotes/endnotes, bookmarks with cross-references, inline images and named table styles are in, with DOCX, ODT and RTF import/export for each. Table rows split across pages (unless kept together) with repeated header rows, and merged cells can be merged and split. The acceptance run is 343 pages with 200 footnotes, a 10-entry TOC, 20 images, 10 bookmarks, 2 cross-references and a banded table spanning four pages with one split row; see `docs/STATUS.md`.
 
@@ -412,7 +412,7 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 ### Phase 7b — RTF
 
 - Build `libertum-rtf` as described in §6.5: tokeniser, model mapping, writer and the raw-token preservation of unknown destinations.
-- Enable Open…/Save As for `.rtf` and add `.rtf` to the home screen's Open filter. Independent of the Markdown phase; schedule it with the user once the DOCX and ODT paths exist.
+- Enable Open…/Save As for `.rtf` and add `.rtf` to the home screen's Open filter. Independent of the Markdown phase; schedule it once the DOCX and ODT paths exist.
 
 ✅ Acceptance: every `.rtf` fixture round-trips with no edit, exported files open in Word, LibreOffice and Pages without a repair prompt, and a 500-page RTF opens within the §2 budgets.
 
@@ -440,19 +440,19 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 > Done 2026-11-12 (`crates/libertum-app/src/stitch.rs`; home screen Stitch… or View > Stitch Documents…): order, section per source, styles matched by name and remapped, list groups renumbered, one table of contents rebuilt from every chapter, clashing bookmarks renamed with their references, built in one pass (three 150-page files in under 50 ms). Not done: style matching by formatting, the "number continuously" choice, the output-format choice in the dialog (the stitched book is a new unsaved document, saved in any format), and the summary of changes.
 
 - **Stitch documents:** pick several files in one dialog, reorder them in the app (Up/Down/Remove), choose the output format, and combine them into one book. Sources may be DOCX, ODT, RTF or Markdown; each is imported into a temporary `Document` and appended.
-- **Merge rules:** the first document supplies document defaults and style-sheet order; later documents' styles are matched by name, then by formatting, else imported as new styles. List groups are renumbered so numbering does not continue across sources unless the user asks for it. Each source after the first starts a new section (with the first document's header/footer links), and its first heading can mark a new chapter.
-- **Contents and numbering:** regenerate the table of contents, renumber chapters/footnotes/endnotes if the user asks, and offer "Keep source page numbering" versus "Number continuously".
+- **Merge rules:** the first document supplies document defaults and style-sheet order; later documents' styles are matched by name, then by formatting, else imported as new styles. List groups are renumbered so numbering does not continue across sources unless the writer asks for it. Each source after the first starts a new section (with the first document's header/footer links), and its first heading can mark a new chapter.
+- **Contents and numbering:** regenerate the table of contents, renumber chapters/footnotes/endnotes if the writer asks, and offer "Keep source page numbering" versus "Number continuously".
 - **Safety:** stitch into a new file (or an explicit "Replace current document" choice), keep each source untouched, and show a summary of what will change. Fixtures for same/different styles, section starts, lists and TOC.
 - **Acceptance:** stitch three documents in a chosen order and the combined book opens with the expected block order, styles, chapter order and TOC; undo is not needed because stitching is a new document.
 
 ### Phase 11 — Chapter HTML export and local tag suggestions (post-v1, priority 2)
 
-- **Chapter selection:** the user sets the chapter heading level (for example Heading 1) and chooses *latest chapter* or a range from a start heading to the heading before the next heading of that level. Settings persist in the document/settings.
+- **Chapter selection:** the writer sets the chapter heading level (for example Heading 1) and chooses *latest chapter* or a range from a start heading to the heading before the next heading of that level. Settings persist in the document/settings.
 - **HTML for AO3:** export a fragment (not a full page) with only the markup AO3 accepts — paragraphs, `em`, `strong`, `blockquote`, `ul`/`ol`/`li`, headings, horizontal rules and line breaks — with correct escaping and no page furniture. Copy-to-clipboard is the primary action; Save as `.html` is secondary.
-- **Tags:** a local tag vocabulary stored in settings; BM25 (or another local ranking method) scores the chapter text against tag names, and the user reviews/edits the suggested tags. No network call and no automatic tagging: the writer stays in control. Tag rules (rating, warning, fandom, relationship, character, freeform) are kept separate.
+- **Tags:** a local tag vocabulary stored in settings; BM25 (or another local ranking method) scores the chapter text against tag names, and the writer reviews/edits the suggested tags. No network call and no automatic tagging: the writer stays in control. Tag rules (rating, warning, fandom, relationship, character, freeform) are kept separate.
 - **Acceptance:** a fixture book exports the expected chapter only; the fragment pastes into AO3's HTML editor with correct emphasis, lists, headings and quotation marks; tag suggestions are deterministic and explainable.
 
-> Done 2026-11-13: the Export menu writes PDF/PDF-A-2b, EPUB 3, RTF, plain text and Markdown, and its **AO3 Chapter** item lists the chapters (heading levels chosen in Settings, Heading 1 and 2 by default) and copies one chapter's AO3-compatible HTML fragment. The **local tag suggestions** are in too: the writer keeps a tag vocabulary in Settings (six AO3 categories), `libertum-export::tags` ranks it against the chapter with BM25 and shows the words that earned each place, the review list starts unticked, and **Copy tags** writes the ticked tags for AO3's tag fields. No network call and no automatic tagging. PDF export is post-v1 in PLAN but was pulled forward at the user's request; it is real text with embedded fonts, and the archival variant adds an sRGB output intent and XMP. The AO3 paste check (a fragment pasted into AO3's own HTML editor) has not been done on this machine; neither have real tag names been ranked against a real chapter beyond the tests.
+> Done 2026-11-13: the Export menu writes PDF/PDF-A-2b, EPUB 3, RTF, plain text and Markdown, and its **AO3 Chapter** item lists the chapters (heading levels chosen in Settings, Heading 1 and 2 by default) and copies one chapter's AO3-compatible HTML fragment. The **local tag suggestions** are in too: the writer keeps a tag vocabulary in Settings (six AO3 categories), `libertum-export::tags` ranks it against the chapter with BM25 and shows the words that earned each place, the review list starts unticked, and **Copy tags** writes the ticked tags for AO3's tag fields. No network call and no automatic tagging. PDF export is post-v1 in PLAN but was pulled forward at the maintainer's request; it is real text with embedded fonts, and the archival variant adds an sRGB output intent and XMP. The AO3 paste check (a fragment pasted into AO3's own HTML editor) has not been done on this machine; neither have real tag names been ranked against a real chapter beyond the tests.
 
 
 
@@ -469,7 +469,7 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Iced IME support incomplete on some OS | Medium (estimate) | Phase 0 Spike B. If it fails, report to the user before proceeding |
+| Iced IME support incomplete on some OS | Medium (estimate) | Phase 0 Spike B. If it fails, report it before proceeding |
 | parley API churn between versions | Medium | Pin versions in `Cargo.lock` and isolate parley behind `libertum-layout`'s own types |
 | Page count differs from Word/LibreOffice (font metrics, hyphenation, kerning) | High | Accept it, and document it. Never claim pixel-identical layout. Use the same fonts where available |
 | DOCX edge cases corrupt files | Medium | Preserved-parts design, a large fixture corpus, the headless LibreOffice CI check |
@@ -492,6 +492,6 @@ Each phase should end with a working, runnable app. Keep commits small. Do not s
 4. No `unwrap()`/`expect()` on I/O, parsing or user-input paths. Return typed errors (`thiserror`) and show friendly messages in the UI.
 5. Every new feature comes with tests. Every format feature comes with a round-trip fixture.
 6. Measure before optimising, but never introduce O(document) work on the keystroke path.
-7. Stop and ask the user when a spike fails, a budget cannot be met, a dependency needs a non-permissive licence, or this plan conflicts with reality.
+7. Stop and ask the maintainer when a spike fails, a budget cannot be met, a dependency needs a non-permissive licence, or this plan conflicts with reality.
 8. Keep `docs/decisions.md` as a short log of any deviation from this plan, with the reason.
 9. Use British/Singapore English in user-facing strings (colour, centre, organise).

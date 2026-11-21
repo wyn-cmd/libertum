@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -66,6 +66,7 @@ printpdf = { version = "0.12", default-features = false }
 lopdf = "0.44"
 # macOS only: the Dock icon (crates/libertum-app/src/macos_icon.rs). MIT.
 objc2 = "0.6"
+libc = "0.2"  # Linux glibc only: caps malloc arenas at start-up (docs/decisions.md, 2026-11-20)
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 anyhow = "1"

@@ -1649,3 +1649,249 @@ fn a_new_docx_writes_its_headers_footers_and_even_page_switch() {
     );
     assert!(section.footers.different_even_odd);
 }
+
+#[test]
+fn a_heading_styled_paragraph_gets_its_outline_level_from_the_style() {
+    // rich.docx's first paragraph is "Heading1" with no `w:outlineLvl` of its own; the level
+    // lives in the style, as in a document written by Word.
+    let docx = Docx::parse(&fixture()).expect("parse");
+    let first = docx
+        .document()
+        .paragraphs()
+        .next()
+        .expect("a first paragraph");
+    assert_eq!(first.text(), "Chapter One");
+    assert_eq!(first.props.outline_level, Some(1));
+    assert!(first.props.is_heading());
+    // Body text stays body text.
+    assert!(
+        docx.document()
+            .paragraphs()
+            .skip(1)
+            .all(|paragraph| paragraph.props.outline_level.is_none())
+    );
+}
+
+// ------------------------------------------------------------------ table of contents
+
+fn word_toc_fixture() -> Vec<u8> {
+    // Written by hand to the structure Word uses (a content control holding a `TOC` field,
+    // each entry a hyperlink to a `_Toc` bookmark with a `PAGEREF` page number), on the same
+    // package as rich.docx. It is not an export from Word itself.
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/docx/word-toc.docx"
+    ))
+    .expect("word-toc.docx fixture")
+}
+
+fn word_toc_field_fixture() -> Vec<u8> {
+    // The same table of contents with no content control around it, as older files have it.
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/docx/word-toc-field.docx"
+    ))
+    .expect("word-toc-field.docx fixture")
+}
+
+fn paragraph_summary(doc: &Document) -> Vec<(String, bool)> {
+    doc.paragraphs()
+        .map(|p| (p.text().to_owned(), p.props.toc_target.is_some()))
+        .collect()
+}
+
+#[test]
+fn a_word_table_of_contents_opens_with_a_warning_and_is_marked_for_rebuilding() {
+    let docx = Docx::parse(&word_toc_fixture()).expect("a Word TOC opens");
+    assert!(
+        docx.warnings()
+            .iter()
+            .any(|w| w == libertum_formats_common::toc::TOC_REBUILT_WARNING)
+    );
+    // The control's title is kept; its entries become one placeholder for the editor to fill.
+    assert_eq!(
+        paragraph_summary(docx.document()),
+        vec![
+            ("My Novel".to_owned(), false),
+            ("Contents".to_owned(), false),
+            (String::new(), true),
+            ("Chapter One".to_owned(), false),
+            ("It was a dark night.".to_owned(), false),
+            ("Chapter Two".to_owned(), false),
+            ("The morning came.".to_owned(), false),
+        ]
+    );
+    let marker = docx.document().paragraphs().nth(2).expect("marker");
+    assert_eq!(marker.props.toc_target, Some(BlockId(0)));
+    // Word's own `_Toc` bookmarks are the old entries' links and are not kept.
+    assert!(
+        docx.document()
+            .paragraphs()
+            .all(|p| p.bookmarks().is_empty())
+    );
+}
+
+#[test]
+fn a_bare_toc_field_is_rebuilt_too_and_its_title_paragraph_is_kept() {
+    let docx = Docx::parse(&word_toc_field_fixture()).expect("a bare TOC field opens");
+    assert!(
+        docx.warnings()
+            .iter()
+            .any(|w| w == libertum_formats_common::toc::TOC_REBUILT_WARNING)
+    );
+    // "Contents" was an ordinary paragraph above the field, so it is the title.
+    assert_eq!(
+        paragraph_summary(docx.document()),
+        vec![
+            ("My Novel".to_owned(), false),
+            ("Contents".to_owned(), false),
+            (String::new(), true),
+            ("Chapter One".to_owned(), false),
+            ("It was a dark night.".to_owned(), false),
+            ("Chapter Two".to_owned(), false),
+            ("The morning came.".to_owned(), false),
+        ]
+    );
+}
+
+#[test]
+fn contents_lists_that_are_not_made_of_headings_are_still_refused() {
+    // A table of figures: its entries come from captions, which the model cannot rebuild.
+    assert_unsupported(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \h \z \c "Figure" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Figure 1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        "a table of figures",
+    );
+    // Any other content control.
+    assert_unsupported(
+        r#"<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Cover</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+        "a cover page control",
+    );
+}
+
+fn toc_document() -> Document {
+    let heading = |id, text: &str, style| {
+        Block::Paragraph(Paragraph::new(BlockId(id), text).with_props(ParaProps {
+            style,
+            ..ParaProps::default()
+        }))
+    };
+    let entry = |id, target, text: &str, indent| {
+        Block::Paragraph(Paragraph::new(BlockId(id), text).with_props(ParaProps {
+            toc_target: Some(BlockId(target)),
+            format: ParaFormat {
+                indent_left_pt: indent,
+                ..ParaFormat::default()
+            },
+            ..ParaProps::default()
+        }))
+    };
+    let mut document = Document::from_blocks(vec![
+        Block::Paragraph(
+            Paragraph::new(BlockId(1), "Contents").with_props(ParaProps {
+                style: StyleId::TITLE,
+                ..ParaProps::default()
+            }),
+        ),
+        entry(2, 4, "Chapter One", None),
+        entry(3, 6, "A Section", Some(18.0)),
+        heading(4, "Chapter One", StyleId::HEADING_1),
+        Block::Paragraph(Paragraph::new(BlockId(5), "Words.")),
+        heading(6, "A Section", StyleId::HEADING_2),
+        Block::Paragraph(Paragraph::new(BlockId(7), "More words.")),
+    ]);
+    document.sections = vec![Section::default()];
+    document
+}
+
+#[test]
+fn a_libertum_table_of_contents_is_saved_the_way_word_saves_one() {
+    let mut docx = Docx::new(toc_document());
+    docx.set_toc_pages([(BlockId(4), 1), (BlockId(6), 3)].into_iter().collect());
+    let bytes = docx.to_bytes().expect("write");
+    let xml = zip_text(&bytes, "word/document.xml").expect("document.xml");
+
+    // A "Table of Contents" content control with a TOC field over every entry.
+    assert!(xml.contains("<w:docPartGallery w:val=\"Table of Contents\"/>"));
+    assert!(xml.contains("<w:tag w:val=\"libertum-toc\"/>"));
+    assert!(xml.contains(" TOC \\o \"1-9\" \\h \\z \\u "));
+    // Entries: the right style per level, a link to the heading's bookmark, the page number
+    // (as a PAGEREF field, after a right-aligned dotted tab).
+    assert!(xml.contains("<w:pStyle w:val=\"TOC1\"/>"));
+    assert!(xml.contains("<w:pStyle w:val=\"TOC2\"/>"));
+    assert!(xml.contains("<w:hyperlink w:anchor=\"_Toc4\" w:history=\"1\">"));
+    assert!(xml.contains(" PAGEREF _Toc6 \\h "));
+    assert!(xml.contains("<w:r><w:t>3</w:t></w:r>"));
+    assert!(xml.contains("w:leader=\"dot\" w:pos=\"9026\""));
+    // The headings carry the bookmarks the links point at.
+    assert!(xml.contains("w:name=\"_Toc4\""));
+    assert!(xml.contains("w:name=\"_Toc6\""));
+    // Every field that opens closes, and the control is closed.
+    assert_eq!(
+        xml.matches("w:fldCharType=\"begin\"").count(),
+        xml.matches("w:fldCharType=\"end\"").count()
+    );
+    assert_eq!(
+        xml.matches("<w:sdt>").count(),
+        xml.matches("</w:sdt>").count()
+    );
+    // The styles those entries use exist.
+    let styles = zip_text(&bytes, "word/styles.xml").expect("styles.xml");
+    assert!(styles.contains("w:styleId=\"TOC1\"") && styles.contains("w:styleId=\"TOC9\""));
+}
+
+#[test]
+fn a_libertum_table_of_contents_comes_back_without_a_warning_and_without_stray_bookmarks() {
+    let mut docx = Docx::new(toc_document());
+    docx.set_toc_pages([(BlockId(4), 1), (BlockId(6), 3)].into_iter().collect());
+    let reread = Docx::parse(&docx.to_bytes().expect("write")).expect("reopen");
+    assert!(
+        reread.warnings().is_empty(),
+        "Libertum's own table of contents needs no warning: {:?}",
+        reread.warnings()
+    );
+    assert_eq!(
+        paragraph_summary(reread.document()),
+        vec![
+            ("Contents".to_owned(), false),
+            (String::new(), true),
+            ("Chapter One".to_owned(), false),
+            ("Words.".to_owned(), false),
+            ("A Section".to_owned(), false),
+            ("More words.".to_owned(), false),
+        ]
+    );
+    // The headings come back as headings, and the `_Toc` bookmarks are not kept as bookmarks.
+    let headings: Vec<_> = reread
+        .document()
+        .paragraphs()
+        .filter_map(|p| {
+            p.props
+                .outline_level
+                .map(|level| (p.text().to_owned(), level))
+        })
+        .collect();
+    assert_eq!(
+        headings,
+        vec![("Chapter One".to_owned(), 1), ("A Section".to_owned(), 2)]
+    );
+    assert!(
+        reread
+            .document()
+            .paragraphs()
+            .all(|p| p.bookmarks().is_empty())
+    );
+}
+
+#[test]
+fn entries_are_saved_without_page_numbers_when_the_layout_has_none_to_give() {
+    let bytes = Docx::new(toc_document()).to_bytes().expect("write");
+    let xml = zip_text(&bytes, "word/document.xml").expect("document.xml");
+    assert!(xml.contains("<w:hyperlink w:anchor=\"_Toc4\""));
+    assert!(!xml.contains("PAGEREF"));
+    // The TOC field still opens and closes, so Word's Update Table can fill the numbers.
+    assert!(xml.contains(" TOC \\o "));
+    assert_eq!(
+        xml.matches("w:fldCharType=\"begin\"").count(),
+        xml.matches("w:fldCharType=\"end\"").count()
+    );
+}

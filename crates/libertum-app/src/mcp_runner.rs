@@ -1,6 +1,6 @@
 //! The tool runner (developer mode, `docs/mcp-plan.md` phase 4): the writer picks another MCP
 //! program, picks one of its tools, fills in a form made from the tool's schema and runs it by
-//! hand. There is no assistant in the loop; nothing here runs without a button press.
+//! hand. Nothing here runs without a button press.
 //!
 //! This module holds the pure parts (reading a command line, turning a JSON Schema into form
 //! fields, turning the filled-in form back into arguments) and the runner's state. The window

@@ -6,7 +6,9 @@
 //! by the app as a layer above everything else; [`menu_x`] tells it where to anchor them from
 //! the same fixed widths the toolbar lays out with.
 
-use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, space, stack, text, text_input,
+};
 use iced::{Border, Center, Color, Element, Length, Padding, Shadow, Vector};
 
 use crate::app::{ExportFormat, Message};
@@ -27,14 +29,15 @@ const BUTTON_SPACING: f32 = 2.0;
 const GLYPH_SIZE: f32 = 18.0;
 
 const W_VIEW: f32 = 58.0;
-const ZOOM_STEP_W: f32 = 20.0;
-const ZOOM_NUMBER_W: f32 = 30.0;
-const ZOOM_UNIT_W: f32 = 12.0;
-const ZOOM_CHEVRON_W: f32 = 16.0;
-const ZOOM_INSET: f32 = 2.0;
-/// The combined Zoom control: inset, two step buttons, the number, the unit and the chevron.
-const W_ZOOM: f32 =
-    ZOOM_INSET * 2.0 + ZOOM_STEP_W * 2.0 + ZOOM_NUMBER_W + ZOOM_UNIT_W + ZOOM_CHEVRON_W;
+/// The Zoom control is three toolbar buttons side by side: minus, the percentage with its
+/// menu, and plus. All three are as tall as every other button and share one style.
+const ZOOM_STEP_W: f32 = 22.0;
+const ZOOM_MAIN_W: f32 = 56.0;
+const ZOOM_NUMBER_W: f32 = 28.0;
+/// Space left of the figure; the room on the right belongs to the chevron.
+const ZOOM_FIGURE_INSET: f32 = 6.0;
+const ZOOM_STEP_GLYPH: f32 = 12.0;
+const W_ZOOM: f32 = ZOOM_STEP_W * 2.0 + ZOOM_MAIN_W + BUTTON_SPACING * 2.0;
 const W_FULL_SCREEN: f32 = 68.0;
 const CENTRE_WIDTHS: [f32; 4] = [58.0, 52.0, 52.0, 64.0];
 /// The four inspector buttons (Format, Document, Headers, Notes) share one width and one gap,
@@ -81,7 +84,8 @@ fn centre_x(window_width: f32) -> f32 {
 pub fn menu_x(menu: Menu, window_width: f32) -> f32 {
     match menu {
         Menu::View => view_x(),
-        Menu::Zoom => zoom_x(),
+        // Under the middle button, the one that opens it.
+        Menu::Zoom => zoom_x() + ZOOM_STEP_W + BUTTON_SPACING,
         Menu::Insert => centre_x(window_width),
         Menu::Export => {
             centre_x(window_width)
@@ -95,11 +99,14 @@ pub fn menu_x(menu: Menu, window_width: f32) -> f32 {
     }
 }
 
-/// The zoom percentage, the 1% step buttons and the menu chevron in one control, so the
-/// arrows are part of the Zoom button rather than a second control beside it. The percentage
-/// stays editable for an exact value.
+/// The Zoom control: a minus button, the percentage with its dropdown, and a plus button, all as
+/// tall as every other toolbar button and sharing their style. The middle one has no caption:
+/// the figure fills the height, close to the left edge, and the chevron sits in its top-right corner. The glyphs of the
+/// steppers are centred in the height. The percentage stays editable for an exact value.
 fn zoom_control<'a>(state: &AppState, percent: u16, t: Tokens) -> Element<'a, Message> {
     let open = state.open_menu == Some(Menu::Zoom);
+    let colour = if open { t.accent } else { t.text };
+    let label_colour = if open { t.accent } else { t.text_secondary };
     let shown = state
         .zoom_edit
         .clone()
@@ -107,13 +114,8 @@ fn zoom_control<'a>(state: &AppState, percent: u16, t: Tokens) -> Element<'a, Me
     let input = text_input("", &shown)
         .on_input(Message::ZoomText)
         .on_submit(Message::ZoomCommit)
-        .size(13.0)
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 0.0,
-            right: 0.0,
-        })
+        .size(15.0)
+        .padding(0)
         .width(Length::Fixed(ZOOM_NUMBER_W))
         .align_x(Center)
         .style(move |_, _| text_input::Style {
@@ -121,83 +123,103 @@ fn zoom_control<'a>(state: &AppState, percent: u16, t: Tokens) -> Element<'a, Me
             border: Border::default(),
             icon: t.text_secondary,
             placeholder: t.text_secondary,
-            value: t.text,
+            value: colour,
             selection: Color {
                 a: 0.35,
                 ..t.accent
             },
         });
-    let chevron = button(
-        container(icon(Icon::ChevronDown, 9.0, t.text_secondary))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+    let figure = container(
+        row![input, text("%").size(12.0).color(label_colour)]
+            .spacing(1)
+            .align_y(Center),
     )
-    .width(Length::Fixed(ZOOM_CHEVRON_W))
-    .height(Length::Fixed(24.0))
-    .padding(0)
-    .style(move |_, status| zoom_flat(t, status))
-    .on_press(Message::ToggleMenu(Menu::Zoom));
-    let unit = container(text("%").size(11.0).color(t.text_secondary))
-        .center_x(Length::Fixed(ZOOM_UNIT_W));
-    let body = row![
-        zoom_step(t, Icon::Minus, -1),
-        input,
-        unit,
-        chevron,
-        zoom_step(t, Icon::Plus, 1),
-    ]
-    .align_y(Center)
-    .spacing(0);
-    let control = container(body)
-        .width(Length::Fixed(W_ZOOM))
-        .height(Length::Fixed(28.0))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_y(iced::alignment::Vertical::Center)
+    .padding(Padding {
+        left: ZOOM_FIGURE_INSET,
+        ..Padding::ZERO
+    });
+    let corner = container(icon(Icon::ChevronDown, 9.0, label_colour))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Top)
         .padding(Padding {
-            top: 0.0,
+            top: 5.0,
+            right: 5.0,
             bottom: 0.0,
-            left: ZOOM_INSET,
-            right: ZOOM_INSET,
-        })
-        .style(move |_| container::Style {
-            background: Some(t.control.into()),
-            border: Border {
-                color: if open { t.accent } else { t.control_border },
-                width: 1.0,
-                radius: 5.0.into(),
-            },
-            ..container::Style::default()
+            left: 0.0,
         });
-    column![control, text(s::TB_ZOOM).size(10.0).color(t.text_secondary),]
-        .spacing(2.0)
-        .align_x(Center)
-        .width(Length::Fixed(W_ZOOM))
-        .into()
-}
-
-fn zoom_step<'a>(t: Tokens, glyph: Icon, direction: i8) -> Element<'a, Message> {
-    button(
-        container(icon(glyph, 12.0, t.text_secondary))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(ZOOM_STEP_W))
-    .height(Length::Fixed(24.0))
-    .padding(0)
-    .style(move |_, status| zoom_flat(t, status))
-    .on_press(Message::ZoomStep(i16::from(direction)))
+    let main = zoom_button(
+        stack![figure, corner].into(),
+        ZOOM_MAIN_W,
+        open,
+        t,
+        Message::ToggleMenu(Menu::Zoom),
+    );
+    row![
+        zoom_step(t, Icon::Minus, -1),
+        main,
+        zoom_step(t, Icon::Plus, 1)
+    ]
+    .spacing(BUTTON_SPACING)
+    .align_y(Center)
     .into()
 }
 
-fn zoom_flat(t: Tokens, status: button::Status) -> button::Style {
+/// A stepper: a small glyph centred in the button.
+fn zoom_step<'a>(t: Tokens, glyph: Icon, direction: i8) -> Element<'a, Message> {
+    zoom_button(
+        icon(glyph, ZOOM_STEP_GLYPH, t.text).into(),
+        ZOOM_STEP_W,
+        false,
+        t,
+        Message::ZoomStep(i16::from(direction)),
+    )
+}
+
+fn zoom_button<'a>(
+    content: Element<'a, Message>,
+    width: f32,
+    active: bool,
+    t: Tokens,
+    on_press: Message,
+) -> Element<'a, Message> {
+    button(
+        container(content)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(width))
+    .height(Length::Fixed(HEIGHT - 8.0))
+    .padding(0)
+    .style(move |_, status| tool_style(t, active, status))
+    .on_press(on_press)
+    .into()
+}
+
+/// The look of every toolbar button: clear at rest, tinted while its menu is open, shaded on
+/// hover and press.
+fn tool_style(t: Tokens, active: bool, status: button::Status) -> button::Style {
     let background = match status {
-        button::Status::Hovered => Some(t.hover.into()),
         button::Status::Pressed => Some(t.pressed.into()),
+        button::Status::Hovered => Some(t.hover.into()),
+        _ if active => Some(
+            Color {
+                a: 0.12,
+                ..t.accent
+            }
+            .into(),
+        ),
         _ => None,
     };
     button::Style {
         background,
         text_color: t.text,
         border: Border {
-            radius: 4.0.into(),
+            radius: 6.0.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -289,29 +311,7 @@ impl Btn {
         .width(Length::Fixed(self.width))
         .height(Length::Fixed(HEIGHT - 8.0))
         .padding(0)
-        .style(move |_, status| {
-            let background = match status {
-                button::Status::Pressed => Some(t.pressed.into()),
-                button::Status::Hovered => Some(t.hover.into()),
-                _ if active => Some(
-                    Color {
-                        a: 0.12,
-                        ..t.accent
-                    }
-                    .into(),
-                ),
-                _ => None,
-            };
-            button::Style {
-                background,
-                text_color: t.text,
-                border: Border {
-                    radius: 6.0.into(),
-                    ..Border::default()
-                },
-                ..button::Style::default()
-            }
-        });
+        .style(move |_, status| tool_style(t, active, status));
         if let Some(message) = self.on_press {
             b = b.on_press(message);
         }
@@ -433,6 +433,12 @@ enum Entry {
         label: String,
         shortcut: Option<&'static str>,
         checked: bool,
+        /// The row opens a submenu beside the menu, so it ends in an arrow.
+        submenu: bool,
+        /// That submenu is showing: the row stays highlighted until it goes.
+        open: bool,
+        /// Sent when the pointer moves onto the row, without a click.
+        hover: Option<Box<Message>>,
         on_press: Option<Message>,
     },
     Separator,
@@ -444,6 +450,22 @@ impl Entry {
             label: label.into(),
             shortcut: None,
             checked: false,
+            submenu: false,
+            open: false,
+            hover: None,
+            on_press: Some(on_press),
+        }
+    }
+
+    /// A row that opens a submenu beside the menu; `open` says whether it is showing now.
+    fn submenu(label: impl Into<String>, on_press: Message, open: bool) -> Self {
+        Self::Item {
+            label: label.into(),
+            shortcut: None,
+            checked: false,
+            submenu: true,
+            open,
+            hover: None,
             on_press: Some(on_press),
         }
     }
@@ -453,6 +475,9 @@ impl Entry {
             label: label.into(),
             shortcut: None,
             checked: false,
+            submenu: false,
+            open: false,
+            hover: None,
             on_press: None,
         }
     }
@@ -541,19 +566,35 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             );
             list
         }
-        Menu::Export => vec![
-            Entry::item(s::EXPORT_PDF, Message::Export(ExportFormat::Pdf)),
-            Entry::item(
-                s::EXPORT_PDF_ARCHIVAL,
-                Message::Export(ExportFormat::PdfArchive),
-            ),
-            Entry::item(s::EXPORT_EPUB, Message::Export(ExportFormat::Epub)),
-            Entry::item(s::EXPORT_RTF, Message::Export(ExportFormat::Rtf)),
-            Entry::item(s::EXPORT_TEXT, Message::Export(ExportFormat::Text)),
-            Entry::item(s::EXPORT_MARKDOWN, Message::Export(ExportFormat::Markdown)),
-            Entry::Separator,
-            Entry::item(s::EXPORT_AO3, Message::OpenAo3Chapters),
-        ],
+        Menu::Export => {
+            let mut list = vec![
+                Entry::item(s::EXPORT_PDF, Message::Export(ExportFormat::Pdf)),
+                Entry::item(
+                    s::EXPORT_PDF_ARCHIVAL,
+                    Message::Export(ExportFormat::PdfArchive),
+                ),
+                Entry::item(s::EXPORT_EPUB, Message::Export(ExportFormat::Epub)),
+                Entry::item(s::EXPORT_RTF, Message::Export(ExportFormat::Rtf)),
+                Entry::item(s::EXPORT_TEXT, Message::Export(ExportFormat::Text)),
+                Entry::item(s::EXPORT_MARKDOWN, Message::Export(ExportFormat::Markdown)),
+                Entry::Separator,
+                Entry::submenu(s::EXPORT_AO3, Message::OpenAo3Chapters, state.ao3_open),
+            ];
+            // Resting the pointer on the AO3 row shows its chapters, with no click; moving to
+            // another row puts them away again.
+            for entry in &mut list {
+                if let Entry::Item { submenu, hover, .. } = entry {
+                    *hover = if *submenu {
+                        Some(Box::new(Message::OpenAo3Chapters))
+                    } else if state.ao3_open {
+                        Some(Box::new(Message::CloseAo3List))
+                    } else {
+                        None
+                    };
+                }
+            }
+            list
+        }
         Menu::Insert => {
             let item = |a: InsertAction| Entry::item(a.to_string(), Message::Insert(a));
             let mut list = vec![
@@ -911,15 +952,20 @@ fn panel<'a>(entries: Vec<Entry>, t: Tokens) -> Element<'a, Message> {
                 label,
                 shortcut,
                 checked,
+                submenu,
+                open,
+                hover,
                 on_press,
             } => {
                 let enabled = on_press.is_some();
-                let mut b = button(menu_row(t, label, shortcut, checked, enabled))
+                let mut b = button(menu_row(t, label, shortcut, checked, submenu, enabled))
                     .width(Length::Fill)
                     .padding([3, 10])
                     .style(move |_, status| {
-                        let hot =
-                            status == button::Status::Hovered || status == button::Status::Pressed;
+                        // A row whose submenu is showing stays lit, as in a native menu.
+                        let hot = open
+                            || status == button::Status::Hovered
+                            || status == button::Status::Pressed;
                         button::Style {
                             background: hot.then(|| t.menu_hover.into()),
                             text_color: if hot { t.on_accent } else { t.text },
@@ -933,7 +979,10 @@ fn panel<'a>(entries: Vec<Entry>, t: Tokens) -> Element<'a, Message> {
                 if let Some(message) = on_press {
                     b = b.on_press(message);
                 }
-                b.into()
+                match hover {
+                    Some(message) => mouse_area(b).on_enter(*message).into(),
+                    None => b.into(),
+                }
             }
         })
         .collect();
@@ -969,6 +1018,7 @@ fn menu_row<'a>(
     label: String,
     shortcut: Option<&'static str>,
     checked: bool,
+    submenu: bool,
     enabled: bool,
 ) -> Element<'a, Message> {
     // A text check mark inherits the row colour, so it stays readable on the hover fill.
@@ -986,6 +1036,10 @@ fn menu_row<'a>(
         .align_y(Center);
     if let Some(sc) = shortcut {
         r = r.push(text(sc).size(12).color(t.text_secondary));
+    }
+    if submenu {
+        // A text arrow, like the check mark, takes the row's colour (including the hover fill).
+        r = r.push(text("\u{203A}").size(18).width(Length::Fixed(10.0)));
     }
     r.into()
 }
@@ -1005,8 +1059,7 @@ mod tests {
 
     #[test]
     fn zoom_width_matches_its_parts() {
-        let parts =
-            ZOOM_INSET * 2.0 + ZOOM_STEP_W * 2.0 + ZOOM_NUMBER_W + ZOOM_UNIT_W + ZOOM_CHEVRON_W;
+        let parts = ZOOM_STEP_W * 2.0 + ZOOM_MAIN_W + BUTTON_SPACING * 2.0;
         assert!((W_ZOOM - parts).abs() < 0.01);
     }
 
@@ -1019,7 +1072,11 @@ mod tests {
     #[test]
     fn menus_anchor_under_their_own_buttons() {
         assert_eq!(menu_x(Menu::View, 1200.0), view_x());
-        assert_eq!(menu_x(Menu::Zoom, 1200.0), zoom_x());
+        // The Zoom menu opens under the middle button, past the minus button.
+        assert_eq!(
+            menu_x(Menu::Zoom, 1200.0),
+            zoom_x() + ZOOM_STEP_W + BUTTON_SPACING
+        );
         assert!(menu_x(Menu::Insert, 1200.0) > zoom_x());
     }
 
@@ -1085,6 +1142,86 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn the_ao3_row_has_an_arrow_and_stays_lit_while_its_list_is_open() {
+        let mut state = AppState::default();
+        let ao3 = |state: &AppState| {
+            entries(Menu::Export, state)
+                .into_iter()
+                .find(|entry| matches!(entry, Entry::Item { label, .. } if label == s::EXPORT_AO3))
+        };
+        assert!(matches!(
+            ao3(&state),
+            Some(Entry::Item {
+                submenu: true,
+                open: false,
+                ..
+            })
+        ));
+        state.ao3_open = true;
+        assert!(matches!(
+            ao3(&state),
+            Some(Entry::Item {
+                submenu: true,
+                open: true,
+                ..
+            })
+        ));
+        // No other Export row opens a submenu.
+        assert!(
+            entries(Menu::Export, &state)
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Item { submenu: true, .. }))
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn resting_on_the_ao3_row_opens_its_chapters_and_other_rows_put_them_away() {
+        let hovers = |state: &AppState| -> Vec<(String, Option<Box<Message>>)> {
+            entries(Menu::Export, state)
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Entry::Item { label, hover, .. } => Some((label, hover)),
+                    Entry::Separator => None,
+                })
+                .collect()
+        };
+        let mut state = AppState::default();
+        // Closed: only the AO3 row reacts to the pointer, and it opens the list.
+        for (label, hover) in hovers(&state) {
+            if label == s::EXPORT_AO3 {
+                assert!(matches!(hover.as_deref(), Some(Message::OpenAo3Chapters)));
+            } else {
+                assert!(
+                    hover.is_none(),
+                    "{label} needs no hover while the list is closed"
+                );
+            }
+        }
+        // Open: the other rows put it away when the pointer reaches them.
+        state.ao3_open = true;
+        for (label, hover) in hovers(&state) {
+            if label == s::EXPORT_AO3 {
+                assert!(matches!(hover.as_deref(), Some(Message::OpenAo3Chapters)));
+            } else {
+                assert!(
+                    matches!(hover.as_deref(), Some(Message::CloseAo3List)),
+                    "{label} should close the list"
+                );
+            }
+        }
+        // Other menus never have hover behaviour.
+        for menu in [Menu::View, Menu::Zoom, Menu::Insert] {
+            assert!(
+                entries(menu, &state)
+                    .iter()
+                    .all(|entry| !matches!(entry, Entry::Item { hover: Some(_), .. }))
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Application state, messages, update and view.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,7 @@ use crate::update::CHECK_INTERVAL_SECS;
 use crate::widgets::controls::flat;
 use crate::widgets::segmented::{self, Content, Look};
 
+mod bench_run;
 mod macro_run;
 mod runner;
 pub use runner::RunnerMsg;
@@ -246,6 +247,16 @@ impl FileContext {
         }
     }
 
+    /// Hands the writer the page each table-of-contents heading is on, for the page numbers
+    /// saved beside the entries (DOCX and ODT; the other formats keep none).
+    fn set_toc_pages(&mut self, pages: HashMap<libertum_model::BlockId, u32>) {
+        match self {
+            Self::Docx(docx) => docx.set_toc_pages(pages),
+            Self::Odt(odt) => odt.set_toc_pages(pages),
+            Self::Markdown(_) | Self::Rtf(_) | Self::Native(_) => {}
+        }
+    }
+
     /// The view state an open native document carries (the other formats have none).
     fn view(&self) -> Option<ViewState> {
         match self {
@@ -409,6 +420,8 @@ enum Modal {
     Unsaved { pending: Pending },
     /// An open or save failed. The message is already user-facing.
     Error(String),
+    /// Something the writer should know about a document that did open; OK acknowledges it.
+    Notice { title: String, detail: String },
     /// A newer release exists; the prompt follows it through the download.
     UpdateAvailable {
         release: crate::update::Release,
@@ -449,6 +462,10 @@ enum Modal {
         /// One flag per suggestion: what the writer ticked.
         selected: Vec<bool>,
         tags_copied: bool,
+        /// The chapter has a heading to use as AO3's chapter title (the whole-document chapter
+        /// does not: its name is a label, not a title).
+        has_title: bool,
+        title_copied: bool,
     },
 }
 
@@ -608,6 +625,10 @@ pub enum Message {
     DisableUpdates,
     /// A frame was rendered.
     FpsFrame(Instant),
+    /// The screenshot hook's delay is over: capture the window.
+    ScreenshotDue,
+    /// The captured window; save it and exit.
+    Screenshot(window::Screenshot),
     /// The autosave timer fired.
     AutosaveTick,
     /// The recovery snapshot was written (or failed to be).
@@ -718,15 +739,21 @@ pub enum Message {
     Exported(Result<PathBuf, String>),
     /// Open the AO3 chapter list beside the Export menu.
     OpenAo3Chapters,
+    /// Put the AO3 chapter list away (the pointer moved to another row of the Export menu).
+    CloseAo3List,
     /// Show one chapter's AO3 HTML (index into [`AppState::ao3_chapters`]).
     Ao3Chapter(usize),
     /// Copy the HTML shown in the AO3 chapter window.
     CopyAo3,
+    /// Copy the chapter's title, as plain text, for AO3's chapter title field.
+    CopyAo3Title,
     CloseAo3,
     /// Tick or untick one suggested tag (index into the window's suggestions).
     ToggleSuggestedTag(usize),
     /// Copy the ticked tags, comma separated, for AO3's tag field.
     CopySuggestedTags,
+    /// Turn the suggestions drawn from the chapter's own text on or off.
+    SetAutoTags(bool),
     /// Open the local AO3 tag vocabulary window.
     OpenTagVocabulary,
     CloseTagVocabulary,
@@ -734,6 +761,8 @@ pub enum Message {
     TagDraft(String),
     /// The category a new tag gets.
     TagCategoryPicked(TagCategory),
+    /// A name picked from AO3's fixed list for the rating or the warnings.
+    FixedTagPicked(&'static str),
     /// Add the typed name to the vocabulary (ignored when it is blank or already there).
     AddTag,
     /// Remove the vocabulary tag at this index.
@@ -754,6 +783,12 @@ pub enum Message {
     DragWindow,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ToggleMaximise,
+    /// Settings: start the benchmark.
+    RunBenchmark,
+    CancelBenchmark,
+    CloseBenchmarkReport,
+    ShowBenchmarkReport,
+    CopyBenchmarkReport,
 }
 
 /// `LIBERTUM_AUTOSCROLL=1`: scroll from page 1 to the last page at a steady speed, then exit
@@ -814,7 +849,7 @@ fn initial_zoom() -> Zoom {
 const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 /// The caret blinks this long after the last keystroke, click or edit, then stays solid and
 /// the timer stops, so an idle document costs no CPU (PLAN §2; the Windows caret does the
-/// same). Agreed with the user on 2026-11-09.
+/// same). Agreed 2026-11-09.
 const BLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A stream of ticks every [`BLINK_INTERVAL`] from a sleeping thread. iced's
@@ -962,6 +997,16 @@ pub struct App {
     pending_recovery: Option<(libertum_model::Document, recovery::Meta)>,
     /// The Settings window is over the document.
     settings_open: bool,
+    /// A benchmark in progress (the user's document is set aside meanwhile).
+    bench: Option<bench_run::Run>,
+    /// The last finished benchmark, and whether its window is showing.
+    bench_report: Option<crate::bench::Report>,
+    bench_report_open: bool,
+    bench_copied: bool,
+    /// Where finished results are kept (none in tests unless a test sets one).
+    bench_dir: Option<PathBuf>,
+    /// Where the shown result is saved, or why it is not.
+    bench_save_note: Option<String>,
     /// The state of the last update check, shown in Settings.
     update_check: UpdateCheck,
     /// The AO3 tag vocabulary window is over the document (from Settings or a chapter).
@@ -1094,6 +1139,16 @@ impl App {
             disk_stamp: None,
             pending_recovery: None,
             settings_open: false,
+            bench: None,
+            bench_report: None,
+            bench_report_open: false,
+            bench_copied: false,
+            bench_dir: if cfg!(test) {
+                None
+            } else {
+                crate::bench::results_dir()
+            },
+            bench_save_note: None,
             update_check: UpdateCheck::Idle,
             staged_update: None,
             vocabulary_open: false,
@@ -1291,9 +1346,12 @@ impl App {
         if let Some(open) = std::env::var_os("LIBERTUM_OPEN").map(PathBuf::from) {
             return match FileContext::open(&open) {
                 Ok((context, document, warnings)) => {
-                    for warning in warnings {
+                    for warning in &warnings {
                         tracing::info!(%warning, "import warning");
                     }
+                    let toc_notice = warnings
+                        .iter()
+                        .any(|w| w == libertum_formats_common::toc::TOC_REBUILT_WARNING);
                     let view = context.view();
                     let (doc, events) = match context.format() {
                         Format::Markdown => DocView::open_markdown(document),
@@ -1313,6 +1371,15 @@ impl App {
                     app.file = Some(open);
                     app.file_context = Some(context);
                     app.dirty = false;
+                    if let Some(doc) = app.doc.as_mut() {
+                        let _ = doc.edit(|ed| ed.refresh_table_of_contents());
+                    }
+                    if toc_notice {
+                        app.modal = Some(Modal::Notice {
+                            title: s::TOC_NOTICE_TITLE.to_owned(),
+                            detail: s::TOC_NOTICE_DETAIL.to_owned(),
+                        });
+                    }
                     app.refresh_format();
                     app.refresh_section();
                     app.apply_start_hooks(&mut tasks);
@@ -1403,14 +1470,40 @@ impl App {
                 libertum_export::chapters(doc.document(), self.settings.chapter_headings)
             });
             tasks.push(self.update(Message::Ao3Chapter(index)));
+            // `LIBERTUM_AO3_TICK=1` also ticks every suggested tag (for screenshots).
+            if std::env::var("LIBERTUM_AO3_TICK").is_ok_and(|v| v != "0" && !v.is_empty())
+                && let Some(Modal::Ao3Chapter { suggestions, .. }) = &self.modal
+            {
+                for index in 0..suggestions.len() {
+                    let _ = self.update(Message::ToggleSuggestedTag(index));
+                }
+            }
         }
-        // `LIBERTUM_TAGS=1` opens the AO3 tag vocabulary window at start-up.
-        if std::env::var("LIBERTUM_TAGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        // `LIBERTUM_TAGS=1` opens the AO3 tag vocabulary window at start-up; `rating` or
+        // `warning` opens it on that category (for screenshots of the fixed-name picker).
+        if let Ok(value) = std::env::var("LIBERTUM_TAGS")
+            && value != "0"
+            && !value.is_empty()
+        {
             self.vocabulary_open = true;
+            match value.as_str() {
+                "rating" => self.tag_category = TagCategory::Rating,
+                "warning" => self.tag_category = TagCategory::Warning,
+                _ => {}
+            }
         }
         // `LIBERTUM_SETTINGS=1` opens the Settings window at start-up (for screenshots).
         if std::env::var("LIBERTUM_SETTINGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
             self.settings_open = true;
+        }
+        // `LIBERTUM_SCREENSHOT=<file.png>` saves a picture of the window and exits (see shot.rs).
+        if let Some(task) = crate::shot::start() {
+            tasks.push(task);
+        }
+        // `LIBERTUM_BENCHMARK=1` runs the benchmark at start-up, prints its report to the log
+        // and exits; `=show` keeps the results window open instead (for screenshots).
+        if bench_run::start_requested() {
+            tasks.push(self.bench_start());
         }
         // `LIBERTUM_MCP_RUNNER=1` opens the MCP tool runner at start-up (for screenshots); it
         // still needs developer mode and MCP switched on in the settings.
@@ -2944,9 +3037,12 @@ impl App {
                 return Task::none();
             }
         };
-        for warning in warnings {
+        for warning in &warnings {
             tracing::info!(%warning, path = %path.display(), "import warning");
         }
+        let toc_notice = warnings
+            .iter()
+            .any(|warning| warning == libertum_formats_common::toc::TOC_REBUILT_WARNING);
         let view = context.view();
         let (mut doc, events) = match context.format() {
             Format::Markdown => DocView::open_markdown(document),
@@ -2958,6 +3054,9 @@ impl App {
             }
             Format::Native | Format::Odt | Format::Docx => DocView::open(document),
         };
+        // A table of contents another program wrote comes in as a placeholder; fill it from
+        // the headings now, without an undo step, so it is right before the first edit.
+        let _ = doc.edit(|ed| ed.refresh_table_of_contents());
         doc.move_caret(|ed| ed.move_doc_start(false));
         self.state.fonts = installed_fonts(&doc);
         self.state.word_count = doc.word_count();
@@ -2969,7 +3068,10 @@ impl App {
         self.file = Some(path);
         self.file_context = Some(context);
         self.dirty = false;
-        self.modal = None;
+        self.modal = toc_notice.then(|| Modal::Notice {
+            title: s::TOC_NOTICE_TITLE.to_owned(),
+            detail: s::TOC_NOTICE_DETAIL.to_owned(),
+        });
         self.after_save = None;
         self.scroll = (0.0, 0.0);
         self.canvas_focused = true;
@@ -3521,6 +3623,21 @@ impl App {
         self.write_document_forced(path)
     }
 
+    /// The page each heading the table of contents lists is on, as the layout has it now.
+    /// Headings past where pagination has reached have no number yet and are left out; the
+    /// writer then saves those entries without one.
+    fn toc_pages(&self) -> HashMap<libertum_model::BlockId, u32> {
+        let Some(doc) = self.doc.as_ref() else {
+            return HashMap::new();
+        };
+        doc.document()
+            .paragraphs()
+            .filter_map(|paragraph| paragraph.props.toc_target)
+            .filter(|target| target.0 != 0)
+            .filter_map(|target| Some((target, doc.page_number_of_block(target)?)))
+            .collect()
+    }
+
     /// Writes the document to `path` on a background task, in the format its extension names.
     fn write_document_forced(&mut self, path: PathBuf) -> Task<Message> {
         // An "updated date and time" field shows this save, and the save time itself is part
@@ -3553,6 +3670,7 @@ impl App {
             _ => FileContext::new(target, Document::new()),
         };
         writer.set_document(document);
+        writer.set_toc_pages(self.toc_pages());
         // A native save also records how the document was being read.
         writer.set_view(ViewState {
             pageless: self.state.pageless,
@@ -3660,6 +3778,11 @@ impl App {
                 }
                 Task::none()
             }
+            (Modal::Notice { .. }, _) => {
+                // A crash snapshot waiting behind the notice is offered now.
+                self.check_recovery();
+                Task::none()
+            }
             (Modal::Stitch, _) => Task::none(),
             (Modal::Library { .. } | Modal::History { .. }, _) => Task::none(),
             // The AO3 chapter window has its own Close button; it is not a choice.
@@ -3742,7 +3865,7 @@ impl App {
         ];
         let autoscrolling = self.autoscroll.as_ref().is_some_and(AutoScroll::active);
         let coasting = self.scroll_pending != (0.0, 0.0) || self.fling != (0.0, 0.0);
-        if autoscrolling || coasting || self.state.sidebar_animating() {
+        if autoscrolling || coasting || self.bench.is_some() || self.state.sidebar_animating() {
             subs.push(window::frames().map(Message::Frame));
         }
         if self.blinking(Instant::now()) {
@@ -3829,6 +3952,15 @@ impl App {
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
+        // While a benchmark runs the window shows a generated document: nothing that could edit,
+        // save or close it may get through. A close request ends the run first.
+        if self.bench.is_some() {
+            if matches!(message, Message::CloseRequested) {
+                let _ = self.bench_cancel();
+            } else if !bench_run::allows(&message) {
+                return Task::none();
+            }
+        }
         // Anything other than typing ends a stepper edit (stand-in for losing focus), and any
         // click that is not about the menu closes it.
         if !matches!(
@@ -4114,8 +4246,25 @@ impl App {
             Message::OpenSettings => {
                 self.state.open_menu = None;
                 self.settings_open = true;
+                self.bench_load_saved();
             }
             Message::CloseSettings => self.settings_open = false,
+            Message::RunBenchmark => return self.bench_start(),
+            Message::CancelBenchmark => return self.bench_cancel(),
+            Message::CloseBenchmarkReport => {
+                self.bench_report_open = false;
+                self.bench_copied = false;
+            }
+            Message::ShowBenchmarkReport => {
+                self.settings_open = false;
+                self.bench_report_open = self.bench_report.is_some();
+            }
+            Message::CopyBenchmarkReport => {
+                if let Some(report) = &self.bench_report {
+                    self.bench_copied = true;
+                    return iced::clipboard::write(report.to_text());
+                }
+            }
             Message::OpenDateTime => {
                 self.state.open_menu = None;
                 if self.doc.is_some() {
@@ -4611,6 +4760,7 @@ impl App {
                     self.state.open_menu = Some(Menu::Export);
                 }
             }
+            Message::CloseAo3List => self.state.ao3_open = false,
             Message::Ao3Chapter(index) => {
                 let Some(doc) = self.doc.as_ref() else {
                     return Task::none();
@@ -4619,12 +4769,7 @@ impl App {
                     return Task::none();
                 };
                 let html = libertum_export::ao3_fragment(doc.document(), &chapter);
-                let suggestions = libertum_export::suggest_for_chapter(
-                    doc.document(),
-                    &chapter,
-                    &self.settings.tags,
-                    SUGGESTION_LIMIT,
-                );
+                let suggestions = self.chapter_suggestions(doc.document(), &chapter);
                 let selected = vec![false; suggestions.len()];
                 self.modal = Some(Modal::Ao3Chapter {
                     chapter: index,
@@ -4634,6 +4779,8 @@ impl App {
                     suggestions,
                     selected,
                     tags_copied: false,
+                    has_title: chapter.level.is_some(),
+                    title_copied: false,
                 });
                 self.state.open_menu = None;
                 self.state.ao3_open = false;
@@ -4642,6 +4789,18 @@ impl App {
                 if let Some(Modal::Ao3Chapter { html, copied, .. }) = &mut self.modal {
                     *copied = true;
                     return iced::clipboard::write(html.clone());
+                }
+            }
+            Message::CopyAo3Title => {
+                if let Some(Modal::Ao3Chapter {
+                    title,
+                    has_title: true,
+                    title_copied,
+                    ..
+                }) = &mut self.modal
+                {
+                    *title_copied = true;
+                    return iced::clipboard::write(title.trim().to_owned());
                 }
             }
             Message::CloseAo3 => self.modal = None,
@@ -4656,6 +4815,11 @@ impl App {
                     *on = !*on;
                     *tags_copied = false;
                 }
+            }
+            Message::SetAutoTags(on) => {
+                self.settings.auto_suggest_tags = on;
+                self.save_settings();
+                self.rerank_suggestions();
             }
             Message::CopySuggestedTags => {
                 if let Some(Modal::Ao3Chapter {
@@ -4683,9 +4847,26 @@ impl App {
                 self.rerank_suggestions();
             }
             Message::TagDraft(text) => self.tag_draft = text,
-            Message::TagCategoryPicked(category) => self.tag_category = category,
+            Message::TagCategoryPicked(category) => {
+                self.tag_category = category;
+                // A name typed for one category is not a name AO3 has for a fixed one.
+                if category.fixed_name(&self.tag_draft).is_none()
+                    && category.fixed_names().is_some()
+                {
+                    self.tag_draft.clear();
+                }
+            }
+            Message::FixedTagPicked(name) => self.tag_draft = name.to_owned(),
             Message::AddTag => {
-                let name = self.tag_draft.trim().to_owned();
+                // The rating and the warnings are AO3's own names, in AO3's own spelling.
+                let name = match self.tag_category.fixed_names() {
+                    Some(_) => self
+                        .tag_category
+                        .fixed_name(&self.tag_draft)
+                        .map(str::to_owned)
+                        .unwrap_or_default(),
+                    None => self.tag_draft.trim().to_owned(),
+                };
                 if !name.is_empty()
                     && !self
                         .settings
@@ -4811,6 +4992,9 @@ impl App {
             }
             Message::BlinkTick(now) => self.on_blink_tick(now),
             Message::Frame(now) => {
+                if self.bench.is_some() {
+                    return self.bench_frame(now);
+                }
                 self.state.tick_sidebar(now);
                 self.coast(now);
                 return self.autoscroll_frame(now);
@@ -5090,6 +5274,20 @@ impl App {
                 }
             }
             Message::SystemTheme(mode) => self.system_mode = mode,
+            Message::ScreenshotDue => {
+                return window::oldest()
+                    .and_then(window::screenshot)
+                    .map(Message::Screenshot);
+            }
+            Message::Screenshot(shot) => {
+                if let Some(path) = crate::shot::target() {
+                    match crate::shot::save(&shot, &path) {
+                        Ok(()) => tracing::info!(path = %path.display(), "screenshot saved"),
+                        Err(error) => tracing::error!(%error, "could not save the screenshot"),
+                    }
+                }
+                return iced::exit();
+            }
             Message::DragWindow => return window::oldest().and_then(window::drag),
             Message::ToggleMaximise => return window::oldest().and_then(window::toggle_maximize),
         }
@@ -6014,6 +6212,9 @@ impl App {
         if self.settings.show_performance {
             canvas_stack = canvas_stack.push(self.fps_pill(t));
         }
+        if self.bench.is_some() {
+            canvas_stack = canvas_stack.push(self.bench_progress_layer(t));
+        }
 
         let mut main = row![].height(Length::Fill);
         if self.state.thumbnails && !doc.pageless {
@@ -6087,6 +6288,11 @@ impl App {
         };
         let base: Element<'_, Message> = if self.settings_open {
             stack![base, self.settings_layer(t)].into()
+        } else {
+            base
+        };
+        let base: Element<'_, Message> = if self.bench_report_open && self.bench.is_none() {
+            stack![base, self.bench_report_layer(t)].into()
         } else {
             base
         };
@@ -6753,6 +6959,35 @@ impl App {
                 controls::caption(t, s::SETTINGS_PERFORMANCE_HINT),
             ]
             .spacing(4),
+            labelled(t, s::SETTINGS_BENCHMARK, {
+                let mut benchmark = row![
+                    button(
+                        text(s::SETTINGS_BENCHMARK_RUN)
+                            .size(13)
+                            .wrapping(Wrapping::None)
+                    )
+                    .padding([6, 14])
+                    .style(move |_, status| controls::flat(t, status))
+                    .on_press(Message::RunBenchmark),
+                ]
+                .spacing(10)
+                .align_y(Center);
+                if self.bench_report.is_some() {
+                    benchmark = benchmark.push(
+                        button(
+                            text(s::SETTINGS_BENCHMARK_LAST)
+                                .size(13)
+                                .wrapping(Wrapping::None),
+                        )
+                        .padding([6, 14])
+                        .style(move |_, status| controls::flat(t, status))
+                        .on_press(Message::ShowBenchmarkReport),
+                    );
+                }
+                column![benchmark, controls::caption(t, s::SETTINGS_BENCHMARK_HINT)]
+                    .spacing(6)
+                    .into()
+            }),
             labelled(
                 t,
                 s::SETTINGS_SPELLING,
@@ -6946,6 +7181,29 @@ impl App {
         .into()
     }
 
+    /// The tags suggested for one chapter: the writer's vocabulary ranked against it, then (when
+    /// the setting is on) characters, pairings and keywords found in its own text that the
+    /// vocabulary does not already have.
+    fn chapter_suggestions(
+        &self,
+        document: &Document,
+        chapter: &libertum_export::Chapter,
+    ) -> Vec<TagSuggestion> {
+        let ranked = libertum_export::suggest_for_chapter(
+            document,
+            chapter,
+            &self.settings.tags,
+            SUGGESTION_LIMIT,
+        );
+        if !self.settings.auto_suggest_tags {
+            return ranked;
+        }
+        libertum_export::merge_suggestions(
+            ranked,
+            libertum_export::auto_suggestions_for_chapter(document, chapter),
+        )
+    }
+
     /// Re-ranks an open AO3 chapter after the vocabulary changed, keeping the writer's
     /// ticks on tags that are still suggested.
     fn rerank_suggestions(&mut self) {
@@ -6959,12 +7217,7 @@ impl App {
         let Some(chapter) = self.state.ao3_chapters.get(index).cloned() else {
             return;
         };
-        let fresh = libertum_export::suggest_for_chapter(
-            doc.document(),
-            &chapter,
-            &self.settings.tags,
-            SUGGESTION_LIMIT,
-        );
+        let fresh = self.chapter_suggestions(doc.document(), &chapter);
         if let Some(Modal::Ao3Chapter {
             suggestions,
             selected,
@@ -6998,6 +7251,7 @@ impl App {
         suggestions: &'a [TagSuggestion],
         selected: &'a [bool],
         tags_copied: bool,
+        (has_title, title_copied): (bool, bool),
         t: Tokens,
     ) -> Element<'a, Message> {
         use crate::widgets::controls;
@@ -7010,7 +7264,7 @@ impl App {
             )
             .padding(8),
         )
-        .height(Length::Fixed(260.0));
+        .height(Length::Fixed(190.0));
 
         // Suggested tags, grouped by the category AO3 files them under. Empty categories are
         // left out so the list stays about this chapter.
@@ -7047,11 +7301,27 @@ impl App {
             if rows.is_empty() {
                 continue;
             }
+            // The rating and the warnings are choices on AO3's form, so there is nothing to
+            // paste: say where to choose them. The other tags are ticked here and copied
+            // together with Copy tags.
+            let header_note: Element<'_, Message> = if category.fixed_names().is_some() {
+                text(s::AO3_TAGS_CHOOSE_ON_AO3)
+                    .size(11)
+                    .color(t.text_disabled)
+                    .into()
+            } else {
+                space::horizontal().width(Length::Shrink).into()
+            };
             groups.push(
                 column![
-                    text(category_label(category))
-                        .size(11)
-                        .color(t.text_secondary),
+                    row![
+                        text(category_label(category))
+                            .size(11)
+                            .color(t.text_secondary),
+                        space::horizontal(),
+                        header_note,
+                    ]
+                    .align_y(Center),
                     column(rows).spacing(3),
                 ]
                 .spacing(3)
@@ -7061,9 +7331,13 @@ impl App {
         let tag_area: Element<'_, Message> = if groups.is_empty() {
             controls::caption(t, s::AO3_TAGS_EMPTY)
         } else {
-            iced::widget::scrollable(column(groups).spacing(8))
-                .height(Length::Fixed(170.0))
-                .into()
+            // Room on the right for the scroll bar, so it never covers the evidence column.
+            iced::widget::scrollable(container(column(groups).spacing(8)).padding(Padding {
+                right: 16.0,
+                ..Padding::ZERO
+            }))
+            .height(Length::Fixed(170.0))
+            .into()
         };
 
         let flat = |label: &'static str, message: Message| {
@@ -7082,6 +7356,25 @@ impl App {
             Message::CopySuggestedTags,
         );
         let close = flat(s::AO3_CLOSE, Message::CloseAo3);
+        // AO3's chapter title is a plain-text field. The whole-document chapter has no real
+        // title to give it, so it gets no button.
+        let title_button: Element<'_, Message> = if has_title {
+            button(
+                text(if title_copied {
+                    s::AO3_TITLE_COPIED
+                } else {
+                    s::AO3_TITLE_COPY
+                })
+                .size(12)
+                .color(t.accent),
+            )
+            .padding([3, 10])
+            .style(move |_, status| controls::flat(t, status))
+            .on_press(Message::CopyAo3Title)
+            .into()
+        } else {
+            space::horizontal().width(Length::Shrink).into()
+        };
         let copy = button(text(if copied { s::AO3_COPIED } else { s::AO3_COPY }).size(13))
             .padding([6, 16])
             .style(move |_, _| button::Style {
@@ -7093,10 +7386,15 @@ impl App {
             .on_press(Message::CopyAo3);
         let card = container(
             column![
-                text(title.to_owned())
-                    .size(16)
-                    .font(controls::bold())
-                    .color(t.text),
+                row![
+                    text(title.to_owned())
+                        .size(16)
+                        .font(controls::bold())
+                        .color(t.text),
+                    space::horizontal(),
+                    title_button,
+                ]
+                .align_y(Center),
                 controls::caption(t, s::AO3_HINT),
                 body,
                 controls::divider(t),
@@ -7105,7 +7403,19 @@ impl App {
                     .font(controls::bold())
                     .color(t.text),
                 controls::caption(t, s::AO3_TAGS_HINT),
+                controls::checkbox_row(
+                    t,
+                    s::AO3_TAGS_AUTO,
+                    self.settings.auto_suggest_tags,
+                    false,
+                    Message::SetAutoTags,
+                ),
                 tag_area,
+                if self.settings.auto_suggest_tags {
+                    controls::caption(t, s::AO3_TAGS_AUTO_HINT)
+                } else {
+                    space::vertical().height(Length::Shrink).into()
+                },
                 row![edit, space::horizontal(), close, copy_tags, copy]
                     .spacing(8)
                     .align_y(Center),
@@ -7136,24 +7446,37 @@ impl App {
     fn tag_vocabulary_layer(&self, t: Tokens) -> Element<'_, Message> {
         use crate::state::TagCategoryChoice;
         use crate::widgets::controls;
-        let field = iced::widget::text_input(s::TAG_NAME_PLACEHOLDER, &self.tag_draft)
-            .on_input(Message::TagDraft)
-            .on_submit(Message::AddTag)
-            .size(13)
-            .padding(6)
-            .width(Length::Fill)
-            .style(move |_, _| iced::widget::text_input::Style {
-                background: t.control.into(),
-                border: iced::Border {
-                    color: t.control_border,
-                    width: 1.0,
-                    radius: 5.0.into(),
-                },
-                icon: t.text_secondary,
-                placeholder: t.text_secondary,
-                value: t.text,
-                selection: t.accent,
-            });
+        // The rating and the warnings are choices on AO3, so they are chosen here too, from
+        // its list; every other category is free text.
+        let field: Element<'_, Message> = match self.tag_category.fixed_names() {
+            Some(names) => controls::popup(
+                t,
+                names,
+                self.tag_category.fixed_name(&self.tag_draft),
+                s::TAG_NAME_CHOOSE,
+                Message::FixedTagPicked,
+            )
+            .into(),
+            None => iced::widget::text_input(s::TAG_NAME_PLACEHOLDER, &self.tag_draft)
+                .on_input(Message::TagDraft)
+                .on_submit(Message::AddTag)
+                .size(13)
+                .padding(6)
+                .width(Length::Fill)
+                .style(move |_, _| iced::widget::text_input::Style {
+                    background: t.control.into(),
+                    border: iced::Border {
+                        color: t.control_border,
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    },
+                    icon: t.text_secondary,
+                    placeholder: t.text_secondary,
+                    value: t.text,
+                    selection: t.accent,
+                })
+                .into(),
+        };
         let category = controls::popup(
             t,
             TagCategoryChoice::ALL,
@@ -7380,6 +7703,8 @@ impl App {
             suggestions,
             selected,
             tags_copied,
+            has_title,
+            title_copied,
             ..
         } = modal
         {
@@ -7390,6 +7715,7 @@ impl App {
                 suggestions,
                 selected,
                 *tags_copied,
+                (*has_title, *title_copied),
                 t,
             );
         }
@@ -7418,6 +7744,7 @@ impl App {
             }
             Modal::Unsaved { .. } => (s::UNSAVED_TITLE.to_owned(), s::UNSAVED_DETAIL.to_owned()),
             Modal::Error(message) => (message.clone(), String::new()),
+            Modal::Notice { title, detail } => (title.clone(), detail.clone()),
             Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
             Modal::Library { .. } | Modal::History { .. } => (String::new(), String::new()),
             Modal::DateTime { .. } => (s::DATE_TIME_TITLE.to_owned(), String::new()),
@@ -7478,7 +7805,9 @@ impl App {
                 self.modal_button(s::DONT_SAVE, false, ModalChoice::Discard),
                 self.modal_button(s::CANCEL, false, ModalChoice::Cancel),
             ],
-            Modal::Error(_) => vec![self.modal_button(s::OK, true, ModalChoice::Cancel)],
+            Modal::Error(_) | Modal::Notice { .. } => {
+                vec![self.modal_button(s::OK, true, ModalChoice::Cancel)]
+            }
             Modal::ChangedOnDisk { .. } => vec![
                 self.modal_button(s::OVERWRITE, false, ModalChoice::Save),
                 self.modal_button(s::SAVE_A_COPY, true, ModalChoice::Discard),
@@ -7827,7 +8156,7 @@ const SCROLL_GLIDE_RATE: f32 = 20.0;
 /// Trackpad inertia. Events closer together than the window are one gesture; the page is
 /// carried on once none has arrived for the idle time; the velocity decays by this rate per
 /// second (about a sixth of a second to halve; the page travels speed / rate in all); and it
-/// ends below the minimum speed. The cap stops one noisy event from launching the page.
+/// ends below the minimum speed. The cap stops one noisy event from launching the page; it was 12,000 px/s and is now 24,000, so a hard flick travels twice as far.
 const FLING_SAMPLE_WINDOW: f32 = 0.1;
 const FLING_IDLE: f32 = 0.04;
 const FLING_DECAY_RATE: f32 = 4.0;
@@ -7842,7 +8171,7 @@ const FLING_MIN_SPEED: f32 = 300.0;
 const FLING_STOP_SPEED: f32 = 10.0;
 const FLING_TAIL_SPEED: f32 = 500.0;
 const FLING_TAIL_BRAKE: f32 = 8.0;
-const FLING_MAX_SPEED: f32 = 12_000.0;
+const FLING_MAX_SPEED: f32 = 24_000.0;
 
 /// Page thumbnails: image width, the box a page is fitted into (an A4 page's proportions),
 /// one row's height with its number, the column's width, and how many rendered thumbnails
@@ -9591,6 +9920,63 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/"
+        ))
+        .join(name)
+    }
+
+    #[test]
+    fn opening_a_word_document_with_a_table_of_contents_shows_a_notice_and_rebuilds_it() {
+        let mut app = app();
+        let _ = app.open_path(fixture("docx/word-toc.docx"));
+        assert!(
+            matches!(app.modal, Some(Modal::Notice { .. })),
+            "a Word table of contents is acknowledged with an OK button"
+        );
+        // The entries were rebuilt from the headings.
+        let texts = paragraph_texts(&app);
+        assert_eq!(
+            texts.iter().filter(|text| *text == "Chapter One").count(),
+            2,
+            "the heading and its entry: {texts:?}"
+        );
+        // OK dismisses it.
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        assert!(app.modal.is_none(), "modal stayed open: {:?}", app.modal);
+    }
+
+    #[test]
+    fn a_libreoffice_table_of_contents_gets_the_same_notice() {
+        let mut app = app();
+        let _ = app.open_path(fixture("odt/toc.odt"));
+        assert!(matches!(app.modal, Some(Modal::Notice { .. })));
+    }
+
+    #[test]
+    fn a_table_of_contents_libertum_saved_reopens_without_a_notice() {
+        let mut app = app();
+        let _ = app.open_path(fixture("docx/word-toc.docx"));
+        let document = app.doc().document().clone();
+        let path = std::env::temp_dir().join(format!("libertum-toc-{}.docx", std::process::id()));
+        libertum_docx::Docx::new(document)
+            .save(&path)
+            .expect("save");
+        let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
+        let _ = app.open_path(path.clone());
+        assert!(app.modal.is_none(), "Libertum's own TOC needs no notice");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_plain_document_opens_without_a_notice() {
+        let mut app = app();
+        let _ = app.open_path(fixture("docx/rich.docx"));
+        assert!(app.modal.is_none());
+    }
+
     #[test]
     fn closing_with_unsaved_changes_prompts_and_can_be_cancelled() {
         let mut app = app();
@@ -10761,7 +11147,11 @@ mod tests {
             "the other prompt is not replaced"
         );
         let _ = app.update(Message::ModalChoice(ModalChoice::Cancel));
-        assert!(asking(&app), "the edit prompt takes its turn");
+        assert!(
+            asking(&app),
+            "the edit prompt takes its turn: {:?}",
+            app.modal
+        );
         let _ = app.update(Message::McpDecision(McpDecision::Deny));
         let _ = asker.join();
     }
@@ -10855,7 +11245,7 @@ mod tests {
 
     #[test]
     fn client_names_are_made_safe_before_they_are_shown_or_remembered() {
-        assert_eq!(mcp::display_name("  Claude\n\tDesktop  "), "Claude Desktop");
+        assert_eq!(mcp::display_name("  Example\n\tEditor  "), "Example Editor");
         assert_eq!(mcp::display_name("\u{7}\u{0}"), "an unnamed tool");
         assert_eq!(mcp::display_name(&"x".repeat(500)).chars().count(), 61);
     }
@@ -12178,7 +12568,7 @@ Opened from Explorer.
                 .iter()
                 .any(|t| t == "Opened from Explorer.")
         );
-        assert!(app.modal.is_none());
+        assert!(app.modal.is_none(), "unexpected modal: {:?}", app.modal);
         // A file that cannot be opened shows the error over the home screen.
         let (app, _task) = App::boot(settings.clone(), None, Some(dir.join("missing.odt")));
         assert!(app.doc.is_none());
@@ -13058,6 +13448,187 @@ mod date_time_tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn the_rating_and_warnings_can_only_be_added_by_their_fixed_names() {
+        let mut app = tagged_chapter_app();
+        let _ = app.update(Message::OpenTagVocabulary);
+        let before = app.settings.tags.len();
+        // A typed rating is not one of AO3's, so it is not added.
+        let _ = app.update(Message::TagCategoryPicked(TagCategory::Rating));
+        let _ = app.update(Message::TagDraft("Teen".into()));
+        let _ = app.update(Message::AddTag);
+        assert_eq!(app.settings.tags.len(), before);
+        // Picked from the list, it is added in AO3's own spelling, whatever case was given.
+        let _ = app.update(Message::FixedTagPicked("Explicit"));
+        let _ = app.update(Message::AddTag);
+        assert!(
+            app.settings
+                .tags
+                .iter()
+                .any(|tag| tag.name == "Explicit" && tag.category == TagCategory::Rating)
+        );
+        // Switching to a category with a fixed list drops a name typed for another.
+        let _ = app.update(Message::TagCategoryPicked(TagCategory::Freeform));
+        let _ = app.update(Message::TagDraft("Mood piece".into()));
+        let _ = app.update(Message::TagCategoryPicked(TagCategory::Warning));
+        assert!(app.tag_draft.is_empty());
+        // A name that is fine for the new category is kept.
+        let _ = app.update(Message::TagCategoryPicked(TagCategory::Freeform));
+        let _ = app.update(Message::TagDraft("Mood piece".into()));
+        let _ = app.update(Message::TagCategoryPicked(TagCategory::Relationship));
+        assert_eq!(app.tag_draft, "Mood piece");
+    }
+
+    #[test]
+    fn a_chapter_with_a_heading_can_copy_its_title_and_the_whole_document_cannot() {
+        let mut chaptered = tagged_chapter_app();
+        let _ = chaptered.update(Message::OpenAo3Chapters);
+        let _ = chaptered.update(Message::Ao3Chapter(0));
+        let Some(Modal::Ao3Chapter {
+            title, has_title, ..
+        }) = &chaptered.modal
+        else {
+            panic!("the chapter window is open");
+        };
+        assert!(*has_title, "a chapter that starts at a heading has a title");
+        assert!(!title.trim().is_empty());
+        let _ = chaptered.update(Message::CopyAo3Title);
+        assert!(matches!(
+            &chaptered.modal,
+            Some(Modal::Ao3Chapter {
+                title_copied: true,
+                ..
+            })
+        ));
+
+        // A document with no matching heading is one "Whole document" chapter: that name is
+        // a label, not a title, so there is nothing to copy and the button does nothing.
+        let mut plain = app();
+        let _ = plain.update(Message::OpenAo3Chapters);
+        let _ = plain.update(Message::Ao3Chapter(0));
+        assert!(matches!(
+            &plain.modal,
+            Some(Modal::Ao3Chapter {
+                has_title: false,
+                ..
+            })
+        ));
+        let _ = plain.update(Message::CopyAo3Title);
+        assert!(matches!(
+            &plain.modal,
+            Some(Modal::Ao3Chapter {
+                title_copied: false,
+                ..
+            })
+        ));
+    }
+
+    /// A chapter with two recurring characters who share romantic scenes and a recurring word,
+    /// and no vocabulary at all, for the suggestions drawn from the text.
+    fn story_app() -> App {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let story = "Chapter One\n\
+            Mara watched the dragon circle the keep. Voss stood beside her.\n\
+            \"The dragon is early,\" Mara said. Voss nodded and Mara frowned.\n\
+            Voss looked at Mara and smiled. The dragon landed, and the dragon roared.\n\
+            Voss kissed Mara, and the dragon watched. Mara loved the dragon.\n\
+            Voss held Mara close. The dragon slept.\n\
+            Voss whispered that he loved her, and Mara kissed Voss.";
+        let _ = app.update(Message::PasteText(Some(story.into())));
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        let _ = app.update(Message::Format(FormatMsg::Style(ParagraphStyle::Heading1)));
+        app.settings.tags = Vec::new();
+        app
+    }
+
+    fn open_first_chapter(app: &mut App) {
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(0));
+    }
+
+    fn suggested(app: &App, category: TagCategory) -> Vec<String> {
+        match &app.modal {
+            Some(Modal::Ao3Chapter { suggestions, .. }) => suggestions
+                .iter()
+                .filter(|s| s.tag.category == category)
+                .map(|s| s.tag.name.clone())
+                .collect(),
+            _ => panic!("the AO3 chapter window is open"),
+        }
+    }
+
+    #[test]
+    fn the_chapter_window_suggests_characters_pairings_and_keywords_from_the_text_alone() {
+        let mut app = story_app();
+        assert!(app.settings.auto_suggest_tags, "on by default");
+        open_first_chapter(&mut app);
+        let characters = suggested(&app, TagCategory::Character);
+        assert!(characters.contains(&"Mara".to_owned()), "{characters:?}");
+        assert!(characters.contains(&"Voss".to_owned()), "{characters:?}");
+        assert_eq!(
+            suggested(&app, TagCategory::Relationship),
+            vec!["Mara/Voss".to_owned()]
+        );
+        assert!(suggested(&app, TagCategory::Freeform).contains(&"Dragon".to_owned()));
+        // Never a rating or a warning, and nothing is ticked for the writer.
+        assert!(suggested(&app, TagCategory::Rating).is_empty());
+        assert!(suggested(&app, TagCategory::Warning).is_empty());
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Ao3Chapter { selected, .. }) if selected.iter().all(|on| !on)
+        ));
+    }
+
+    #[test]
+    fn switching_the_text_suggestions_off_drops_them_and_keeps_the_writers_ticks() {
+        let mut app = story_app();
+        app.settings.tags = vec![Tag::new("Dragon", TagCategory::Freeform)];
+        open_first_chapter(&mut app);
+        let dragon = suggestion_index(&app, "Dragon");
+        let _ = app.update(Message::ToggleSuggestedTag(dragon));
+        let _ = app.update(Message::SetAutoTags(false));
+        assert!(!app.settings.auto_suggest_tags);
+        assert!(suggested(&app, TagCategory::Character).is_empty());
+        assert!(suggested(&app, TagCategory::Relationship).is_empty());
+        // The vocabulary's own suggestion, and its tick, are still there.
+        let dragon = suggestion_index(&app, "Dragon");
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Ao3Chapter { selected, .. }) if selected[dragon]
+        ));
+        // And back on again.
+        let _ = app.update(Message::SetAutoTags(true));
+        assert!(suggested(&app, TagCategory::Character).contains(&"Mara".to_owned()));
+        // A tag the vocabulary has is not offered a second time as a keyword.
+        assert_eq!(
+            suggested(&app, TagCategory::Freeform)
+                .iter()
+                .filter(|name| name.eq_ignore_ascii_case("dragon"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_ao3_chapter_list_opens_on_hover_and_closes_without_closing_the_menu() {
+        let mut app = tagged_chapter_app();
+        let _ = app.update(Message::OpenAo3Chapters);
+        assert!(app.state.ao3_open);
+        assert_eq!(app.state.open_menu, Some(Menu::Export));
+        assert!(
+            !app.state.ao3_chapters.is_empty(),
+            "the chapters are listed"
+        );
+        // The pointer moves to another row: the list goes, the Export menu stays.
+        let _ = app.update(Message::CloseAo3List);
+        assert!(!app.state.ao3_open);
+        assert_eq!(app.state.open_menu, Some(Menu::Export));
+        // And back onto the AO3 row.
+        let _ = app.update(Message::OpenAo3Chapters);
+        assert!(app.state.ao3_open);
     }
 
     #[test]

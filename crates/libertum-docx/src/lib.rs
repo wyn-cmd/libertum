@@ -8,6 +8,7 @@
 mod headers;
 mod package;
 mod read;
+mod toc;
 mod watermark;
 mod write;
 mod xml;
@@ -48,6 +49,9 @@ pub struct Docx {
     extras: Extras,
     origin: Option<package::Package>,
     warnings: Vec<String>,
+    /// The page each table-of-contents entry's heading is on, by the heading's block id, for
+    /// the page numbers written beside the entries. The layout knows them; the model does not.
+    toc_pages: std::collections::HashMap<libertum_model::BlockId, u32>,
 }
 
 impl Docx {
@@ -59,6 +63,7 @@ impl Docx {
             extras: parsed.extras,
             origin: Some(parsed.package),
             warnings: parsed.warnings,
+            toc_pages: Default::default(),
         })
     }
 
@@ -75,7 +80,19 @@ impl Docx {
             extras: Vec::new(),
             origin: None,
             warnings: Vec::new(),
+            toc_pages: Default::default(),
         }
+    }
+
+    /// Gives the writer the page number of each heading a table-of-contents entry points at
+    /// (keyed by the heading's block id), so the entries are saved with their page numbers
+    /// and Word shows them before the field is next updated. Without them the entries are
+    /// still saved, links and all, but with no page numbers until Word updates the field.
+    pub fn set_toc_pages(
+        &mut self,
+        pages: std::collections::HashMap<libertum_model::BlockId, u32>,
+    ) {
+        self.toc_pages = pages;
     }
 
     pub fn document(&self) -> &Document {
@@ -99,7 +116,12 @@ impl Docx {
 
     /// Writes the document as a DOCX package.
     pub fn to_bytes(&self) -> Result<Vec<u8>, DocxError> {
-        let package = write::build(&self.document, &self.extras, self.origin.as_ref())?;
+        let package = write::build(
+            &self.document,
+            &self.extras,
+            self.origin.as_ref(),
+            &self.toc_pages,
+        )?;
         package.write()
     }
 

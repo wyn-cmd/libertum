@@ -51,7 +51,7 @@ const BULK_PARAGRAPHS: usize = 200;
 const PENDING_MARGIN: usize = 8;
 /// Cap on the merged render queue (bounds how far ahead the worker can run).
 const PENDING_MAX: usize = 32;
-/// Cap on cached strip bitmaps (bytes of RGBA). The user set a 600 MB working-set ceiling
+/// Cap on cached strip bitmaps (bytes of RGBA). A 600 MB working-set ceiling
 /// (2026-11-09); this leaves room for the layout caches and iced's GPU atlas.
 const HANDLE_CACHE_BYTES: usize = 160 * 1024 * 1024;
 /// iced_wgpu uploads an image synchronously (in the frame that draws it) only when it is
@@ -91,7 +91,7 @@ pub fn pageless_geometry(document: &Document) -> PageGeometry {
 }
 
 /// Layout options for a document opened in the app. `LIBERTUM_LAYOUT_THREADS=<n>` sets how
-/// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 8; 1:
+/// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 2; 1:
 /// none), for measuring.
 fn layout_options() -> LayoutOptions {
     let threads = std::env::var("LIBERTUM_LAYOUT_THREADS")

@@ -25,7 +25,7 @@ Libertum's model:
 | Unknown-but-preserved material | package parts | package parts | raw groups |
 
 On top of that, each writer regenerates parts it does not model (`styles.xml` wholesale,
-RTF font/colour tables), so a save can quietly change bytes the user never edited. The
+RTF font/colour tables), so a save can quietly change bytes the writer never edited. The
 importers are careful, but "no loss in the mapped features" is still the honest promise —
 the model is larger than the intersection of the three formats.
 
@@ -88,7 +88,7 @@ paragraphs showing the same image store it once (the model already holds images 
 ```
 
 `features` is advisory: a build that does not know a feature must still refuse to *save*
-over the file rather than silently drop it, unless the user says so (the same rule the
+over the file rather than silently drop it, unless the writer says so (the same rule the
 Markdown loss prompt follows).
 
 ### `document.json` (sketch)
@@ -214,7 +214,7 @@ and no data files, so `docs/third-party-licences.md` needs only the dependency n
   removes the main advantage over a binary custom format for this project's debugging style.
 - **SQLite with the model in tables:** good for huge documents and incremental saves, but a
   large dependency and complex save semantics for a word processor whose documents are small
-  files the user copies around.
+  files copied between machines.
 
 ## Recommendation
 

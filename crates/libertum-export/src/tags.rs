@@ -29,7 +29,51 @@ pub enum TagCategory {
     Freeform,
 }
 
+/// AO3's ratings, in the order its posting form offers them. The form takes the rating as a
+/// choice, not as text, so these are names to pick from and remember, not text to copy.
+/// Taken from AO3's own pages (the Terms of Service FAQ and the Tags FAQ, found by search on
+/// 2026-11-21; the live form was not read, because AO3 rate-limited the request).
+pub const AO3_RATINGS: [&str; 5] = [
+    "Not Rated",
+    "General Audiences",
+    "Teen And Up Audiences",
+    "Mature",
+    "Explicit",
+];
+
+/// AO3's archive warnings, which its form takes as tick boxes. Same sources as
+/// [`AO3_RATINGS`]. **"Underage Sex" is the name a 2024 AO3 guide gives; the older Tags FAQ
+/// still says "Underage". Check it against the live form.**
+pub const AO3_WARNINGS: [&str; 6] = [
+    "Creator Chose Not To Use Archive Warnings",
+    "Graphic Depictions Of Violence",
+    "Major Character Death",
+    "No Archive Warnings Apply",
+    "Rape/Non-Con",
+    "Underage Sex",
+];
+
 impl TagCategory {
+    /// The names AO3 fixes for this category, or `None` for the categories whose tags are
+    /// free text (fandoms, relationships, characters and additional tags).
+    pub fn fixed_names(self) -> Option<&'static [&'static str]> {
+        match self {
+            TagCategory::Rating => Some(&AO3_RATINGS),
+            TagCategory::Warning => Some(&AO3_WARNINGS),
+            _ => None,
+        }
+    }
+
+    /// `text` as AO3 spells it in this category's fixed list (ignoring case and surrounding
+    /// space), or `None` when it is not one of them or the category has no fixed list.
+    pub fn fixed_name(self, text: &str) -> Option<&'static str> {
+        let text = text.trim();
+        self.fixed_names()?
+            .iter()
+            .copied()
+            .find(|name| name.eq_ignore_ascii_case(text))
+    }
+
     /// Every category, in the order AO3's form presents them.
     pub const ALL: [TagCategory; 6] = [
         TagCategory::Rating,
@@ -282,15 +326,16 @@ pub fn suggest_for_chapter(
     suggest_tags(&chapter_text(document, chapter), vocabulary, limit)
 }
 
-/// The tags the writer ticked, as AO3's tag field takes them: comma separated, in category
-/// order, then by name. Categories that AO3 keeps in separate fields are kept in one list
-/// here; the review UI shows them grouped so they are easy to split.
+/// The ticked tags as one line for AO3's tag fields: comma separated, in category order, then
+/// by name. The rating and the warnings are left out: AO3 takes them as choices on its form,
+/// and pasted into a tag field they would only make stray tags.
 pub fn tags_to_text(suggestions: &[TagSuggestion], selected: &[bool]) -> String {
     let mut chosen: Vec<&Tag> = suggestions
         .iter()
         .zip(selected)
         .filter(|(_, on)| **on)
         .map(|(suggestion, _)| &suggestion.tag)
+        .filter(|tag| tag.category.fixed_names().is_none())
         .collect();
     chosen.sort_by(|a, b| {
         a.category
@@ -490,5 +535,52 @@ mod tests {
             "Slow Burn"
         );
         assert_eq!(tags_to_text(&suggestions, &[false, false, false]), "");
+    }
+
+    #[test]
+    fn rating_and_warning_names_are_fixed_and_the_rest_are_free_text() {
+        assert_eq!(TagCategory::Rating.fixed_names().map(<[_]>::len), Some(5));
+        assert_eq!(TagCategory::Warning.fixed_names().map(<[_]>::len), Some(6));
+        for category in [
+            TagCategory::Fandom,
+            TagCategory::Relationship,
+            TagCategory::Character,
+            TagCategory::Freeform,
+        ] {
+            assert!(category.fixed_names().is_none());
+        }
+        // Case and spacing are forgiven, and the canonical spelling comes back.
+        assert_eq!(
+            TagCategory::Rating.fixed_name("  teen and up audiences "),
+            Some("Teen And Up Audiences")
+        );
+        assert_eq!(TagCategory::Rating.fixed_name("Teen"), None);
+        assert_eq!(
+            TagCategory::Warning.fixed_name("MAJOR CHARACTER DEATH"),
+            Some("Major Character Death")
+        );
+        // A rating is not a warning.
+        assert_eq!(TagCategory::Warning.fixed_name("Explicit"), None);
+        assert_eq!(TagCategory::Freeform.fixed_name("Explicit"), None);
+    }
+
+    #[test]
+    fn the_combined_line_leaves_out_the_rating_and_the_warnings() {
+        let suggestion = |name: &str, category| TagSuggestion {
+            tag: Tag::new(name, category),
+            score: 1.0,
+            matched: Vec::new(),
+        };
+        let suggestions = vec![
+            suggestion("Mature", TagCategory::Rating),
+            suggestion("Major Character Death", TagCategory::Warning),
+            suggestion("Ghost", TagCategory::Character),
+            suggestion("Slow Burn", TagCategory::Freeform),
+        ];
+        assert_eq!(
+            tags_to_text(&suggestions, &[true; 4]),
+            "Ghost, Slow Burn",
+            "AO3 takes the rating and warnings as choices, not as tags"
+        );
     }
 }

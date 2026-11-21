@@ -19,11 +19,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use libertum_formats_common::media::media_from_bytes;
+use libertum_formats_common::toc::{LIBERTUM_TOC_TAG, TOC_REBUILT_WARNING};
 use libertum_model::{
     Align, Block, BlockId, Document, HeaderFooter, InlineImage, ListItem, ListStyle,
     MAX_LIST_LEVEL, MIN_TABLE_COLUMN_PT, Media, PageNumberHorizontal, PageNumberPos,
-    PageNumberVertical, ParaProps, Paragraph, Section, Table, TableBorders, TableCell, TableRow,
-    TableStyle,
+    PageNumberVertical, ParaProps, Paragraph, Section, StyleId, Table, TableBorders, TableCell,
+    TableRow, TableStyle,
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -178,8 +179,46 @@ fn read_text_child(
                 what: "a text section".to_owned(),
             });
         }
-        "table-of-content" | "illustration-index" | "table-index" | "object-index"
-        | "user-index" | "alphabetical-index" | "bibliography" | "index-title" | "index-body" => {
+        "table-of-content" => {
+            // The entries are generated text, so they are not kept: the title is, and a
+            // placeholder marks the place for the editor to rebuild them from the headings.
+            let node = style::read_node(reader, start, PART_CONTENT)?;
+            let title = node
+                .child("index-body")
+                .and_then(|body| body.child("index-title"))
+                .and_then(|title| {
+                    title
+                        .elements()
+                        .find(|e| matches!(e.name.as_str(), "p" | "h"))
+                });
+            match title {
+                Some(title) => {
+                    let paragraph = parse_paragraph(title, styles, None, state, warnings, true)?;
+                    state.push(Block::Paragraph(paragraph));
+                }
+                None => {
+                    let id = state.alloc_id();
+                    state.push(Block::Paragraph(Paragraph::new(id, "").with_props(
+                        ParaProps {
+                            style: StyleId::TITLE,
+                            ..ParaProps::default()
+                        },
+                    )));
+                }
+            }
+            let id = state.alloc_id();
+            state.push(Block::Paragraph(Paragraph::new(id, "").with_props(
+                ParaProps {
+                    toc_target: Some(BlockId(0)),
+                    ..ParaProps::default()
+                },
+            )));
+            if node.attr("name") != Some(LIBERTUM_TOC_TAG) {
+                warnings.push(TOC_REBUILT_WARNING.to_owned());
+            }
+        }
+        "illustration-index" | "table-index" | "object-index" | "user-index"
+        | "alphabetical-index" | "bibliography" | "index-title" | "index-body" => {
             return Err(OdtError::Unsupported {
                 part: PART_CONTENT.to_owned(),
                 what: "a table of contents or index".to_owned(),
