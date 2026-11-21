@@ -1080,6 +1080,79 @@ fn update_style_moves_direct_formatting_into_the_style_and_undo_restores_it() {
 }
 
 #[test]
+fn update_style_takes_a_size_set_on_part_of_a_paragraph() {
+    let mut ed = three_paragraphs();
+    let default_size = ed.document().styles.resolve_char(StyleId::BODY).size_pt;
+    // Size 11 on "paragraph" only (not the whole of the first paragraph).
+    ed.set_selection(
+        DocPosition {
+            block: BlockId(1),
+            offset: 6,
+        },
+        DocPosition {
+            block: BlockId(1),
+            offset: 15,
+        },
+    );
+    ed.format_selection(&CharFormat::sized(14.0)).expect("size");
+    let before = ed.document().clone();
+    assert!(ed.para_summary().differs_from_style);
+    ed.update_style_from_selection().expect("update");
+    let doc = ed.document();
+    let body = doc.styles.get(StyleId::BODY).expect("body");
+    assert_eq!(body.char.size_pt, Some(14.0));
+    assert_ne!(default_size, 14.0);
+    assert!(doc.paragraph(BlockId(1)).expect("first").runs().is_empty());
+    assert!(!ed.para_summary().differs_from_style);
+    ed.undo().expect("undo");
+    assert!(ed.document().content_eq(&before));
+}
+
+#[test]
+fn update_style_keeps_formatting_the_selection_does_not_share() {
+    let mut ed = three_paragraphs();
+    // Whole first paragraph at 14pt, the word "First" also bold.
+    ed.set_selection(
+        DocPosition {
+            block: BlockId(1),
+            offset: 0,
+        },
+        DocPosition {
+            block: BlockId(1),
+            offset: "First paragraph.".len(),
+        },
+    );
+    ed.format_selection(&CharFormat::sized(14.0)).expect("size");
+    ed.set_selection(
+        DocPosition {
+            block: BlockId(1),
+            offset: 0,
+        },
+        DocPosition {
+            block: BlockId(1),
+            offset: 5,
+        },
+    );
+    ed.toggle_bold().expect("bold");
+    // Caret in the paragraph: the whole paragraph shares only the size.
+    ed.set_caret(
+        DocPosition {
+            block: BlockId(1),
+            offset: 3,
+        },
+        false,
+    );
+    ed.update_style_from_selection().expect("update");
+    let doc = ed.document();
+    let body = doc.styles.get(StyleId::BODY).expect("body");
+    assert_eq!(body.char.size_pt, Some(14.0));
+    assert_eq!(body.char.weight, None, "bold was not shared");
+    let first = doc.paragraph(BlockId(1)).expect("first");
+    assert_eq!(first.format_of(0).weight, Some(700));
+    assert_eq!(first.format_of(0).size_pt, None);
+}
+
+#[test]
 fn superscript_toggles_on_and_off() {
     let mut ed = three_paragraphs();
     ed.toggle_vertical(VerticalAlign::Superscript).expect("sup");

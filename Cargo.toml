@@ -3,11 +3,10 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-repository = ""
 
 [workspace.dependencies]
 # Internal crates
@@ -28,11 +27,9 @@ libertum-mcp = { path = "crates/libertum-mcp" }
 # UI
 iced = "0.14"
 rfd = "0.18"
-arboard = "3.7"
 
 # Text and rendering
 parley = "0.12"
-fontique = "0.12"
 swash = "0.2"
 tiny-skia = "0.12"
 vello = "0.7"  # 0.7 is the last vello on wgpu 27, which iced_wgpu 0.14 uses (vello 0.11 needs wgpu 30)
@@ -55,8 +52,6 @@ encoding_rs = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # Data structures and infrastructure
-slotmap = "1.1"
-smallvec = "1"
 thiserror = "2"
 # Build scripts only (Windows): embeds the application icon in the .exe files. MIT.
 winresource = { version = "0.1", default-features = false }
@@ -69,7 +64,6 @@ objc2 = "0.6"
 libc = "0.2"  # Linux glibc only: caps malloc arenas at start-up (docs/decisions.md, 2026-11-20)
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive", "rc"] }
@@ -96,7 +90,6 @@ getrandom = "0.3"
 # Plotting, rayon and HTML reports off: text output is enough, and it keeps plotters out of the tree.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1"
-insta = "1"
 
 # Vendored for Wayland touchpad pinch zoom: winit 0.30 has no Linux gesture support and
 # iced 0.14 does not surface `PinchGesture`. See docs/decisions.md (2026-11-14).

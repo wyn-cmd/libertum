@@ -632,7 +632,11 @@ pub enum Message {
     /// The autosave timer fired.
     AutosaveTick,
     /// The recovery snapshot was written (or failed to be).
-    Autosaved(Result<(), String>),
+    Autosaved {
+        doc_id: u64,
+        revision: u64,
+        result: Result<(), String>,
+    },
     /// A command in the Table toolbar menu.
     Table(TableAction),
     /// Full screen on or off (toolbar button, View menu, F11 / Ctrl+Cmd+F).
@@ -711,6 +715,8 @@ pub enum Message {
     /// Delete the selected added template's copy.
     RemoveSelectedTemplate,
     /// A spelling check finished. Results from an older generation are ignored.
+    /// The two-second spell-check timer fired.
+    SpellTick,
     SpellChecked {
         generation: u64,
         result: Result<Vec<spell::Span>, String>,
@@ -874,6 +880,28 @@ fn blink_ticks() -> UnboundedReceiver<Instant> {
     rx
 }
 
+/// How often spelling is rechecked.
+const SPELL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// One tick every [`SPELL_INTERVAL`] on a small thread, for the spell-check timer.
+fn spell_ticks() -> UnboundedReceiver<()> {
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    let spawned = std::thread::Builder::new()
+        .name("libertum-spell".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(SPELL_INTERVAL);
+                if tx.unbounded_send(()).is_err() {
+                    return;
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start the spell-check timer");
+    }
+    rx
+}
+
 /// One tick every `seconds` on a small thread, for the autosave timer (the same shape as the
 /// caret blink timer, because no async runtime feature is linked).
 fn autosave_ticks(seconds: &u64) -> UnboundedReceiver<()> {
@@ -924,8 +952,14 @@ pub struct App {
     user_templates: Vec<UserTemplate>,
     /// Misspellings in the paragraphs last checked.
     spell_errors: Vec<spell::Span>,
+    /// Bumped whenever `spell_errors` changes, so the underline rectangles are recomputed.
+    spell_errors_epoch: u64,
+    /// Cached underline rectangles, keyed by the spell epoch and page generation.
+    spell_rect_cache: std::sync::Mutex<Option<(u64, u64, Vec<libertum_layout::SelectionRect>)>>,
     /// Bumped for every check; a slower, older result must not replace a newer one.
     spell_generation: u64,
+    /// Fingerprint of what the last check covered, so a tick with nothing new does no work.
+    spell_signature: Option<u64>,
     /// The personal word list, lowercased.
     spell_personal: HashSet<String>,
     /// Words ignored for this document only.
@@ -938,6 +972,11 @@ pub struct App {
     scroll: (f32, f32),
     /// Canvas size in logical pixels, once the widget has reported it.
     viewport: Option<Size>,
+    /// Page-strip metrics for the viewport size, shared by the update path.
+    metrics_cache: canvas::MetricsCache,
+    /// Page-strip metrics for the canvas widget's own bounds; the widget caches them between
+    /// draws and pointer events.
+    canvas_metrics_cache: std::sync::Arc<canvas::MetricsCache>,
     /// Bumped by every change to the Find query; a pending search-as-you-type runs only if
     /// the query has not changed since it was scheduled.
     find_generation: u64,
@@ -964,6 +1003,10 @@ pub struct App {
     file_context: Option<FileContext>,
     /// Unsaved changes since the last open or save.
     dirty: bool,
+    /// Document revision whose snapshot is being written, and the last one written. An
+    /// unchanged dirty document skips autosave instead of deep-cloning itself every minute.
+    autosave_pending: Option<u64>,
+    autosave_done: Option<u64>,
     /// The MCP server, while dev mode and MCP are both on (`docs/mcp-plan.md`).
     mcp: Option<mcp::McpService>,
     /// Why the server could not start, shown in Settings.
@@ -1107,13 +1150,18 @@ impl App {
             templates_dir,
             user_templates,
             spell_errors: Vec::new(),
+            spell_errors_epoch: 0,
+            spell_rect_cache: std::sync::Mutex::new(None),
             spell_generation: 0,
+            spell_signature: None,
             spell_personal,
             spell_ignored_document: HashSet::new(),
             spell_ignored_once: HashSet::new(),
             spell_path,
             scroll: (0.0, 0.0),
             viewport: None,
+            metrics_cache: canvas::MetricsCache::default(),
+            canvas_metrics_cache: std::sync::Arc::new(canvas::MetricsCache::default()),
             scale_factor: 1.0,
             scale_factor_known: false,
             canvas_focused: false,
@@ -1124,6 +1172,8 @@ impl App {
             file: None,
             file_context: None,
             dirty: false,
+            autosave_pending: None,
+            autosave_done: None,
             mcp: None,
             mcp_error: None,
             mcp_approvals: std::collections::VecDeque::new(),
@@ -1266,7 +1316,6 @@ impl App {
         if edited {
             self.dirty = true;
             self.after_edit();
-            return self.schedule_spell_check();
         }
         Task::none()
     }
@@ -1569,6 +1618,8 @@ impl App {
         self.file = None;
         self.file_context = None;
         self.dirty = false;
+        self.autosave_pending = None;
+        self.autosave_done = None;
         self.modal = None;
         self.after_save = None;
         self.scroll = (0.0, 0.0);
@@ -1613,6 +1664,8 @@ impl App {
         // model does not hold (headers, unknown parts).
         self.file_context = Some(context);
         self.dirty = false;
+        self.autosave_pending = None;
+        self.autosave_done = None;
         self.modal = None;
         self.after_save = None;
         self.scroll = (0.0, 0.0);
@@ -2041,12 +2094,20 @@ impl App {
 
     // ------------------------------------------------------------ canvas geometry
 
-    fn metrics(&self) -> Metrics {
-        let (geometry, pages) = self
-            .doc
-            .as_ref()
-            .map_or((PageGeometry::a4(), 1), |d| (d.geometry, d.page_total()));
-        Metrics::new_with_layout(
+    fn metrics(&self) -> std::sync::Arc<Metrics> {
+        let (geometry, pages, geometries, used_heights) = if let Some(doc) = self.doc.as_ref() {
+            let (geometries, used) = doc.page_views();
+            (doc.geometry, doc.page_total(), geometries, used)
+        } else {
+            (
+                PageGeometry::a4(),
+                1,
+                std::sync::Arc::<[PageGeometry]>::default(),
+                std::sync::Arc::<[f32]>::default(),
+            )
+        };
+        canvas::cached_metrics(
+            &self.metrics_cache,
             &geometry,
             self.state.zoom,
             self.scale_factor,
@@ -2055,16 +2116,8 @@ impl App {
             pages,
             self.state.booklet,
             self.doc.as_ref().is_some_and(|doc| doc.pageless),
-            &self
-                .doc
-                .as_ref()
-                .map(DocView::page_geometries)
-                .unwrap_or_default(),
-            &self
-                .doc
-                .as_ref()
-                .map(DocView::page_used_heights)
-                .unwrap_or_default(),
+            &geometries,
+            &used_heights,
         )
     }
 
@@ -2092,7 +2145,7 @@ impl App {
     /// Keeps the viewport middle on the same spot of the document when the page scale
     /// changes (zoom, fit-width resize, display scale change). `old` and `old_viewport` are
     /// the metrics and physical viewport from before the change.
-    fn reanchor(&mut self, old: Metrics, old_viewport: Size) {
+    fn reanchor(&mut self, old: std::sync::Arc<Metrics>, old_viewport: Size) {
         let new = self.metrics();
         let viewport = self.viewport_physical();
         if (old.scale - new.scale).abs() < f32::EPSILON && (old.sf - new.sf).abs() < f32::EPSILON {
@@ -2805,31 +2858,67 @@ impl App {
                     tracing::info!(pages, "pagination complete; scroll extent is now exact");
                 }
                 self.refresh_view();
-                return self.schedule_spell_check();
             }
             DocEvent::PageReady => {} // the canvas draws from the shared cache
         }
         Task::none()
     }
 
-    /// Checks the paragraphs near the viewport (plus the caret's) on a worker.
+    /// Checks the paragraphs near the viewport (plus the caret's) on a worker, now, even if
+    /// nothing changed (the language or the setting changed).
     fn schedule_spell_check(&mut self) -> Task<Message> {
-        self.spell_generation = self.spell_generation.wrapping_add(1);
-        let generation = self.spell_generation;
+        self.spell_signature = None;
+        self.check_spelling_if_changed()
+    }
+
+    /// Spelling is checked from a two-second timer, not on every keystroke, scroll or layout
+    /// pass: each tick looks at the paragraphs near the viewport and starts a check only if
+    /// their text, the language or the ignore lists changed since the last one.
+    fn check_spelling_if_changed(&mut self) -> Task<Message> {
         if !self.settings.spellcheck {
-            self.spell_errors.clear();
+            self.spell_generation = self.spell_generation.wrapping_add(1);
+            self.spell_signature = None;
+            self.clear_spell_errors();
             return Task::none();
         }
         let Some(doc) = self.doc.as_ref() else {
-            self.spell_errors.clear();
+            self.spell_generation = self.spell_generation.wrapping_add(1);
+            self.spell_signature = None;
+            self.clear_spell_errors();
             return Task::none();
         };
-        let targets = doc.visible_paragraphs(self.pages_near_view());
-        if targets.is_empty() {
-            self.spell_errors.clear();
+        let pages = self.pages_near_view();
+        let language = self.settings.spellcheck_language;
+        // Cheap change detection: without a document edit, a page-setup change or a new
+        // viewport range, the paragraphs near the view and the result are the same. The
+        // old signature cloned and hashed every visible paragraph on every tick.
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            doc.document().revision().hash(&mut hasher);
+            doc.source.pages.generation().hash(&mut hasher);
+            doc.source.pages.known_pages().hash(&mut hasher);
+            pages.start.hash(&mut hasher);
+            pages.end.hash(&mut hasher);
+            doc.editor().caret().block.hash(&mut hasher);
+            language.hash(&mut hasher);
+            self.spell_personal.len().hash(&mut hasher);
+            self.spell_ignored_document.len().hash(&mut hasher);
+            hasher.finish()
+        };
+        if self.spell_signature == Some(signature) {
             return Task::none();
         }
-        let language = self.settings.spellcheck_language;
+        let targets = doc.visible_paragraphs(pages);
+        if targets.is_empty() {
+            self.spell_generation = self.spell_generation.wrapping_add(1);
+            self.spell_signature = None;
+            self.clear_spell_errors();
+            return Task::none();
+        }
+        self.spell_signature = Some(signature);
+        self.spell_generation = self.spell_generation.wrapping_add(1);
+        let generation = self.spell_generation;
         let personal = self.spell_personal.clone();
         let ignored = self.spell_ignored_document.clone();
         Task::perform(
@@ -2838,15 +2927,40 @@ impl App {
         )
     }
 
-    /// The underline rectangles for the current misspellings.
+    fn clear_spell_errors(&mut self) {
+        if !self.spell_errors.is_empty() {
+            self.spell_errors.clear();
+            self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
+        }
+    }
+
+    /// The underline rectangles for the current misspellings, cached until the misspellings
+    /// or the page layout change. Recomputing every line rectangle on every draw cost about
+    /// 30 ms a frame in the 5,000-page demo, where much of the lorem ipsum is misspelt.
     fn spell_rects(&self) -> Vec<libertum_layout::SelectionRect> {
         let Some(doc) = self.doc.as_ref() else {
             return Vec::new();
         };
+        if self.spell_errors.is_empty() {
+            return Vec::new();
+        }
+        let generation = doc.source.pages.generation();
+        let epoch = self.spell_errors_epoch;
+        let mut cache = self
+            .spell_rect_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((cached_generation, cached_epoch, rects)) = cache.as_ref()
+            && *cached_generation == generation
+            && *cached_epoch == epoch
+        {
+            return rects.clone();
+        }
         let mut rects = Vec::new();
         for error in &self.spell_errors {
             rects.extend(doc.range_rects(error.block, error.start, error.end));
         }
+        *cache = Some((generation, epoch, rects.clone()));
         rects
     }
 
@@ -3081,6 +3195,8 @@ impl App {
         self.file = Some(path);
         self.file_context = Some(context);
         self.dirty = false;
+        self.autosave_pending = None;
+        self.autosave_done = None;
         self.modal = toc_notice.then(|| Modal::Notice {
             title: s::TOC_NOTICE_TITLE.to_owned(),
             detail: s::TOC_NOTICE_DETAIL.to_owned(),
@@ -3257,6 +3373,8 @@ impl App {
         self.file = None;
         self.file_context = None;
         self.dirty = false;
+        self.autosave_pending = None;
+        self.autosave_done = None;
         self.modal = None;
         self.after_save = None;
         self.context_menu = None;
@@ -3588,6 +3706,11 @@ impl App {
         if self.doc.is_none() {
             return Task::none();
         }
+        // Ctrl/Cmd+S on an unchanged document would deep-clone it and rewrite the same
+        // bytes for nothing. A pending close/open still runs.
+        if !save_as && !self.dirty && self.file.is_some() && self.after_save.is_none() {
+            return Task::none();
+        }
         // Cross-references show their targets as they are now (PLAN §6.6: updated before
         // save).
         self.refresh_cross_refs();
@@ -3737,6 +3860,8 @@ impl App {
                 self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
                 self.file = Some(path);
                 self.dirty = false;
+                self.autosave_pending = None;
+                self.autosave_done = None;
                 self.modal = None;
                 // The document is safe on disk, so the snapshot is no longer needed.
                 recovery::clear(&self.recovery_dir);
@@ -3908,6 +4033,9 @@ impl App {
         if self.settings.show_performance && self.doc.is_some() {
             subs.push(window::frames().map(Message::FpsFrame));
         }
+        if self.doc.is_some() && self.settings.spellcheck {
+            subs.push(Subscription::run(spell_ticks).map(|_| Message::SpellTick));
+        }
         if let Some(seconds) = self.autosave_interval() {
             subs.push(
                 Subscription::run_with(seconds, autosave_ticks).map(|_| Message::AutosaveTick),
@@ -4005,6 +4133,8 @@ impl App {
                 | Message::PasteText(_)
                 | Message::Frame(_)
                 | Message::BlinkTick(_)
+                | Message::SpellTick
+                | Message::SpellChecked { .. }
                 | Message::ScaleFactor(_)
                 | Message::SystemTheme(_)
                 | Message::WindowResized(_)
@@ -4582,21 +4712,46 @@ impl App {
                 if self.dirty
                     && let Some(doc) = self.doc.as_ref()
                 {
-                    let document = doc.document().clone();
-                    let path = self.file.clone();
-                    let dir = self.recovery_dir.clone();
-                    return Task::perform(
-                        async move {
-                            recovery::write(&dir, &document, path.as_deref())
-                                .map_err(|error| error.to_string())
-                        },
-                        Message::Autosaved,
-                    );
+                    let doc_id = doc.id();
+                    let revision = doc.document().revision();
+                    // The snapshot is a deep clone plus serialisation. A document that has
+                    // not changed since the last one would produce identical bytes, so skip
+                    // it entirely (this used to repeat every minute while left dirty).
+                    if self.autosave_pending != Some(revision)
+                        && self.autosave_done != Some(revision)
+                    {
+                        let document = doc.document().clone();
+                        let path = self.file.clone();
+                        let dir = self.recovery_dir.clone();
+                        self.autosave_pending = Some(revision);
+                        return Task::perform(
+                            async move {
+                                recovery::write(&dir, &document, path.as_deref())
+                                    .map_err(|error| error.to_string())
+                            },
+                            move |result| Message::Autosaved {
+                                doc_id,
+                                revision,
+                                result,
+                            },
+                        );
+                    }
                 }
             }
-            Message::Autosaved(result) => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "could not write the recovery snapshot");
+            Message::Autosaved {
+                doc_id,
+                revision,
+                result,
+            } => {
+                // A snapshot from the previous document must not mark this one as saved.
+                if self.doc.as_ref().is_some_and(|doc| doc.id() == doc_id) {
+                    self.autosave_pending = None;
+                    match result {
+                        Ok(()) => self.autosave_done = Some(revision),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not write the recovery snapshot")
+                        }
+                    }
                 }
             }
             Message::Shortcut(Shortcut::Settings) => {
@@ -4938,6 +5093,7 @@ impl App {
                 }
             }
             Message::Doc(event) => return self.on_doc_event(event),
+            Message::SpellTick => return self.check_spelling_if_changed(),
             Message::SpellChecked { generation, result } => {
                 if generation == self.spell_generation {
                     match result {
@@ -4953,8 +5109,14 @@ impl App {
                                     ))
                                 })
                                 .collect();
+                            self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
                         }
-                        Err(error) => tracing::warn!(%error, "spell check failed"),
+                        Err(error) => {
+                            tracing::warn!(%error, "spell check failed");
+                            // Let the next tick try again; the signature said this text was
+                            // already covered, but no result arrived.
+                            self.spell_signature = None;
+                        }
                     }
                 }
             }
@@ -4978,6 +5140,7 @@ impl App {
                         editor.insert_text(&replacement)
                     });
                     self.spell_errors.retain(|error| error != &span);
+                    self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
                     return self.finish_edit(result);
                 }
             }
@@ -4989,11 +5152,13 @@ impl App {
                     span.word.clone(),
                 ));
                 self.spell_errors.retain(|error| error != &span);
+                self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
             }
             Message::SpellIgnoreDocument(word) => {
                 self.spell_ignored_document.insert(word.to_lowercase());
                 self.spell_errors
                     .retain(|error| !error.word.eq_ignore_ascii_case(&word));
+                self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
             }
             Message::SpellAddWord(word) => {
                 let lower = word.to_lowercase();
@@ -5005,6 +5170,7 @@ impl App {
                 }
                 self.spell_errors
                     .retain(|error| !error.word.eq_ignore_ascii_case(&word));
+                self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
             }
             Message::Keyboard(event) => return self.on_keyboard(event),
             Message::Ime(event) => return self.on_ime(event),
@@ -6228,6 +6394,7 @@ impl App {
                 continuous: doc.pageless,
                 geometries: doc.page_geometries(),
                 used_heights: doc.page_used_heights(),
+                metrics_cache: self.canvas_metrics_cache.clone(),
             },
             Message::Canvas,
         );
@@ -8347,6 +8514,7 @@ fn write_export(
 fn key_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
         Event::Keyboard(key) => {
+            crate::palm::note_key(&key);
             let shortcut = shortcuts::from_event(&key);
             // A text field (the Find bar, an inspector field) used this key: typing, Enter,
             // Backspace, the arrows, or Ctrl/Cmd+A, C, X and V. It is not for the document,
@@ -11477,6 +11645,21 @@ mod tests {
         assert_eq!(app.autosave_interval(), Some(60), "the default period");
         app.settings.autosave_secs = 0;
         assert_eq!(app.autosave_interval(), None, "zero switches autosave off");
+    }
+
+    #[test]
+    fn autosave_skips_an_unchanged_dirty_document() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.dirty = true;
+        let revision = app.doc().document().revision();
+        app.autosave_done = Some(revision);
+        let _ = app.update(Message::AutosaveTick);
+        assert_eq!(
+            app.autosave_pending, None,
+            "the same revision already has a snapshot"
+        );
+        assert_eq!(app.autosave_done, Some(revision));
     }
 
     #[test]

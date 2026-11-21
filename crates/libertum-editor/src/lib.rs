@@ -15,8 +15,8 @@ use libertum_model::{
     HeaderFooter, HfKind, HfVariant, History, HistoryEntry, Ligatures, LineSpacing, ListItem,
     ListStyle, MAX_LIST_LEVEL, MIN_TABLE_COLUMN_PT, ModelError, Note, NoteKind, Operation,
     PageNumbering, PageSetup, ParaFormat, ParaProps, Paragraph, REGULAR, ResolvedChar,
-    ResolvedPara, Run, Section, StyleId, Table, TableCell, TableCellLocation, TableRow,
-    VerticalAlign, floor_char_boundary,
+    ResolvedPara, Section, StyleId, Table, TableCell, TableCellLocation, TableRow, VerticalAlign,
+    floor_char_boundary,
 };
 use thiserror::Error;
 
@@ -1366,37 +1366,55 @@ impl Editor {
         })
     }
 
+    /// The part of paragraph `index` that "Update style to match" reads character formatting
+    /// from: the selected text within it, or the whole paragraph for a caret.
+    fn style_source_range(&self, index: usize) -> std::ops::Range<usize> {
+        let Some(p) = self.doc.paragraph_at(index) else {
+            return 0..0;
+        };
+        match self.ordered_selection().filter(|(a, b)| a != b) {
+            Some((start, end)) => {
+                let from = if start.block == p.id { start.offset } else { 0 };
+                let to = if end.block == p.id {
+                    end.offset
+                } else {
+                    p.len()
+                };
+                from..to.max(from)
+            }
+            None => 0..p.len(),
+        }
+    }
+
     /// "Update style to match": folds the first selected paragraph's own formatting into
-    /// its paragraph style, then clears it from that paragraph, as one undoable step. Its
-    /// character formatting moves into the style only when it is uniform across the whole
-    /// paragraph. Other paragraphs of the style change with it, keeping their own overrides.
+    /// its paragraph style, then clears it from that paragraph, as one undoable step. The
+    /// character formatting that moves into the style is what the selected text shares (a
+    /// size, say, set on only part of the paragraph); with a caret it is what the whole
+    /// paragraph shares. Other paragraphs of the style change with it, keeping their own
+    /// overrides.
     pub fn update_style_from_selection(&mut self) -> Result<ChangeSet, EditorError> {
         let Some((si, _)) = self.selected_paragraphs() else {
             return Ok(ChangeSet::default());
         };
+        let range = self.style_source_range(si);
         let Some(p) = self.doc.paragraph_at(si) else {
             return Ok(ChangeSet::default());
         };
         let Some(old) = self.doc.styles.get(p.props.style).cloned() else {
             return Ok(ChangeSet::default());
         };
-        let uniform = uniform_run_format(p);
-        if p.props.format.is_empty() && uniform.is_none() {
+        let common = p.common_format(range.clone());
+        if p.props.format.is_empty() && common.is_empty() {
             return Ok(ChangeSet::default());
         }
         let (block, id, props) = (p.id, p.props.style, p.props);
+        let runs = (!common.is_empty()).then(|| p.runs_without(range, &common));
         let mut style = old.clone();
         style.para = old.para.overlay(&props.format);
         let mut b = EditBuilder::default();
-        if let Some(f) = &uniform {
-            style.char = old.char.overlay(f);
-            b.apply(
-                &mut self.doc,
-                Operation::SetRuns {
-                    block,
-                    runs: Vec::new(),
-                },
-            )?;
+        if let Some(runs) = runs {
+            style.char = old.char.overlay(&common);
+            b.apply(&mut self.doc, Operation::SetRuns { block, runs })?;
         }
         b.apply(
             &mut self.doc,
@@ -1669,8 +1687,9 @@ impl Editor {
                 Some(sum) => sum.merge(&p.props, &r),
                 None => {
                     let mut sum = ParaSummary::of(&p.props, &r);
+                    let range = self.style_source_range(index);
                     sum.differs_from_style =
-                        !p.props.format.is_empty() || uniform_run_format(p).is_some();
+                        !p.props.format.is_empty() || !p.common_format(range).is_empty();
                     summary = Some(sum);
                 }
             }
@@ -2896,16 +2915,6 @@ impl EditBuilder {
 }
 
 // ---------------------------------------------------------------- text helpers
-
-/// The direct character formatting of `p` when one run covers all of its (non-empty) text.
-fn uniform_run_format(p: &Paragraph) -> Option<CharFormat> {
-    match p.runs() {
-        [Run { range, format }] if range.start == 0 && range.end == p.len() && !p.is_empty() => {
-            Some(format.clone())
-        }
-        _ => None,
-    }
-}
 
 /// The cell after `(row, cell)` in reading order.
 fn next_cell(table: &Table, row: usize, cell: usize) -> Option<(usize, usize)> {

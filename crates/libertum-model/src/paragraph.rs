@@ -469,6 +469,109 @@ impl Paragraph {
         normalise_runs(len, out)
     }
 
+    /// Cuts `range` (clamped, snapped to character boundaries) at the run boundaries inside it.
+    fn pieces(&self, range: Range<usize>) -> Vec<Range<usize>> {
+        let len = self.text.len();
+        let start = floor_char_boundary(&self.text, range.start.min(len));
+        let end = ceil_char_boundary(&self.text, range.end.min(len).max(start));
+        let mut cuts = vec![start, end];
+        for r in &self.runs {
+            for at in [r.range.start, r.range.end] {
+                if start < at && at < end {
+                    cuts.push(at);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.windows(2).map(|w| w[0]..w[1]).collect()
+    }
+
+    /// The direct formatting every character of `range` shares: a property is set only
+    /// when all of them carry the same value (unformatted text counts as carrying none).
+    /// Empty when `range` is empty.
+    pub fn common_format(&self, range: Range<usize>) -> CharFormat {
+        let mut pieces = self.pieces(range).into_iter();
+        let Some(first) = pieces.next() else {
+            return CharFormat::default();
+        };
+        let mut common = self.format_of(first.start);
+        for piece in pieces {
+            let f = self.format_of(piece.start);
+            macro_rules! keep {
+                ($($field:ident),*) => {$(
+                    if common.$field != f.$field {
+                        common.$field = None;
+                    }
+                )*};
+            }
+            keep!(
+                family,
+                size_pt,
+                weight,
+                italic,
+                underline,
+                strikethrough,
+                colour,
+                highlight,
+                vertical,
+                letter_spacing_pt,
+                ligatures
+            );
+        }
+        common
+    }
+
+    /// The runs this paragraph would have with every property `strip` sets removed from the
+    /// direct formatting over `range`, so the text there inherits it from its style instead.
+    pub fn runs_without(&self, range: Range<usize>, strip: &CharFormat) -> Vec<Run> {
+        let len = self.text.len();
+        let start = floor_char_boundary(&self.text, range.start.min(len));
+        let end = ceil_char_boundary(&self.text, range.end.min(len).max(start));
+        let mut cuts = vec![0, start, end, len];
+        for r in &self.runs {
+            cuts.push(r.range.start);
+            cuts.push(r.range.end);
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut out = Vec::new();
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a >= b {
+                continue;
+            }
+            let mut format = self.format_of(a);
+            if a >= start && b <= end {
+                macro_rules! clear {
+                    ($($field:ident),*) => {$(
+                        if strip.$field.is_some() {
+                            format.$field = None;
+                        }
+                    )*};
+                }
+                clear!(
+                    family,
+                    size_pt,
+                    weight,
+                    italic,
+                    underline,
+                    strikethrough,
+                    colour,
+                    highlight,
+                    vertical,
+                    letter_spacing_pt,
+                    ligatures
+                );
+            }
+            out.push(Run {
+                range: a..b,
+                format,
+            });
+        }
+        normalise_runs(len, out)
+    }
+
     /// Direct formatting of the character starting at byte `offset` (empty if unformatted).
     pub fn format_of(&self, offset: usize) -> CharFormat {
         self.runs

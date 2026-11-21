@@ -40,6 +40,10 @@ use crate::perf;
 /// Pages the paginator thread adds per write-lock hold (about 12 ms of work on the dev box):
 /// the longest another thread waits for the layout, under one frame.
 const PAGINATE_CHUNK: usize = 4;
+/// How often the paginator tells the UI that more pages exist. A message per 4-page chunk
+/// made the UI rebuild its page geometry thousands of times while a very long document
+/// paginated; 10 updates a second keep the scroll extent current without the quadratic work.
+const PAGINATION_NOTIFY: Duration = Duration::from_millis(100);
 /// Pages paginated synchronously on open and after a page-setup change, so the first
 /// screenful can be drawn before the background pass catches up.
 const FIRST_SCREEN_PAGES: usize = 4;
@@ -125,9 +129,12 @@ pub enum DocEvent {
 struct PageMapInner {
     hashes: Vec<u64>,
     complete: bool,
-    /// Bumped on every publish. The canvas caches the per-page geometry vectors against it,
-    /// so they are rebuilt only when the layout actually changes, not on every frame.
+    /// Bumped on every `refresh`/`refresh_from`. The canvas caches the per-page geometry
+    /// vectors against it, so they are rebuilt only when the layout actually changes.
     generation: u64,
+    /// First page whose geometry can have changed in the latest generation. A text edit deep
+    /// in a document leaves every earlier page alone, so the canvas copies that prefix.
+    changed_from: usize,
 }
 
 /// What the UI knows about pagination, without touching the layout lock.
@@ -150,6 +157,11 @@ impl PageMap {
         lock(&self.0).generation
     }
 
+    /// First page whose geometry can have changed in the current generation.
+    pub fn changed_from(&self) -> usize {
+        lock(&self.0).changed_from
+    }
+
     /// Recomputes every known page hash from the layout and republishes completeness.
     pub fn refresh(&self, state: &LayoutState) {
         let mut m = lock(&self.0);
@@ -158,6 +170,59 @@ impl PageMap {
             .extend((0..state.page_count()).filter_map(|i| state.page_content_hash(i)));
         m.complete = state.is_complete();
         m.generation = m.generation.wrapping_add(1);
+        m.changed_from = 0;
+    }
+
+    /// Recomputes hashes from `from` onward after an edit that cannot change earlier pages.
+    /// The caller must have checked that the document has no `{pages}` fields or TOC entries,
+    /// whose hashes can depend on pages before the edit.
+    pub fn refresh_from(&self, state: &LayoutState, from: usize) {
+        let mut m = lock(&self.0);
+        let count = state.page_count();
+        let from = from.min(count);
+        if m.hashes.len() > count {
+            m.hashes.truncate(count);
+        }
+        while m.hashes.len() < from {
+            let page = m.hashes.len();
+            m.hashes
+                .push(state.page_content_hash(page).unwrap_or_default());
+        }
+        for page in from..count {
+            let Some(hash) = state.page_content_hash(page) else {
+                continue;
+            };
+            if page < m.hashes.len() {
+                m.hashes[page] = hash;
+            } else {
+                m.hashes.push(hash);
+            }
+        }
+        m.complete = state.is_complete();
+        m.generation = m.generation.wrapping_add(1);
+        m.changed_from = from;
+    }
+
+    /// Publishes the end of pagination. Only pages whose content depends on the final page
+    /// count or on a table of contents target can have changed, so the other hashes stay as
+    /// they are instead of re-hashing the whole document on the UI thread.
+    pub fn finish(&self, state: &LayoutState) {
+        let mut m = lock(&self.0);
+        let count = state.page_count();
+        while m.hashes.len() < count {
+            let page = m.hashes.len();
+            m.hashes
+                .push(state.page_content_hash(page).unwrap_or_default());
+        }
+        for (page, slot) in m.hashes.iter_mut().enumerate().take(count) {
+            if state.page_hash_needs_final(page)
+                && let Some(hash) = state.page_content_hash(page)
+            {
+                *slot = hash;
+            }
+        }
+        m.hashes.truncate(count);
+        m.complete = state.is_complete();
     }
 }
 
@@ -549,6 +614,9 @@ pub struct DocView {
     chars: usize,
     /// Page count guess used for the scroll extent until pagination completes.
     pub estimated_pages: usize,
+    /// Any page shows a `{pages}` field or a TOC entry, so an edit can change pages before
+    /// the one edited. Kept up to date cheaply; false on most documents.
+    final_page_fields: bool,
     queue: Arc<RenderQueue>,
     /// The model document and editor state. Owned by the UI thread.
     editor: Editor,
@@ -570,8 +638,13 @@ pub struct DocView {
 }
 
 struct PageViews {
+    /// Bumped only when the layout can have changed pages already laid out (an edit, a
+    /// page-setup change or the end of pagination). Pagination merely appends pages, which
+    /// extends the cached vectors instead of rebuilding them.
     generation: u64,
-    pages: usize,
+    /// Number of pages actually laid out when the vectors were built. Pages not laid out
+    /// yet use section 0's setup and the canvas falls back to it.
+    known: usize,
     geometries: Arc<[PageGeometry]>,
     used: Arc<[f32]>,
 }
@@ -694,6 +767,7 @@ impl DocView {
                 .collect();
             m.complete = state.is_complete();
         }
+        let final_page_fields = state.has_final_page_fields();
         let layout = Arc::new(SharedLayout::new(state));
         let cache = Arc::new(Mutex::new(HandleCache::new(HANDLE_CACHE_BYTES)));
         let plans = Arc::new(Mutex::new(Plans::default()));
@@ -732,6 +806,7 @@ impl DocView {
                 word_count,
                 chars,
                 estimated_pages,
+                final_page_fields,
                 queue,
                 editor: Editor::new(document),
                 layout,
@@ -756,49 +831,95 @@ impl DocView {
         }
     }
 
-    /// One geometry per page for the canvas. Pages not laid out yet use section 0's setup.
+    /// One geometry per laid-out page for the canvas. Pages not laid out yet use section 0's
+    /// setup and the canvas falls back to it, so the vector can be shorter than the page
+    /// count while the background pass runs.
     pub fn page_geometries(&self) -> Arc<[PageGeometry]> {
         self.page_views().0
     }
 
-    /// How much of each page is used, in points (the canvas stacks pageless pages by this so
-    /// no blank page tail opens between the lines of a split paragraph or table).
+    /// How much of each laid-out page is used, in points (the canvas stacks pageless pages
+    /// by this so no blank page tail opens between the lines of a split paragraph or table).
     pub fn page_used_heights(&self) -> Arc<[f32]> {
         self.page_views().1
     }
 
-    /// Both per-page vectors, rebuilt when the page map publishes a new generation and shared
-    /// from then on. Clones are cheap `Arc` clones, so a draw or a scroll event does not
-    /// allocate the whole document's geometry.
-    fn page_views(&self) -> (Arc<[PageGeometry]>, Arc<[f32]>) {
+    /// Both per-page vectors, shared between calls and extended when pagination appends
+    /// pages. A new generation (an edit, a page-setup change or the end of pagination) forces
+    /// a rebuild because pages already laid out can have changed.
+    ///
+    /// This is the expensive path during the background pass: rebuilding the whole vector
+    /// after every four-page chunk made a very long document quadratic.
+    pub(crate) fn page_views(&self) -> (Arc<[PageGeometry]>, Arc<[f32]>) {
         let generation = self.source.pages.generation();
-        let total = self.page_total();
+        let known = self.source.pages.known_pages();
+        let changed_from = self.source.pages.changed_from();
         let mut slot = self
             .page_views
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(views) = slot.as_ref()
-            && views.generation == generation
-            && views.pages == total
+        // A prefix that the latest generation did not touch can be copied. The first case is
+        // pagination appending pages; the second is an edit deep in the document.
+        let reuse_from = slot.as_ref().and_then(|views| {
+            if views.generation == generation {
+                Some(views.known.min(known))
+            } else if views.generation.wrapping_add(1) == generation
+                && changed_from > 0
+                && changed_from <= known
+            {
+                // Only the immediately preceding publish is safe: if several edits happened
+                // since these vectors were built, `changed_from` describes just the latest one.
+                Some(changed_from.min(views.known))
+            } else {
+                None
+            }
+        });
+        if let Some(reuse_from) = reuse_from
+            && let Some(views) = slot.as_ref()
+            && reuse_from > 0
         {
-            return (views.geometries.clone(), views.used.clone());
+            if views.generation == generation && known == views.known {
+                return (views.geometries.clone(), views.used.clone());
+            }
+            let layout = self
+                .layout
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut geometries = Vec::with_capacity(known);
+            let mut used = Vec::with_capacity(known);
+            geometries.extend_from_slice(&views.geometries[..reuse_from]);
+            used.extend_from_slice(&views.used[..reuse_from]);
+            for page in reuse_from..known {
+                geometries.push(layout.page_geometry(page));
+                used.push(layout.page_used_height(page));
+            }
+            drop(layout);
+            let geometries: Arc<[PageGeometry]> = geometries.into();
+            let used: Arc<[f32]> = used.into();
+            *slot = Some(PageViews {
+                generation,
+                known,
+                geometries: geometries.clone(),
+                used: used.clone(),
+            });
+            return (geometries, used);
         }
         let layout = self
             .layout
             .read()
             .unwrap_or_else(|error| error.into_inner());
-        let geometries: Arc<[PageGeometry]> = (0..total)
+        let geometries: Arc<[PageGeometry]> = (0..known)
             .map(|page| layout.page_geometry(page))
             .collect::<Vec<_>>()
             .into();
-        let used: Arc<[f32]> = (0..total)
+        let used: Arc<[f32]> = (0..known)
             .map(|page| layout.page_used_height(page))
             .collect::<Vec<_>>()
             .into();
         drop(layout);
         *slot = Some(PageViews {
             generation,
-            pages: total,
+            known,
             geometries: geometries.clone(),
             used: used.clone(),
         });
@@ -845,7 +966,7 @@ impl DocView {
     /// shows them are repainted with the exact count.
     pub fn pagination_finished(&mut self) {
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        self.source.pages.refresh(&layout);
+        self.source.pages.finish(&layout);
     }
 
     /// Read access to the editor (selection, formatting summary). Changes go through
@@ -1113,12 +1234,45 @@ impl DocView {
                 // Whole-document page numbering: only numbers and decorations change.
                 layout.set_numbering(doc.page_numbering());
             }
+            if change.sections {
+                // Header/footer edits can add or remove a `{pages}` field.
+                self.final_page_fields = layout.has_final_page_fields();
+            }
+            if change.dirty.iter().any(|id| {
+                doc.paragraph(*id)
+                    .is_some_and(|p| p.props.toc_target.is_some())
+            }) {
+                // A generated contents entry was edited or inserted.
+                self.final_page_fields = true;
+            }
             if relayout {
                 // The first screenful is laid out here so the canvas has something to draw
                 // straight away; the background pass catches up.
                 layout.paginate_until(FIRST_SCREEN_PAGES);
             }
-            self.source.pages.refresh(&layout);
+            // Pages before the edit cannot change unless a `{pages}` field or TOC entry can
+            // see it. Structural and style changes conservatively start from page 0.
+            let first_page = if self.final_page_fields
+                || change.structural
+                || change.sections
+                || change.all_styles
+                || !change.styles.is_empty()
+                || relabel
+            {
+                0
+            } else {
+                change
+                    .dirty
+                    .iter()
+                    .filter_map(|id| doc.index_of(*id))
+                    .min()
+                    .map_or(0, |index| layout.page_of_para(index))
+            };
+            if first_page == 0 {
+                self.source.pages.refresh(&layout);
+            } else {
+                self.source.pages.refresh_from(&layout, first_page);
+            }
         }
         if relayout {
             self.restart_paginator();
@@ -1547,6 +1701,8 @@ fn spawn_paginator(
             // for the completion log: the gap between them and `elapsed_ms` is the rest.
             let mut waited = Duration::ZERO;
             let mut worked = Duration::ZERO;
+            let mut last_notified: Option<Instant> = None;
+            let mut last_pages = 0usize;
             loop {
                 // A page-setup change bumped the epoch: this thread's document is gone.
                 if epoch.load(Ordering::Acquire) != mine {
@@ -1573,11 +1729,19 @@ fn spawn_paginator(
                     m.complete = st.is_complete();
                     (m.hashes.len(), m.complete, st.engine_stats().layouts_built)
                 };
-                if tx
-                    .unbounded_send(DocEvent::Pagination { pages, complete })
-                    .is_err()
+                let notify = complete
+                    || (pages != last_pages
+                        && last_notified.is_none_or(|last| last.elapsed() >= PAGINATION_NOTIFY));
+                if notify
+                    && tx
+                        .unbounded_send(DocEvent::Pagination { pages, complete })
+                        .is_err()
                 {
                     return; // UI gone
+                }
+                if notify {
+                    last_notified = Some(Instant::now());
+                    last_pages = pages;
                 }
                 if complete {
                     tracing::info!(
@@ -1672,6 +1836,87 @@ fn spawn_render_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_rehashes_only_pages_from_the_edit_onward() {
+        use libertum_editor::DocPosition;
+
+        let doc = generate_model_document(20, 11);
+        let (mut view, _rx) = DocView::open(doc);
+        view.paginate_everything();
+        let pages = view.page_total();
+        assert!(pages >= 3, "the fixture has several pages: {pages}");
+        let before: Vec<Option<u64>> = (0..pages)
+            .map(|page| view.source.pages.hash(page))
+            .collect();
+        let last = view
+            .document()
+            .paragraph_at(view.document().paragraph_count() - 1)
+            .expect("the last paragraph");
+        let id = last.id;
+        let page = {
+            let layout = view.layout.read().unwrap_or_else(|e| e.into_inner());
+            layout.page_of_para(view.document().index_of(id).expect("an index"))
+        };
+        view.edit(|editor| {
+            editor.set_caret(
+                DocPosition {
+                    block: id,
+                    offset: 0,
+                },
+                false,
+            );
+            editor.insert_text("x")
+        })
+        .expect("edit");
+        for (previous, old) in before.iter().enumerate().take(page) {
+            assert_eq!(
+                view.source.pages.hash(previous),
+                *old,
+                "page {previous} is before the edit"
+            );
+        }
+        assert_ne!(
+            view.source.pages.hash(page),
+            before[page],
+            "the edited page gets a new hash"
+        );
+    }
+
+    #[test]
+    fn completion_rehashes_only_pages_that_need_the_final_count() {
+        let mut doc = generate_model_document(20, 3);
+        let section = doc.sections.first_mut().expect("a section");
+        // Only the first page carries a {pages} field, so page 0 must be repainted when
+        // pagination finishes and page 1 must keep its hash.
+        section.headers.first = Some(libertum_model::HeaderFooter::new("of {pages}"));
+        section.headers.different_first = true;
+        // A section needs a default header for `for_page` to consider the first-page one.
+        section.headers.default = Some(libertum_model::HeaderFooter::new(""));
+
+        let mut state =
+            LayoutState::from_document(&doc, PageGeometry::a4(), LayoutOptions::default());
+        state.paginate_until(5);
+        let map = PageMap::default();
+        map.refresh(&state);
+        let before: Vec<u64> = (0..state.page_count())
+            .map(|page| map.hash(page).expect("a hash"))
+            .collect();
+        assert!(state.page_hash_needs_final(0));
+        assert!(!state.page_hash_needs_final(1));
+
+        state.paginate_all();
+        map.finish(&state);
+        assert_eq!(map.hash(0), Some(state.page_content_hash(0).unwrap()));
+        assert_ne!(before[0], map.hash(0).unwrap(), "the first page changed");
+        if before.len() > 1 {
+            assert_eq!(
+                before[1],
+                map.hash(1).unwrap(),
+                "a page without a final-count field keeps its hash"
+            );
+        }
+    }
 
     #[test]
     fn page_estimate_scales_with_the_paper_size() {

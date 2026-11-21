@@ -1389,6 +1389,41 @@ impl LayoutState {
         }
     }
 
+    /// True when any page's content depends on the final page count or on another page's
+    /// number: a `{pages}` header/footer, or a table-of-contents entry. The app then re-hashes
+    /// the whole document after an edit; otherwise it can start at the first changed page.
+    pub fn has_final_page_fields(&self) -> bool {
+        self.paragraphs.iter().any(|p| p.toc_target.is_some())
+            || self.sections.iter().any(|section| {
+                [&section.headers, &section.footers].iter().any(|hf| {
+                    hf.non_empty()
+                        .any(|(_, header)| header.text.contains("{pages}"))
+                })
+            })
+    }
+
+    /// True when `page`'s content hash can change once the total page count is final: it
+    /// shows a `{pages}` header or footer, or a table-of-contents entry whose target page
+    /// was not known while the background pass was still running. Other pages keep their
+    /// hash, so the UI does not need to re-hash the whole document at completion.
+    pub fn page_hash_needs_final(&self, page: usize) -> bool {
+        let Some(pg) = self.pages.get(page) else {
+            return false;
+        };
+        if pg.slices.iter().any(|s| {
+            self.paragraphs
+                .get(s.para)
+                .is_some_and(|p| p.toc_target.is_some())
+        }) {
+            return true;
+        }
+        [HfKind::Header, HfKind::Footer].iter().any(|kind| {
+            self.furniture_for_section(pg.section, *kind)
+                .for_page(page, pg.first_in_section)
+                .is_some_and(|(_, hf)| hf.text.contains("{pages}"))
+        })
+    }
+
     /// Hash of everything that determines a page's pixels apart from zoom: the page's
     /// slices plus the version, id and width of each paragraph it shows. Used as the page
     /// bitmap cache key (PLAN §4.4).

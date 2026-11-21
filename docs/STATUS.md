@@ -2,7 +2,22 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-22 (release 0.4.2: scrolling stays fast deep in a long document)._
+_Last updated: 2026-11-22 (release 0.4.3: long-document performance pass)._
+
+## Release 0.4.3 (2026-11-22)
+
+- Coalesced pagination updates, incremental page geometry and page hashes, cached page-strip metrics and spell underlines, and revision-aware autosave. The 5,000-page autoscroll held 10.65 ms mean / 16.42 ms p95 with pagination complete in 5.6 s.
+- "Update style to match" takes formatting shared by the selected text; typing starts a 500 ms palm-rejection window.
+- Release notes in `docs/RELEASE-0.4.3.md`; built and published by `.github/workflows/release.yml`.
+
+## Long-document UI costs (2026-11-22)
+
+- **Pagination notifications are coalesced and page views extend.** The background paginator now tells the UI at most every 100 ms (and always at completion) instead of after every 4-page chunk. `DocView::page_views` extends its cached geometry and used-height vectors for the new pages and rebuilds only when the layout generation changes. `Metrics` is cached in `App` and in the canvas by layout generation, viewport, zoom and page count; the paged view leaves the unused used-heights vector empty. This removes the O(pages²) path that made the documented 12,000-page benchmark stall after pagination.
+- **Completion hashes only final-dependent pages.** `PageMap::finish` (used by `pagination_finished`) re-hashes only pages with a `{pages}` header/footer or a TOC entry; `LayoutState::page_hash_needs_final` names them. Ordinary pages keep their bitmap-cache keys.
+- **Spellcheck idle work** is now a document-revision/page-generation/viewport signature instead of a clone and hash of every visible paragraph. The dictionary is fetched once per pass and words are lowercased only when an ignore list is non-empty. A worker error clears the signature so the next tick retries.
+- **Autosave** remembers the last snapshotted revision and document id and skips an unchanged dirty document; stale results cannot mark a replacement document saved. `Ctrl/Cmd+S` on an unchanged document is a no-op.
+- **Cargo:** removed unused workspace dependencies `slotmap`, `smallvec`, `arboard`, `fontique`, `anyhow` and `insta`, and the empty `repository` field. `lto = "thin"` stays (one codegen unit; a change needs a measured release comparison).
+- Verified: `cargo test --workspace` passes (406 app tests + 2 DOCX TOC tests; the new tests cover incremental page hashing, completion hashing, the metrics cache and the autosave skip), `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo fmt --all --check` are clean, and the release binary builds. `LIBERTUM_DEMO_PAGES=5000 LIBERTUM_PERF=1 LIBERTUM_AUTOSCROLL=1 LIBERTUM_AUTOSCROLL_SPEED=200000` on Fedora/GNOME Wayland: pagination complete at 4,679 pages in 5.57 s, autoscroll to the last page, frame interval n=2493 mean 10.65 ms / p95 16.42 / p99 18.55 / max 60.34, `draw()` 0.09 ms mean; no post-pagination stall. (The same run before the spell-underline cache was 35.97 ms mean, showing that cache was the remaining frame cost.)
 
 ## Release 0.4.2 (2026-11-22)
 

@@ -109,27 +109,42 @@ pub fn check(
     ignored: &HashSet<String>,
 ) -> Result<Vec<(usize, usize, String)>, String> {
     let dict = dictionary(language)?;
+    Ok(check_with(&dict, text, personal, ignored))
+}
+
+/// The check itself, with the dictionary already in hand. The personal and ignore lists are
+/// usually empty, so a word is only lowercased when there is a list to compare it with.
+fn check_with(
+    dict: &Dictionary,
+    text: &str,
+    personal: &HashSet<String>,
+    ignored: &HashSet<String>,
+) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     for (start, word) in dict.check_indices(text) {
-        let lower = word.to_lowercase();
-        if personal.contains(&lower) || ignored.contains(&lower) {
-            continue;
+        if !personal.is_empty() || !ignored.is_empty() {
+            let lower = word.to_lowercase();
+            if personal.contains(&lower) || ignored.contains(&lower) {
+                continue;
+            }
         }
         out.push((start, start + word.len(), word.to_owned()));
     }
-    Ok(out)
+    out
 }
 
-/// Checks the paragraphs in one background pass. Each paragraph is `(block id, text)`.
+/// Checks the paragraphs in one background pass. Each paragraph is `(block id, text)`. The
+/// dictionary is looked up once, not once per paragraph.
 pub fn check_paragraphs(
     paragraphs: &[(BlockId, String)],
     language: Language,
     personal: &HashSet<String>,
     ignored: &HashSet<String>,
 ) -> Result<Vec<Span>, String> {
+    let dict = dictionary(language)?;
     let mut out = Vec::new();
     for (block, text) in paragraphs {
-        for (start, end, word) in check(text, language, personal, ignored)? {
+        for (start, end, word) in check_with(&dict, text, personal, ignored) {
             out.push(Span {
                 block: *block,
                 start,

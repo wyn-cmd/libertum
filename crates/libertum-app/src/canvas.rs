@@ -19,6 +19,7 @@
 
 use std::cell::Cell;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 use iced::advanced::image::{self, Image};
 use iced::advanced::layout::{self, Layout};
@@ -110,14 +111,14 @@ pub struct Metrics {
     pub continuous: bool,
     /// Per-page sizes in physical pixels, index-aligned with the page count.
     pub sizes: Vec<(f32, f32)>,
-    /// Per-page used heights in physical pixels. Only the pageless (continuous) view uses
-    /// them: pages are stacked by how much of each is filled, so the blank tail of a page
-    /// where a paragraph or table continued does not show as a gap.
+    /// Per-page used heights in physical pixels. Only the pageless (continuous) view fills
+    /// this: pages are stacked by how much of each is filled, so the blank tail of a page
+    /// where a paragraph or table continued does not show as a gap. Empty otherwise.
     pub used: Vec<f32>,
-    /// Running totals of [`used`](Self::used): `tops[i]` is the height of pages `0..i`, and
-    /// the last entry is the whole document. A page's top is then one lookup, so scrolling
-    /// deep into a long document costs the same as at the start (it used to sum every page
-    /// before it on every call, which made a frame quadratic in the page number).
+    /// Running totals of the heights `page_top` uses: `tops[i]` is the height of pages
+    /// `0..i`, and the last entry is the whole document. A page's top is then one lookup, so
+    /// scrolling deep into a long document costs the same as at the start (it used to sum
+    /// every page before it on every call, which made a frame quadratic in the page number).
     tops: Vec<f32>,
 }
 
@@ -205,25 +206,30 @@ impl Metrics {
         let page_w = sizes.iter().map(|(w, _)| *w).fold(0.0, f32::max);
         let page_h = sizes.iter().map(|(_, h)| *h).fold(0.0, f32::max);
         // Used heights arrive in points (what pagination measures); the canvas works in
-        // physical pixels, capped to the page they belong to.
-        let used: Vec<f32> = (0..pages.max(1))
-            .map(|page| {
-                let full = sizes.get(page).map_or(page_h, |(_, h)| *h);
-                if continuous {
-                    used_heights
-                        .get(page)
-                        .map(|points| (points * scale).ceil().clamp(0.0, full))
-                        .unwrap_or(full)
-                } else {
-                    full
-                }
-            })
-            .collect();
+        // physical pixels, capped to the page they belong to. Only the pageless view needs
+        // them; in the paged view every page uses its full height and the vector stays empty.
+        let count = pages.max(1);
+        let mut used = Vec::new();
+        if continuous {
+            used.reserve(count);
+        }
         // Prefix totals of the very heights `page_top` used to add up each time.
-        let mut tops = Vec::with_capacity(used.len() + 1);
+        let mut tops = Vec::with_capacity(count + 1);
         tops.push(0.0);
         let mut total = 0.0;
-        for height in &used {
+        for page in 0..count {
+            let full = sizes.get(page).map_or(page_h, |(_, h)| *h);
+            let height = if continuous {
+                used_heights
+                    .get(page)
+                    .map(|points| (points * scale).ceil().clamp(0.0, full))
+                    .unwrap_or(full)
+            } else {
+                full
+            };
+            if continuous {
+                used.push(height);
+            }
             total += height;
             tops.push(total);
         }
@@ -448,6 +454,86 @@ impl Metrics {
     }
 }
 
+/// One cached `Metrics`, keyed by every input that can change it. The page-geometry slices
+/// are compared by identity: a new layout generation publishes new `Arc`s.
+struct CachedMetrics {
+    geometry: PageGeometry,
+    zoom: Zoom,
+    scale_factor: f32,
+    width: f32,
+    height: f32,
+    page_count: usize,
+    booklet: bool,
+    continuous: bool,
+    geometries: Arc<[PageGeometry]>,
+    used_heights: Arc<[f32]>,
+    metrics: Arc<Metrics>,
+}
+
+/// Cache for [`Metrics`]. A long document's metrics hold several page-sized vectors, so
+/// rebuilding them for every draw or scroll event was O(pages) per frame; the cache makes a
+/// hit a comparison and an `Arc` clone.
+#[derive(Default)]
+pub struct MetricsCache(Mutex<Option<CachedMetrics>>);
+
+/// Builds or reuses [`Metrics`] for one set of page-strip inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn cached_metrics(
+    cache: &MetricsCache,
+    geometry: &PageGeometry,
+    zoom: Zoom,
+    scale_factor: f32,
+    width: f32,
+    height: f32,
+    page_count: usize,
+    booklet: bool,
+    continuous: bool,
+    geometries: &Arc<[PageGeometry]>,
+    used_heights: &Arc<[f32]>,
+) -> Arc<Metrics> {
+    let mut slot = cache.0.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(cached) = slot.as_ref()
+        && cached.geometry == *geometry
+        && cached.zoom == zoom
+        && cached.scale_factor.to_bits() == scale_factor.to_bits()
+        && cached.width.to_bits() == width.to_bits()
+        && cached.height.to_bits() == height.to_bits()
+        && cached.page_count == page_count
+        && cached.booklet == booklet
+        && cached.continuous == continuous
+        && Arc::ptr_eq(&cached.geometries, geometries)
+        && Arc::ptr_eq(&cached.used_heights, used_heights)
+    {
+        return cached.metrics.clone();
+    }
+    let metrics = Arc::new(Metrics::new_with_layout(
+        geometry,
+        zoom,
+        scale_factor,
+        width,
+        height,
+        page_count,
+        booklet,
+        continuous,
+        geometries,
+        used_heights,
+    ));
+    *slot = Some(CachedMetrics {
+        geometry: *geometry,
+        zoom,
+        scale_factor,
+        width,
+        height,
+        page_count,
+        booklet,
+        continuous,
+        geometries: geometries.clone(),
+        used_heights: used_heights.clone(),
+        metrics: metrics.clone(),
+    });
+    metrics
+}
+
 // ---------------------------------------------------------------- widget API
 
 /// Input to the canvas, owned by `App`.
@@ -486,6 +572,9 @@ pub struct CanvasProps {
     pub ime_enabled: bool,
     /// Where the IME candidate window should sit: the caret, unaffected by blinking.
     pub ime_caret: Option<CaretRect>,
+    /// Shared cache for the page-strip metrics, so a draw or a pointer event does not
+    /// rebuild the document's page-sized vectors.
+    pub metrics_cache: Arc<MetricsCache>,
 }
 
 /// IME pre-edit text positioned in page coordinates.
@@ -617,8 +706,9 @@ struct Bar {
 }
 
 impl<Message> DocCanvas<'_, Message> {
-    fn metrics(&self, bounds: Rectangle) -> Metrics {
-        Metrics::new_with_layout(
+    fn metrics(&self, bounds: Rectangle) -> Arc<Metrics> {
+        cached_metrics(
+            &self.props.metrics_cache,
             &self.props.geometry,
             self.props.zoom,
             self.props.scale_factor,
@@ -883,6 +973,25 @@ where
 
         if self.props.animate && matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
             shell.request_redraw();
+        }
+
+        // Palm rejection: while the writer is typing, a palm on the trackpad must not move
+        // the caret, scroll or zoom. A button release still gets through so a drag that began
+        // before the first key never sticks.
+        if matches!(
+            event,
+            Event::Mouse(
+                mouse::Event::WheelScrolled { .. }
+                    | mouse::Event::Pinch { .. }
+                    | mouse::Event::ButtonPressed(_)
+                    | mouse::Event::CursorMoved { .. }
+            )
+        ) && crate::palm::typing_recently()
+        {
+            if cursor.is_over(bounds) {
+                shell.capture_event();
+            }
+            return;
         }
 
         // iced_winit 0.14 applies the input-method requests of each redraw pass and *disables*
@@ -1380,6 +1489,61 @@ mod tests {
     }
 
     #[test]
+    fn metrics_are_reused_until_an_input_changes() {
+        let geometry = PageGeometry::a4();
+        let geometries: Arc<[PageGeometry]> = vec![geometry; 3].into();
+        let used: Arc<[f32]> = Arc::default();
+        let cache = MetricsCache::default();
+        let first = cached_metrics(
+            &cache,
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1000.0,
+            700.0,
+            3,
+            false,
+            false,
+            &geometries,
+            &used,
+        );
+        let again = cached_metrics(
+            &cache,
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1000.0,
+            700.0,
+            3,
+            false,
+            false,
+            &geometries,
+            &used,
+        );
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the second call is a cache hit"
+        );
+        let wider = cached_metrics(
+            &cache,
+            &geometry,
+            Zoom::Percent(100),
+            1.0,
+            1001.0,
+            700.0,
+            3,
+            false,
+            false,
+            &geometries,
+            &used,
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &wider),
+            "a different viewport rebuilds the metrics"
+        );
+    }
+
+    #[test]
     fn booklet_puts_page_one_alone_then_pairs_left_and_right() {
         let m = booklet(1400.0, 5);
         let w = m.page_w;
@@ -1453,6 +1617,7 @@ mod tests {
             used_heights: Vec::new().into(),
             ime_enabled,
             ime_caret: caret,
+            metrics_cache: Arc::new(MetricsCache::default()),
         };
         let bounds = Rectangle::new(Point::new(0.0, 52.0), Size::new(900.0, 700.0));
         let redraw = Event::Window(window::Event::RedrawRequested(std::time::Instant::now()));
@@ -1539,10 +1704,10 @@ mod tests {
         let m = m(Zoom::Percent(100), 1.0, 1000.0, PAGES);
         let page = PAGES - 10;
         // The running total gives the same top the old sum-over-every-page did.
-        let expected = m.pad + m.used[..page].iter().sum::<f32>() + page as f32 * m.gap;
+        let expected = m.pad + page as f32 * (m.page_h + m.gap);
         assert!((m.page_top(page) - expected).abs() < 0.01);
         assert!(
-            (m.page_top(PAGES) - (m.pad + m.used.iter().sum::<f32>() + PAGES as f32 * m.gap)).abs()
+            (m.page_top(PAGES) - (m.pad + PAGES as f32 * m.page_h + PAGES as f32 * m.gap)).abs()
                 < 0.01
         );
         // Hit testing and the visible range both agree at that depth.
@@ -1550,7 +1715,7 @@ mod tests {
         assert_eq!(m.page_at(500.0, m.page_top(page) + 1.0, 1000.0), page);
         assert_eq!(m.page_at(500.0, m.page_top(page) - 1.0, 1000.0), page - 1);
         let height = m.content_height();
-        assert!((height - (m.page_top(PAGES - 1) + m.used[PAGES - 1] + m.pad)).abs() < 0.01);
+        assert!((height - (m.page_top(PAGES - 1) + m.page_h + m.pad)).abs() < 0.01);
 
         // Regression guard for the old O(page²) linear scan: 2,000 lookups anywhere in a
         // 5,000-page document must finish far inside this limit (it used to take seconds).
@@ -1649,11 +1814,11 @@ mod variable_page_tests {
             &[geometry; 3],
             &[300.0, 500.0, 120.0],
         );
+        assert!(paged.used.is_empty(), "paged view keeps no used heights");
         assert!(
-            (paged.used[0] - full).abs() < 1.01,
+            (paged.page_top(1) - paged.page_top(0) - paged.gap - full).abs() < 1.01,
             "paged uses whole pages"
         );
-        assert!(paged.page_top(1) >= paged.page_top(0) + full - 1.0);
         let _ = m0;
     }
 

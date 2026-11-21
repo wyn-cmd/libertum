@@ -19,6 +19,7 @@ mod macos_icon;
 mod macros;
 mod mcp;
 mod mcp_runner;
+mod palm;
 mod perf;
 mod recovery;
 mod script;
