@@ -2,7 +2,16 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-22 (release 0.5.0: HTML/EPUB, Compare with Posted, page colour)._
+_Last updated: 2026-11-23 (release 0.5.1: quieter idle work and spelling that waits for the word)._
+
+## Release 0.5.1 (2026-11-23)
+
+- **Spell timer:** the thread sleeps on a condition variable until a check is due instead of polling every 100 ms, and the two-second fallback tick is gone. Activity (typing, scrolling, layout, caret movement) sets a 450 ms deadline; a failed or out-of-date check retries after two seconds.
+- **Typing a word:** a misspelling under or ending at a plain caret is not underlined until the caret leaves it, and the skip does not count as a stale result.
+- **Window focus:** losing focus stops the caret blink and the idle autosave timer, and snapshots a dirty document at once; regaining focus restores the blink. The spell signature now includes the caret's offset, not only its paragraph.
+- **Per-frame and per-keystroke costs:** the selection word count is cached by document, selection and revision; `Document::section_of` returns immediately for a one-section document; recovery snapshots take the document by value instead of cloning it again. Spelling choices from the context menu close the menu.
+- **Release:** version 0.5.1 in `Cargo.toml` and `Cargo.lock`; notes in `docs/RELEASE-0.5.1.md`.
+- Verified: `cargo test --workspace` passes (1,040 tests, 2 ignored, including the new spell-timer, caret-word and window-focus tests), `cargo fmt --all --check` is clean, and clippy with `--workspace --all-targets --all-features -- -D warnings` is clean. Not checked: the timer and focus behaviour on a real desktop session on each platform; the spell check on a document with the caret left inside a misspelled word for a long time.
 
 ## Release 0.5.0 (2026-11-22)
 

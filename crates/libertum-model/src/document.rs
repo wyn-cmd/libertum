@@ -1351,6 +1351,11 @@ impl Document {
     /// Index of the section paragraph `index` belongs to: the number of section starts at or
     /// before it, not counting paragraph 0, clamped to the sections that exist. O(index).
     pub fn section_of(&self, index: usize) -> usize {
+        // One section (the usual document): nothing to count, so skip the O(index) walk
+        // that otherwise runs twice on every keystroke.
+        if self.sections.len() <= 1 {
+            return 0;
+        }
         // Cell paragraphs cannot open a section; each flat paragraph up to `index` that is
         // top-level and carries `section_start` starts one.
         let mut starts = 0usize;

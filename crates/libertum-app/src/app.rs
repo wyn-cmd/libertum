@@ -777,7 +777,7 @@ pub enum Message {
     /// Delete the selected added template's copy.
     RemoveSelectedTemplate,
     /// A spelling check finished. Results from an older generation are ignored.
-    /// The two-second spell-check timer fired.
+    /// The spell-check timer fired: typing, scrolling or layout went quiet.
     SpellTick,
     /// Test hook `LIBERTUM_TYPE`: types the next character.
     TypeHookTick,
@@ -854,6 +854,8 @@ pub enum Message {
     ModalChoice(ModalChoice),
     ScaleFactor(f32),
     WindowResized(Size),
+    /// The operating system gave the window focus (`true`) or took it away (`false`).
+    WindowFocus(bool),
     Frame(Instant),
     /// Caret blink timer (only runs for [`BLINK_TIMEOUT`] after caret activity).
     BlinkTick(Instant),
@@ -969,57 +971,117 @@ fn type_ticks() -> UnboundedReceiver<()> {
     rx
 }
 
-/// How often spelling is rechecked when nothing asks sooner (a fallback: scrolling, layout).
-const SPELL_INTERVAL: Duration = Duration::from_secs(2);
-/// How long after the last keystroke spelling is checked: a short pause in typing.
+/// How long after the last keystroke, scroll or layout change spelling is checked: a short
+/// pause in the activity.
 const SPELL_QUIET: Duration = Duration::from_millis(450);
-/// How often the spell timer thread looks at the clock. It wakes the app only when a check
-/// is due, so this costs nothing on the UI thread.
-const SPELL_POLL: Duration = Duration::from_millis(100);
+/// How long before a failed or out-of-date check is tried again.
+const SPELL_RETRY: Duration = Duration::from_secs(2);
 
-/// The last edit, in milliseconds since [`spell_clock`] started (0 = no edit waiting).
-static SPELL_EDITED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn spell_clock() -> Instant {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *START.get_or_init(Instant::now)
+/// When the next spell check is due. The timer thread sleeps on `wake` until there is a
+/// deadline, so a document with nothing to check wakes nothing: no polling, no fallback tick.
+struct SpellTimer {
+    deadline: std::sync::Mutex<Option<Instant>>,
+    wake: std::sync::Condvar,
+    /// The newest timer thread's number; an older thread that finds it changed ends.
+    epoch: std::sync::atomic::AtomicU64,
 }
 
-/// Records an edit, so spelling is checked once typing pauses for [`SPELL_QUIET`].
+fn spell_timer() -> &'static SpellTimer {
+    static TIMER: std::sync::OnceLock<SpellTimer> = std::sync::OnceLock::new();
+    TIMER.get_or_init(|| SpellTimer {
+        deadline: std::sync::Mutex::new(None),
+        wake: std::sync::Condvar::new(),
+        epoch: std::sync::atomic::AtomicU64::new(0),
+    })
+}
+
+impl SpellTimer {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        self.deadline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets the deadline; `sooner_only` keeps an earlier one that is already waiting. The
+    /// thread is only woken when it was idle: otherwise it is already sleeping towards an
+    /// earlier deadline and re-reads the new one when that passes, so a scroll or a burst
+    /// of typing costs no extra wake-ups.
+    fn set(&self, delay: Duration, sooner_only: bool) {
+        let due = Instant::now() + delay;
+        let mut deadline = self.lock();
+        let was_idle = deadline.is_none();
+        match *deadline {
+            Some(existing) if sooner_only && existing <= due => {}
+            _ => *deadline = Some(due),
+        }
+        drop(deadline);
+        if was_idle {
+            self.wake.notify_all();
+        }
+    }
+}
+
+/// Something that can change what needs checking happened (an edit, a scroll, a layout
+/// pass, the caret moving): check spelling once it has been quiet for [`SPELL_QUIET`].
 fn note_spell_edit() {
-    let now = spell_clock().elapsed().as_millis() as u64;
-    SPELL_EDITED_AT.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+    spell_timer().set(SPELL_QUIET, false);
 }
 
-/// Ticks for the spell check on a small thread: one [`SPELL_QUIET`] after the last edit, and
-/// one every [`SPELL_INTERVAL`] otherwise.
+/// A check failed or came back out of date: look again after [`SPELL_RETRY`], unless a
+/// sooner check is already due.
+fn retry_spell_later() {
+    spell_timer().set(SPELL_RETRY, true);
+}
+
+/// Whether a spell check is waiting for its quiet period.
+#[cfg(test)]
+fn spell_check_pending() -> bool {
+    spell_timer().lock().is_some()
+}
+
+/// Ticks for the spell check on a small thread that sleeps until a check is due
+/// ([`note_spell_edit`], [`retry_spell_later`]) and then sends one tick.
 fn spell_ticks() -> UnboundedReceiver<()> {
+    spell_ticks_for(spell_timer())
+}
+
+fn spell_ticks_for(timer: &'static SpellTimer) -> UnboundedReceiver<()> {
+    use std::sync::atomic::Ordering;
     let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    // Any thread left from an earlier subscription ends instead of competing for ticks.
+    let epoch = timer.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    timer.wake.notify_all();
     let spawned = std::thread::Builder::new()
         .name("libertum-spell".into())
         .spawn(move || {
-            use std::sync::atomic::Ordering;
-            let mut last_tick = Instant::now();
             loop {
-                std::thread::sleep(SPELL_POLL);
-                let now = spell_clock().elapsed().as_millis() as u64;
-                let edited = SPELL_EDITED_AT.load(Ordering::Relaxed);
-                let quiet =
-                    edited != 0 && now.saturating_sub(edited) >= SPELL_QUIET.as_millis() as u64;
-                let due = last_tick.elapsed() >= SPELL_INTERVAL;
-                if !quiet && !due {
-                    continue;
+                let mut deadline = timer.lock();
+                loop {
+                    if timer.epoch.load(Ordering::SeqCst) != epoch {
+                        return;
+                    }
+                    match *deadline {
+                        None => {
+                            deadline = timer
+                                .wake
+                                .wait(deadline)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        }
+                        Some(due) => {
+                            let now = Instant::now();
+                            if now >= due {
+                                *deadline = None;
+                                break;
+                            }
+                            deadline = timer
+                                .wake
+                                .wait_timeout(deadline, due - now)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .0;
+                        }
+                    }
                 }
-                if quiet {
-                    // Only clear the edit that was seen: a keystroke in between keeps waiting.
-                    let _ = SPELL_EDITED_AT.compare_exchange(
-                        edited,
-                        0,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                }
-                last_tick = Instant::now();
+                drop(deadline);
                 if tx.unbounded_send(()).is_err() {
                     return;
                 }
@@ -1137,6 +1199,18 @@ pub struct App {
     scale_factor_known: bool,
     /// The canvas last received a click; inspector controls do not take document keystrokes.
     canvas_focused: bool,
+    /// The window has operating-system focus. An unfocused window blinks no caret and ticks
+    /// no autosave while there is nothing to save.
+    window_focused: bool,
+    /// The selection's word count, kept for the same document, selection and revision so a
+    /// scroll or drag over a large selection does not copy and split its text every event.
+    selection_words_cache: Option<(
+        u64,
+        libertum_editor::DocPosition,
+        libertum_editor::DocPosition,
+        u64,
+        usize,
+    )>,
     /// Current IME composition string, drawn inline until committed.
     ime_preedit: Option<String>,
     autoscroll: Option<AutoScroll>,
@@ -1330,6 +1404,8 @@ impl App {
             scale_factor: 1.0,
             scale_factor_known: false,
             canvas_focused: false,
+            window_focused: true,
+            selection_words_cache: None,
             ime_preedit: None,
             autoscroll: AutoScroll::from_env(),
             caret_activity: Instant::now(),
@@ -2428,18 +2504,35 @@ impl App {
             .collect()
     }
 
+    /// Words in the selection, `None` for a caret. Cached by document, selection and
+    /// revision: the text is only copied and counted when one of them changes.
+    fn selection_word_count(&mut self) -> Option<usize> {
+        let doc = self.doc.as_ref()?;
+        let (start, end) = doc.editor().ordered_selection()?;
+        if start == end {
+            return None;
+        }
+        let key = (doc.id(), start, end, doc.document().revision());
+        if let Some((id, s, e, revision, words)) = self.selection_words_cache
+            && (id, s, e, revision) == key
+        {
+            return Some(words);
+        }
+        let words = doc
+            .editor()
+            .selected_text()
+            .map_or(0, |text| text.split_whitespace().count());
+        self.selection_words_cache = Some((key.0, key.1, key.2, key.3, words));
+        Some(words)
+    }
+
     fn refresh_view(&mut self) {
         if self.doc.is_none() {
             return;
         }
-        self.state.selection_words = self.doc.as_ref().and_then(|doc| {
-            let (start, end) = doc.editor().ordered_selection()?;
-            (start != end).then(|| {
-                doc.editor()
-                    .selected_text()
-                    .map_or(0, |text| text.split_whitespace().count())
-            })
-        });
+        // A scroll, resize or layout pass moves what is near the view: recheck once quiet.
+        note_spell_edit();
+        self.state.selection_words = self.selection_word_count();
         self.refresh_thumbnails();
         if self.state.inspector == Inspector::Headers {
             self.headings = self.headings();
@@ -2820,11 +2913,13 @@ impl App {
         note_spell_edit();
         let document = doc.document();
         let before = self.spell_errors.len();
+        let typing = Self::typing_span(doc);
         self.spell_errors.retain(|error| {
-            document
-                .paragraph(error.block)
-                .and_then(|p| p.text().get(error.start..error.end))
-                .is_some_and(|word| word == error.word)
+            !Self::touches_caret(error, typing)
+                && document
+                    .paragraph(error.block)
+                    .and_then(|p| p.text().get(error.start..error.end))
+                    .is_some_and(|word| word == error.word)
         });
         if self.spell_errors.len() != before {
             self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
@@ -3085,7 +3180,8 @@ impl App {
         self.check_spelling_if_changed()
     }
 
-    /// Spelling is checked from a two-second timer, not on every keystroke, scroll or layout
+    /// Spelling is checked from a timer that fires once activity goes quiet, not on every
+    /// keystroke, scroll or layout
     /// pass: each tick looks at the paragraphs near the viewport and starts a check only if
     /// their text, the language or the ignore lists changed since the last one.
     fn check_spelling_if_changed(&mut self) -> Task<Message> {
@@ -3114,7 +3210,9 @@ impl App {
             doc.source.pages.known_pages().hash(&mut hasher);
             pages.start.hash(&mut hasher);
             pages.end.hash(&mut hasher);
-            doc.editor().caret().block.hash(&mut hasher);
+            // The caret's place, not just its paragraph: moving off a word releases it
+            // for checking.
+            doc.editor().caret().hash(&mut hasher);
             language.hash(&mut hasher);
             self.spell_personal.len().hash(&mut hasher);
             self.spell_ignored_document.len().hash(&mut hasher);
@@ -3163,6 +3261,24 @@ impl App {
             },
             move |result| Message::SpellChecked { generation, result },
         )
+    }
+
+    /// The caret's place, when it is a plain caret (no selection): the word touching it is
+    /// the one being typed.
+    fn typing_span(doc: &DocView) -> Option<(BlockId, usize)> {
+        let editor = doc.editor();
+        if editor.has_selection() {
+            return None;
+        }
+        let caret = editor.caret();
+        Some((caret.block, caret.offset))
+    }
+
+    /// Whether a misspelling is in, or ends at, the caret: the writer is still typing it.
+    fn touches_caret(error: &spell::Span, typing: Option<(BlockId, usize)>) -> bool {
+        typing.is_some_and(|(block, offset)| {
+            error.block == block && error.start <= offset && offset <= error.end
+        })
     }
 
     fn clear_spell_errors(&mut self) {
@@ -3730,9 +3846,13 @@ impl App {
     // ------------------------------------------------------------ autosave and recovery
 
     /// The autosave period, when there is a document open and autosave is switched on.
+    /// The autosave period, or `None` when no timer is needed: autosave is off, there is no
+    /// document, or the window is unfocused with nothing unsaved (a tick would only wake the
+    /// app to find there is nothing to write).
     fn autosave_interval(&self) -> Option<u64> {
         let seconds = u64::from(self.settings.autosave_secs);
-        (seconds > 0 && self.doc.is_some()).then_some(seconds)
+        (seconds > 0 && self.doc.is_some() && (self.window_focused || self.dirty))
+            .then_some(seconds)
     }
 
     /// Offers the snapshot of a window that crashed (or was killed), if one survived.
@@ -4385,6 +4505,7 @@ impl App {
     fn blinking(&self, now: Instant) -> bool {
         self.doc.is_some()
             && self.canvas_focused
+            && self.window_focused
             && now.saturating_duration_since(self.caret_activity) < BLINK_TIMEOUT
     }
 
@@ -4468,6 +4589,7 @@ impl App {
                 | Message::ScaleFactor(_)
                 | Message::SystemTheme(_)
                 | Message::WindowResized(_)
+                | Message::WindowFocus(_)
         ) && let Some((field, _)) = self.state.editing.take()
         {
             self.apply_field(field);
@@ -4493,6 +4615,10 @@ impl App {
                 | Message::Document(_)
                 | Message::OpenFind
                 | Message::Shortcut(_)
+                | Message::SpellReplace { .. }
+                | Message::SpellIgnoreOnce(_)
+                | Message::SpellIgnoreDocument(_)
+                | Message::SpellAddWord(_)
                 | Message::Canvas(
                     CanvasEvent::Pointer { .. }
                         | CanvasEvent::PointerDrag { .. }
@@ -5059,7 +5185,7 @@ impl App {
                         self.autosave_pending = Some(revision);
                         return Task::perform(
                             async move {
-                                recovery::write(&dir, &document, path.as_deref())
+                                recovery::write(&dir, document, path.as_deref())
                                     .map_err(|error| error.to_string())
                             },
                             move |result| Message::Autosaved {
@@ -5556,21 +5682,29 @@ impl App {
                             // Typing may have gone on while the check ran: keep only the
                             // words still at their place (the next check covers the rest).
                             let document = self.doc.as_ref().map(DocView::document);
+                            // The word the caret is in or against is still being typed:
+                            // leave it unchecked until the caret moves off it.
+                            let typing = self.doc.as_ref().and_then(Self::typing_span);
                             let still_there = |error: &spell::Span| {
                                 document
                                     .and_then(|d| d.paragraph(error.block))
                                     .and_then(|p| p.text().get(error.start..error.end))
                                     .is_some_and(|word| word == error.word)
                             };
+                            // Skipping the word being typed is not staleness, so it must not
+                            // count as an out-of-date result (that would schedule a recheck
+                            // every couple of seconds for as long as the caret sits on it).
+                            // The caret moving off the word triggers its own check.
                             let wanted: Vec<spell::Span> = errors
                                 .into_iter()
                                 .filter(|error| {
-                                    !self.spell_ignored_once.contains(&(
-                                        error.block,
-                                        error.start,
-                                        error.end,
-                                        error.word.clone(),
-                                    ))
+                                    !Self::touches_caret(error, typing)
+                                        && !self.spell_ignored_once.contains(&(
+                                            error.block,
+                                            error.start,
+                                            error.end,
+                                            error.word.clone(),
+                                        ))
                                 })
                                 .collect();
                             let fresh = wanted.len();
@@ -5579,6 +5713,7 @@ impl App {
                             if self.spell_errors.len() < fresh {
                                 // Some were out of date: look again once typing pauses.
                                 self.spell_signature = None;
+                                retry_spell_later();
                             }
                             self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
                         }
@@ -5587,6 +5722,7 @@ impl App {
                             // Let the next tick try again; the signature said this text was
                             // already covered, but no result arrived.
                             self.spell_signature = None;
+                            retry_spell_later();
                         }
                     }
                 }
@@ -5702,6 +5838,17 @@ impl App {
                 self.window_height = size.height;
             }
             Message::BlinkTick(now) => self.on_blink_tick(now),
+            Message::WindowFocus(focused) => {
+                self.window_focused = focused;
+                if focused {
+                    // Back in front: a solid caret that blinks for the usual few seconds.
+                    self.caret_on = true;
+                    self.caret_activity = Instant::now();
+                } else if self.dirty {
+                    // Leaving the window is when work is most at risk: snapshot it now.
+                    return self.update(Message::AutosaveTick);
+                }
+            }
             Message::Frame(now) => {
                 if self.bench.is_some() {
                     return self.bench_frame(now);
@@ -9354,6 +9501,8 @@ fn key_event(event: Event, status: event::Status, _window: window::Id) -> Option
         Event::InputMethod(event) => Some(Message::Ime(event)),
         Event::Window(window::Event::Rescaled(sf)) => Some(Message::ScaleFactor(sf)),
         Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
         Event::Window(window::Event::Opened { size, .. }) => Some(Message::WindowResized(size)),
         Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
         _ => None,
@@ -11261,7 +11410,8 @@ mod tests {
             end,
             word: word.to_owned(),
         };
-        // A result for the current text is shown.
+        // A result for the current text is shown (the caret is away from the word).
+        app.doc_mut().move_caret(|ed| ed.move_doc_end(false));
         app.spell_generation = 7;
         let _ = app.update(Message::SpellChecked {
             generation: 7,
@@ -11270,16 +11420,13 @@ mod tests {
         assert_eq!(app.spell_errors.len(), 1);
         // Typing in front of the word moves it: the old underline is dropped at once rather
         // than drawn under the wrong letters, and a check is asked for once typing pauses.
-        SPELL_EDITED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+        *spell_timer().lock() = None;
         app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
         let result = app.doc_mut().edit(|ed| ed.insert_text("So "));
         let _ = app.finish_edit(result);
+        app.doc_mut().move_caret(|ed| ed.move_doc_end(false));
         assert!(app.spell_errors.is_empty(), "the stale underline is gone");
-        assert_ne!(
-            SPELL_EDITED_AT.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "a check is due when typing pauses"
-        );
+        assert!(spell_check_pending(), "a check is due when typing pauses");
         // A result that came back for older text keeps only the words still in place, and
         // asks for another look.
         app.spell_generation = 8;
@@ -11290,6 +11437,129 @@ mod tests {
         });
         assert_eq!(app.spell_errors, vec![span(3, 6, "Teh")]);
         assert_eq!(app.spell_signature, None, "checks again");
+    }
+
+    #[test]
+    fn the_word_being_typed_is_not_underlined_until_the_caret_leaves_it() {
+        use libertum_model::{BlockId, Document, Paragraph};
+        let mut app = app();
+        let document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Teh cat")]);
+        let (doc, _rx) = DocView::open(document);
+        app.doc = Some(doc);
+        let block = app.doc().document().paragraph_at(0).expect("p").id;
+        let span = spell::Span {
+            block,
+            start: 0,
+            end: 3,
+            word: "Teh".to_owned(),
+        };
+        // Caret at the end of "Teh": still being typed, so no underline.
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        app.doc_mut().move_caret(|ed| ed.move_right(false));
+        app.doc_mut().move_caret(|ed| ed.move_right(false));
+        app.doc_mut().move_caret(|ed| ed.move_right(false));
+        app.spell_generation = 1;
+        app.spell_signature = Some(5);
+        let _ = app.update(Message::SpellChecked {
+            generation: 1,
+            result: Ok(vec![span.clone()]),
+        });
+        assert!(
+            app.spell_errors.is_empty(),
+            "the word at the caret is skipped"
+        );
+        assert_eq!(
+            app.spell_signature,
+            Some(5),
+            "skipping the word being typed is not an out-of-date result: no recheck loop"
+        );
+        // Caret moved on to "cat": the word is now checked.
+        app.doc_mut().move_caret(|ed| ed.move_doc_end(false));
+        app.spell_generation = 2;
+        let _ = app.update(Message::SpellChecked {
+            generation: 2,
+            result: Ok(vec![span]),
+        });
+        assert_eq!(app.spell_errors.len(), 1);
+    }
+
+    #[test]
+    fn the_spell_timer_sleeps_until_a_check_is_due_and_ticks_once() {
+        let timer: &'static SpellTimer = Box::leak(Box::new(SpellTimer {
+            deadline: std::sync::Mutex::new(None),
+            wake: std::sync::Condvar::new(),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+        }));
+        let mut ticks = spell_ticks_for(timer);
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        // Nothing pending: no tick, however long it waits.
+        pause(300);
+        assert!(ticks.try_recv().is_err(), "an idle timer sends nothing");
+        // A burst of activity is one tick after it goes quiet, not before.
+        timer.set(Duration::from_millis(150), false);
+        pause(60);
+        timer.set(Duration::from_millis(150), false);
+        pause(100);
+        assert!(ticks.try_recv().is_err(), "still inside the quiet period");
+        pause(150);
+        assert!(ticks.try_recv().is_ok(), "one tick when quiet");
+        pause(300);
+        assert!(ticks.try_recv().is_err(), "and no repeat tick");
+        // A retry never pushes back a sooner check.
+        timer.set(Duration::from_millis(100), false);
+        timer.set(Duration::from_secs(60), true);
+        pause(250);
+        assert!(ticks.try_recv().is_ok());
+        // A newer timer thread retires the older one.
+        let mut newer = spell_ticks_for(timer);
+        pause(50);
+        timer.set(Duration::from_millis(50), false);
+        pause(200);
+        assert!(newer.try_recv().is_ok());
+        assert!(
+            !ticks.try_recv().is_ok(),
+            "the retired thread sends nothing"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_window_stops_the_blink_and_idle_autosave_timers() {
+        let mut app = app();
+        app.canvas_focused = true;
+        app.caret_activity = Instant::now();
+        assert!(app.blinking(Instant::now()));
+        assert!(app.autosave_interval().is_some());
+        let _ = app.update(Message::WindowFocus(false));
+        assert!(!app.blinking(Instant::now()), "no blink while unfocused");
+        assert!(
+            app.autosave_interval().is_none(),
+            "no autosave tick while unfocused and clean"
+        );
+        // Unsaved work keeps its autosave timer even when unfocused.
+        app.dirty = true;
+        assert!(app.autosave_interval().is_some());
+        app.dirty = false;
+        let _ = app.update(Message::WindowFocus(true));
+        assert!(app.blinking(Instant::now()), "blinks again on return");
+        assert!(app.caret_on);
+        assert!(app.autosave_interval().is_some());
+    }
+
+    #[test]
+    fn choosing_a_spelling_action_closes_the_context_menu() {
+        let mut app = app();
+        for message in [
+            Message::SpellAddWord("smple".to_owned()),
+            Message::SpellIgnoreDocument("smple".to_owned()),
+        ] {
+            app.context_menu = Some(ContextMenuState {
+                x: 0.0,
+                y: 0.0,
+                target: crate::toolbar::ContextMenuTarget::Text { spelling: None },
+            });
+            let _ = app.update(message);
+            assert!(app.context_menu.is_none());
+        }
     }
 
     /// A native document with `text` as its only paragraph, saved to `path`.
@@ -12825,7 +13095,7 @@ mod tests {
                 "Recovered words",
             )]);
         let old = std::path::Path::new("C:/books/novel.odt");
-        recovery::write_as(&dir, CRASHED_WINDOW, &document, Some(old)).expect("a snapshot");
+        recovery::write_as(&dir, CRASHED_WINDOW, document.clone(), Some(old)).expect("a snapshot");
 
         let mut app = home();
         app.recovery_dir = dir.clone();
@@ -12864,7 +13134,7 @@ mod tests {
                 libertum_model::BlockId(1),
                 "Not wanted",
             )]);
-        recovery::write_as(&dir, CRASHED_WINDOW, &document, None).expect("a snapshot");
+        recovery::write_as(&dir, CRASHED_WINDOW, document.clone(), None).expect("a snapshot");
 
         let mut app = home();
         app.recovery_dir = dir.clone();
@@ -14084,7 +14354,7 @@ Opened from Explorer.
             "Unsaved before the crash",
         )]);
         let snapshots = dir.join("snapshots");
-        recovery::write_as(&snapshots, CRASHED_WINDOW, &lost, None).expect("a snapshot");
+        recovery::write_as(&snapshots, CRASHED_WINDOW, lost.clone(), None).expect("a snapshot");
 
         // Opened from Explorer: the document shows, and the offer is over it.
         let mut app = App::with_doc(test_settings(), None, None);
@@ -14105,7 +14375,7 @@ Opened from Explorer.
         );
 
         // A file that will not open: the error first, then the offer.
-        recovery::write_as(&snapshots, CRASHED_WINDOW, &lost, None).expect("a snapshot");
+        recovery::write_as(&snapshots, CRASHED_WINDOW, lost.clone(), None).expect("a snapshot");
         let mut app = App::with_doc(test_settings(), None, None);
         app.recovery_dir = snapshots.clone();
         let _ = app.open_path(dir.join("missing.odt"));
@@ -14120,7 +14390,7 @@ Opened from Explorer.
         assert!(recovery::load(&snapshots).is_none());
 
         // The snapshot of a window that is still running (this one) is never offered.
-        recovery::write(&snapshots, &lost, None).expect("our own snapshot");
+        recovery::write(&snapshots, lost.clone(), None).expect("our own snapshot");
         let mut app = App::with_doc(test_settings(), None, None);
         app.recovery_dir = snapshots.clone();
         app.check_recovery();

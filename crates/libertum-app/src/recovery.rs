@@ -64,8 +64,10 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Writes this process's snapshot of `document`, which came from `path` (if any).
-pub fn write(dir: &Path, document: &Document, path: Option<&Path>) -> std::io::Result<()> {
+/// Writes this process's snapshot of `document`, which came from `path` (if any). The
+/// document is taken by value: the caller already made one copy for the worker thread, and
+/// serialising it needs no second.
+pub fn write(dir: &Path, document: Document, path: Option<&Path>) -> std::io::Result<()> {
     write_as(dir, std::process::id(), document, path)
 }
 
@@ -74,13 +76,13 @@ pub fn write(dir: &Path, document: &Document, path: Option<&Path>) -> std::io::R
 pub fn write_as(
     dir: &Path,
     owner: u32,
-    document: &Document,
+    document: Document,
     path: Option<&Path>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     // The native format stores the model one-to-one, so a recovered document is exact
     // rather than as close as ODT gets.
-    let bytes = Native::new(document.clone())
+    let bytes = Native::new(document)
         .to_bytes()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let snapshot = snapshot_path(dir, Some(owner));
@@ -241,7 +243,7 @@ mod tests {
     fn a_crashed_window_snapshot_round_trips_with_its_file() {
         let dir = scratch("round-trip");
         let target = PathBuf::from("/tmp/novel.odt");
-        write_as(&dir, GONE, &doc("Unsaved words"), Some(&target)).expect("write");
+        write_as(&dir, GONE, doc("Unsaved words"), Some(&target)).expect("write");
         let (read, meta) = load(&dir).expect("a snapshot");
         assert_eq!(read.paragraph_at(0).expect("p").text(), "Unsaved words");
         assert_eq!(meta.path.as_deref(), Some(target.as_path()));
@@ -256,10 +258,10 @@ mod tests {
     fn snapshots_of_running_windows_are_never_offered() {
         let dir = scratch("running");
         // This process is running, and so is its own snapshot's owner.
-        write(&dir, &doc("Mine, still open"), None).expect("write");
+        write(&dir, doc("Mine, still open"), None).expect("write");
         assert!(load(&dir).is_none(), "its own snapshot");
         // A crashed window's snapshot is offered; clearing ours leaves it alone.
-        write_as(&dir, GONE, &doc("From a crash"), None).expect("write");
+        write_as(&dir, GONE, doc("From a crash"), None).expect("write");
         clear(&dir);
         let (read, _) = load(&dir).expect("the crashed window's");
         assert_eq!(read.paragraph_at(0).expect("p").text(), "From a crash");
@@ -269,8 +271,8 @@ mod tests {
     #[test]
     fn the_newest_abandoned_snapshot_is_offered_first() {
         let dir = scratch("newest");
-        write_as(&dir, GONE, &doc("Older"), None).expect("write");
-        write_as(&dir, GONE - 1, &doc("Newer"), None).expect("write");
+        write_as(&dir, GONE, doc("Older"), None).expect("write");
+        write_as(&dir, GONE - 1, doc("Newer"), None).expect("write");
         // Make the first one clearly older.
         std::fs::write(meta_path(&dir, Some(GONE)), format!("1|{GONE}|")).expect("age");
         let (read, meta) = load(&dir).expect("a snapshot");
