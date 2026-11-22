@@ -102,6 +102,8 @@ pub(crate) struct Edits {
     relationships: Vec<(String, String)>,
     /// `settings.xml` must turn on separate even-page headers.
     even_and_odd: bool,
+    /// `settings.xml` must turn on `w:displayBackgroundShape` (the page colour).
+    display_background: bool,
 }
 
 impl Edits {
@@ -121,11 +123,16 @@ impl Edits {
         self.even_and_odd = true;
     }
 
+    pub fn require_display_background(&mut self) {
+        self.display_background = true;
+    }
+
     /// Adds the other edits after these, so they win where both write the same part.
     pub fn then(mut self, later: Self) -> Self {
         self.parts.extend(later.parts);
         self.relationships.extend(later.relationships);
         self.even_and_odd |= later.even_and_odd;
+        self.display_background |= later.display_background;
         self
     }
 
@@ -143,6 +150,9 @@ impl Edits {
         }
         if self.even_and_odd {
             crate::headers::turn_on_even_and_odd(package);
+        }
+        if self.display_background {
+            crate::headers::turn_on_display_background(package);
         }
     }
 }

@@ -22,6 +22,8 @@ libertum-markdown = { workspace = true }
 libertum-rtf = { workspace = true }
 libertum-native = { workspace = true }
 libertum-library = { workspace = true }
+libertum-diff = { workspace = true }
+libertum-html = { workspace = true }
 libertum-formats-common = { workspace = true }
 libertum-mcp = { workspace = true }
 rfd = { workspace = true }

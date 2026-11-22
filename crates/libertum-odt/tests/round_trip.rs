@@ -1463,3 +1463,32 @@ fn entries_are_saved_without_page_numbers_when_the_layout_has_none_to_give() {
     assert!(xml.contains("xlink:href=\"#_Toc4\">Chapter One</text:a>"));
     assert!(!xml.contains("<text:tab/>"));
 }
+
+#[test]
+fn the_page_colour_round_trips_on_the_page_layout() {
+    let mut doc = Document::new();
+    for section in &mut doc.sections {
+        section.page_colour = Some([0xE1, 0xEE, 0xFA, 0xFF]);
+    }
+    let bytes = Odt::new(doc).to_bytes().expect("write");
+    let styles = zip_text(&bytes, "styles.xml").expect("styles part");
+    assert!(
+        styles.contains("fo:background-color=\"#E1EEFA\""),
+        "{styles}"
+    );
+    let back = Odt::parse(&bytes).expect("read");
+    assert!(
+        back.document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour == Some([0xE1, 0xEE, 0xFA, 0xFF]))
+    );
+    let plain = Odt::parse(&Odt::new(Document::new()).to_bytes().expect("write")).expect("read");
+    assert!(
+        plain
+            .document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour.is_none())
+    );
+}

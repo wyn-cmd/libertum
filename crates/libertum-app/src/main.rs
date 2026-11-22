@@ -191,7 +191,18 @@ fn main() -> iced::Result {
         Some("trace") => tracing::Level::TRACE,
         _ => tracing::Level::INFO,
     };
-    tracing_subscriber::fmt().with_max_level(level).init();
+    // iced_winit logs the whole window configuration at INFO, including every byte of the
+    // window icon's pixels, one per line: about a million lines on every start (into the
+    // system journal when started from the desktop). Only its warnings and errors are kept.
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = tracing_subscriber::filter::Targets::new()
+        .with_default(level)
+        .with_target("iced_winit", tracing::Level::WARN);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .init();
 
     perf::init();
     let (settings, settings_path) = Settings::load_or_default();

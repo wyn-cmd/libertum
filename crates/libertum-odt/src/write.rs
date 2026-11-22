@@ -1245,6 +1245,9 @@ impl<'a> Writer<'a> {
         if let Some(number) = section.first_page_number {
             props.push_str(&format!(" style:first-page-number=\"{number}\""));
         }
+        if let Some(colour) = section.page_colour {
+            props.push_str(&format!(" fo:background-color=\"{}\"", colour::hex(colour)));
+        }
         out.push_str(&format!("<style:page-layout-properties{props}>"));
         if section.columns > 1 {
             out.push_str(&format!(

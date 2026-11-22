@@ -99,6 +99,7 @@ fn document_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
 
     column![
         section(t, s::SECTION_PAPER, paper),
+        section(t, s::SECTION_PAGE_COLOUR, page_colour(state, t)),
         section(t, s::SECTION_HEADER_FOOTER, header_footer(state, t)),
         section(t, s::SECTION_WATERMARK, watermark(state, t)),
         section(
@@ -266,6 +267,93 @@ fn watermark<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     ]
     .spacing(8)
     .into()
+}
+
+/// The page colour: White, the soft tints and a hex field for any other colour.
+fn page_colour<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
+    let d = &state.document;
+    let chip = move |name: &'static str, colour: Option<[u8; 4]>| {
+        let fill = colour.map_or(iced::Color::WHITE, |[r, g, b, _]| {
+            iced::Color::from_rgb8(r, g, b)
+        });
+        let selected = d.page_colour == colour;
+        iced::widget::tooltip(
+            iced::widget::button(
+                container(space::horizontal().width(Length::Fixed(16.0)))
+                    .width(Length::Fixed(18.0))
+                    .height(Length::Fixed(18.0))
+                    .style(move |_| container::Style {
+                        background: Some(fill.into()),
+                        border: Border {
+                            color: t.control_border,
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..container::Style::default()
+                    }),
+            )
+            .padding(2)
+            .style(move |_, _| iced::widget::button::Style {
+                background: None,
+                text_color: t.text,
+                border: Border {
+                    color: if selected {
+                        t.accent
+                    } else {
+                        iced::Color::TRANSPARENT
+                    },
+                    width: 2.0,
+                    radius: 6.0.into(),
+                },
+                ..iced::widget::button::Style::default()
+            })
+            .on_press(Message::Document(DocumentMsg::PageColour(colour))),
+            container(iced::widget::text(name).size(12)).padding(4),
+            iced::widget::tooltip::Position::Bottom,
+        )
+    };
+    // White and the tints, five to a row so they fit the pane.
+    let swatches: Vec<(&'static str, Option<[u8; 4]>)> =
+        std::iter::once((s::PAGE_COLOUR_NONE, None))
+            .chain(
+                crate::state::PAGE_COLOURS
+                    .iter()
+                    .map(|(name, colour)| (*name, Some(*colour))),
+            )
+            .collect();
+    let mut chips = column![].spacing(4);
+    for group in swatches.chunks(5) {
+        let mut line = row![].spacing(4).align_y(Center);
+        for (name, colour) in group {
+            line = line.push(chip(name, *colour));
+        }
+        chips = chips.push(line);
+    }
+    let typed = crate::state::parse_page_colour_hex(&d.page_colour_hex);
+    let input = text_input(s::PAGE_COLOUR_HEX_PLACEHOLDER, &d.page_colour_hex)
+        .on_input(|text| Message::Document(DocumentMsg::PageColourHex(text)))
+        .on_submit(Message::Document(DocumentMsg::PageColourHexApply))
+        .size(13)
+        .padding(Padding {
+            top: 4.0,
+            bottom: 4.0,
+            left: 8.0,
+            right: 8.0,
+        })
+        .width(Length::Fill);
+    let apply = iced::widget::button(iced::widget::text(s::PAGE_COLOUR_APPLY).size(12))
+        .padding([4, 10])
+        .style(move |_, status| crate::widgets::controls::flat(t, status))
+        .on_press_maybe(
+            typed
+                .filter(|colour| d.page_colour != Some(*colour))
+                .map(|_| Message::Document(DocumentMsg::PageColourHexApply)),
+        );
+    let mut body = column![chips, row![input, apply].spacing(6).align_y(Center)].spacing(8);
+    if typed.is_none() && !d.page_colour_hex.trim().is_empty() {
+        body = body.push(caption(t, s::PAGE_COLOUR_BAD_HEX));
+    }
+    body.push(caption(t, s::PAGE_COLOUR_HINT)).into()
 }
 
 /// A one-line text input styled like the other inspector controls.

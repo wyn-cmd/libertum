@@ -7,18 +7,22 @@
 mod autotags;
 mod epub;
 mod html;
+mod tag_cache;
 mod tags;
 mod text;
 
 pub use autotags::{
-    MAX_CHARACTERS, MAX_KEYWORDS, MAX_RELATIONSHIPS, auto_suggestions,
-    auto_suggestions_for_chapter, merge_suggestions,
+    MAX_CHARACTERS, MAX_KEYWORDS, MAX_RELATIONSHIPS, NameBook, auto_suggestions,
+    auto_suggestions_with, merge_suggestions,
 };
 pub use epub::{EpubError, build_epub};
 pub use html::{AO3_WHITELIST, ao3_fragment, chapter_html};
+pub use tag_cache::{
+    CacheSource, CachedTag, MAX_CACHED_TAGS, STARTER_LIST, TagCache, parse_tag_import, starter_tags,
+};
 pub use tags::{
     AO3_RATINGS, AO3_WARNINGS, SUGGESTION_LIMIT, Tag, TagCategory, TagMatch, TagSuggestion,
-    suggest_for_chapter, suggest_tags, tags_to_text, terms,
+    suggest_tags, suggest_tags_with, tags_to_text, terms,
 };
 pub use text::{chapter_text, document_text};
 

@@ -73,7 +73,10 @@ pub(crate) fn build(
     let furniture_edits = crate::headers::plan(document, &mut extras, origin);
     furniture_edits.clone().apply(&mut staged);
     let watermark_edits = crate::watermark::plan(document, &mut extras, Some(&staged));
-    let header_edits = furniture_edits.then(watermark_edits);
+    let mut header_edits = furniture_edits.then(watermark_edits);
+    if document.sections.iter().any(|s| s.page_colour.is_some()) {
+        header_edits.require_display_background();
+    }
     let (document_part, media) =
         document_xml(document, &extras, &note_ids, &table_styles, toc_pages);
     let mut styles_part = styles_xml(&document.styles, &table_styles);
@@ -657,8 +660,14 @@ fn document_xml(
     let mut out = String::with_capacity(document.body().len() * 160);
     out.push_str(XML_DECL);
     out.push_str(&format!(
-        "<w:document xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\" xmlns:wp=\"{WP_NS}\"><w:body>"
+        "<w:document xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\" xmlns:wp=\"{WP_NS}\">"
     ));
+    // The page colour comes before the body; `settings.xml` must also turn on
+    // `w:displayBackgroundShape` or Word does not show it.
+    if let Some(colour) = document.sections.first().and_then(|s| s.page_colour) {
+        out.push_str(&format!("<w:background w:color=\"{}\"/>", fill_hex(colour)));
+    }
+    out.push_str("<w:body>");
     let mut paragraph_index = 0usize;
     for (body_index, block) in document.body().iter().enumerate() {
         match block {

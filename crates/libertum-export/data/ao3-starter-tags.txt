@@ -1,0 +1,388 @@
+# AO3 starter additional tags (freeform tags)
+#
+# Format: one entry per line, "Tag Name | cue, cue, cue".
+#   - Lines starting with '#' are comments; blank lines are ignored.
+#   - Cues are lowercase single words that a chapter using the trope would plausibly contain.
+#   - An entry with nothing after the '|' has no text cues; it is only ever suggested
+#     from the user's learned history, never from chapter text.
+#
+# This is a hand-written starter list of commonly used AO3 additional tags, written
+# from general knowledge (not copied from AO3 or any dataset). It is to be reviewed by
+# hand. Spellings follow AO3's usual canonical forms as best known. Archive warnings
+# and ratings are deliberately excluded.
+
+# Tone
+Fluff | fluffy, cuddled, giggled, cosy, snuggled, cuddling, sweetly, blushed
+Angst | anguish, sobbed, despair, shattered, hollow, agony, weeping, bleak
+Fluff and Angst | cuddled, sobbed, hollow, blushed, anguish, snuggled, tears, ached
+Humor | joked, laughed, snickered, ridiculous, absurd, chuckled, teasing, snorted
+Dark | sinister, bleak, grim, twisted, shadowed, cruel, ominous, morbid
+Crack |
+Crack Treated Seriously |
+Light-Hearted | cheerful, giggling, playful, merry, grinned, cheery, jovial
+Bittersweet | farewell, tearful, wistful, bittersweet, parting, nostalgic, remembered, smiled
+Happy Ending | forever, together, finally, wedding, happily, reunited, content, home
+Sad Ending | goodbye, funeral, alone, lost, empty, mourned, grave
+Ambiguous Ending | unclear, uncertain, unresolved, wondered, maybe, unanswered
+Emotional | tearful, trembling, overwhelmed, choked, sobbing, vulnerable
+Sweet | sweetly, tender, adorable, affectionate, endearing
+Wholesome | wholesome, sweet, kindness, warmth, cheerful
+Sarcasm | sarcastic, sarcasm, snarked, dryly, retorted, snark
+Melancholy | melancholy, wistful, gloomy, mournful, pensive, forlorn
+Hopeful | hopeful, hope, optimism, brighter, promise, dawn
+Redemption | redeem, redemption, atone, forgiveness, penance, absolution
+Gen | friendship, companions, partners, teammates, adventure
+
+# Romance tropes
+Slow Burn | slowly, lingering, tension, glance, almost, yearning, patience, gradually
+Enemies to Lovers | enemy, rival, hatred, loathed, nemesis, grudging, adversary
+Friends to Lovers | friendship, bestfriend, realised, confided, closest, oblivious
+Pining | pining, longed, yearned, ached, unrequited, wistfully, stared
+Mutual Pining | pining, longed, yearned, oblivious, unspoken, wistfully
+Unrequited Love | unrequited, hopeless, pining, longed, yearned, rejected
+Idiots in Love | oblivious, blushing, stammered, clueless, flustered, fumbled
+Oblivious | oblivious, clueless, unaware, obtuse, failed, noticed
+Falling in Love | fell, falling, realised, heart, fluttered, smitten
+First Kiss | kissed, lips, leaned, breathless, nervous, hesitated, tentative
+Hand Holding | fingers, intertwined, laced, clasped, squeezed, interlocked, palm
+Kissing | kissed, kiss, lips, mouth, breathless, pressed, leaned
+Cuddling | cuddled, snuggled, curled, nestled, warmth, blankets, tucked
+Forced Proximity | stuck, trapped, snowed, cramped, together, stranded, shared
+Only One Bed | bed, mattress, couch, floor, blanket, stranded, shared
+Fake/Pretend Relationship | pretend, fake, charade, pretending, convincing, performance, boyfriend, girlfriend
+Marriage of Convenience | arranged, ceremony, contract, vows, wedding, bride, groom, ring
+Arranged Marriage | arranged, betrothed, dowry, ceremony, bride, groom, vows, betrothal
+Weddings | wedding, vows, bride, groom, ceremony, bouquet, reception, altar
+Marriage | married, spouse, husband, wife, vows, anniversary, wedding
+Pregnancy | pregnant, pregnancy, bump, ultrasound, trimester, nausea, cravings, expecting
+Soulmates | soulmate, soulmates, destined, mark, fate, bond, intertwined
+Love Triangles | triangle, torn, choose, jealous, rivals, affection, between
+Jealousy | jealous, envious, jealousy, glared, possessive, seething, bristled
+Protective | protective, shielded, guarded, defend, stood, sheltered, bodyguard
+Love/Hate | hated, loved, infuriating, loathed, passionate, torn, maddening
+Unresolved Romantic Tension | tension, almost, lingered, charged, inches, breathless, unspoken
+Dancing | danced, dance, waltz, ballroom, swayed, music, partner
+Love Letters | letter, letters, envelope, handwriting, sealed, wrote, dearest
+Reunion | reunited, reunion, returned, years, embrace, finally, tearful
+Second Chances | chance, forgiven, second, return, apologised, tried
+Breakups | breakup, broke, leaving, apart, tearful, packed, ended
+Divorce | divorce, divorced, lawyer, papers, separation, custody, signed
+Domestic Fluff | kitchen, laundry, dishes, breakfast, cooking, groceries, apron
+Moving In Together | boxes, moving, apartment, unpacking, keys, furniture, lease
+Roommates | roommate, roommates, flatmate, apartment, rent, shared, dorm
+Coworkers | coworker, colleague, office, desk, boss, meeting, cubicle
+Office Romance | office, desk, boss, coworker, cubicle, meeting, promotion
+Childhood Friends | childhood, kids, growing, playground, neighbour, remembered, school
+Established Relationship | anniversary, years, comfortable, routine, partner, together, familiar
+Long-Distance Relationship | distance, airport, flight, video, timezone, miles, calls, apart
+Meet-Cute | collided, spilled, bumped, tripped, introduced, stranger, accidentally
+Mistaken Identity | mistook, mistaken, identity, thought, disguised, impersonating, confused
+Misunderstandings | misunderstood, misunderstanding, assumed, mistaken, confused, wrongly
+Miscommunication | misunderstood, assumed, unspoken, mistaken, wrongly, confused
+Forbidden Love | forbidden, secret, scandal, taboo, hidden, clandestine, disapproved
+
+# Relationship dynamics
+Banter | bantered, banter, quipped, teased, sparring, retorted, witty
+Bickering | bickered, bickering, argued, squabbled, snapped, nagging, quarrelled
+Teasing | teased, teasing, smirked, ribbed, mocked, grinned, taunted
+Flirting | flirted, flirting, winked, smirked, charming, coy, suggestive
+Awkward Flirting | stammered, flustered, fumbled, flirt, awkward, blushing
+Bromance | buddy, mate, pal, bromance, brothers, buddies, bro
+Best Friends | bestfriend, bestfriends, sleepover, inseparable, confided, childhood
+Friendship | friends, friendship, laughed, loyal, trusted, companions, bond
+Platonic Relationships | friends, platonic, friendship, bond, loyal, trusted
+Mentor/Protégé | mentor, apprentice, protege, teach, lessons, training, master
+Rivalry | rival, rivals, rivalry, competition, outdo, opponent, contest
+Trust | trust, trusted, faith, relied, confided, betrayed
+Trust Issues | trust, betrayed, guarded, suspicious, wary, hesitated, flinched
+Loyalty | loyal, loyalty, faithful, sworn, devoted, allegiance, steadfast
+Betrayal | betrayed, betrayal, traitor, backstabbed, deceived, treachery, lied
+Forgiveness | forgave, forgive, forgiven, apologised, atone, mercy
+Emotional Constipation | bottled, suppressed, refused, shrugged, avoided, deflected, stoic
+Emotionally Repressed | bottled, suppressed, stoic, buried, deflected, refused
+Vulnerability | vulnerable, vulnerability, exposed, trembling, confided, opened
+Comfort | comfort, comforted, soothed, reassured, held, murmured, consoled
+Caretaking | tended, fussed, cared, nursed, cooked, looked, fetched, blanket
+Touch-Starved | starved, touch, flinched, cling, craved, lingered, embrace
+Hugs | hugged, hug, embrace, arms, squeezed, wrapped, clung
+Forehead Kisses | forehead, kissed, brushed, pressed, tender, lips
+Pet Names | darling, sweetheart, love, honey, sweetie, babe, dear
+Secret Relationship | secret, hidden, sneaking, discreet, hiding, clandestine
+Closeted Character | closet, secret, hiding, afraid, hidden, ashamed, pretended
+Coming Out | closet, came, confessed, afraid, accepted, announced, nervous
+Self-Discovery | realised, discovered, identity, questioning, journey, understanding
+Acceptance | accepted, acceptance, embraced, welcomed, belonged, understood
+Self-Sacrifice | sacrificed, sacrifice, selfless, stepped, shielded, gave
+Age Difference | older, younger, decades, age, gap, generation
+Opposites Attract | opposite, opposites, different, contrast, clash, mismatched
+Grumpy/Sunshine | grumpy, sunshine, scowled, cheerful, brightness, grouchy, cheery
+Found Family | family, found, chosen, adopted, home, together, belonging, ours
+
+# Hurt and comfort
+Hurt/Comfort | bandage, wound, fever, injured, bleeding, stitches, tended, comfort
+Whump | tortured, captured, beaten, bruised, bound, interrogated, collapsed
+Injury | injured, wound, injury, bleeding, bruise, limp, gash, sprained
+Blood | blood, bleeding, bloody, stained, crimson, dripping, soaked
+Bleeding | bleeding, blood, bandage, pressure, gauze, soaked, stitches
+Sickfic | sick, fever, cough, sniffling, nauseous, shivering, thermometer, tissues
+Fever | fever, feverish, burning, sweating, thermometer, delirious, flushed
+Chronic Illness | chronic, flare, medication, pain, diagnosis, exhausted, fatigue
+Chronic Pain | chronic, pain, aching, medication, flare, stiff, throbbing
+Disability | wheelchair, cane, disability, disabled, accessible, crutches, prosthetic
+Mental Health Issues | therapy, anxious, depressed, panic, medication, therapist, spiral
+Depression | depressed, hollow, numb, bed, exhausted, worthless, empty
+Anxiety | anxious, anxiety, panic, trembling, racing, worry, spiralling
+Panic Attacks | panic, breathe, hyperventilating, chest, trembling, gasping, spiralling
+Nightmares | nightmare, nightmares, screamed, woke, thrashing, sweating, gasping
+Insomnia | insomnia, awake, sleepless, restless, exhausted, ceiling, tossing
+Exhaustion | exhausted, exhaustion, weary, drained, collapsed, yawned, spent
+Trauma | trauma, traumatic, flashback, scars, survivor, haunted, nightmare
+Trauma Recovery | healing, therapy, recovery, survivor, progress, gradually, flashbacks
+Flashbacks | flashback, flashbacks, memory, memories, vivid, remembered, relived
+PTSD | ptsd, flashback, triggered, nightmares, startled, hypervigilant, veteran
+Healing | healing, healed, recovery, mended, scars, gradually, therapy
+Scars | scar, scars, scarred, puckered, healed, faded, trace
+Therapy | therapist, therapy, session, counselling, counsellor, couch, appointment
+Emotional Abuse | belittled, manipulated, controlling, gaslighting, insulted, cruel, isolated
+Physical Abuse | bruises, beaten, struck, fear, hiding, flinched, violence
+Self-Harm | cuts, razor, scars, bleeding, sleeves, hiding, blade
+Suicidal Thoughts | suicide, suicidal, ledge, pills, worthless, ending, hopeless
+Suicide | suicide, ledge, pills, note, ending, overdose, bridge
+Eating Disorders | eating, calories, starving, purging, skipped, mirror, scale
+Alcoholism | alcoholic, drunk, bottle, whiskey, hangover, sober, relapse
+Drunkenness | drunk, tipsy, slurred, stumbled, hangover, wasted, giggling
+Hangover | hangover, headache, nauseous, groaned, aspirin, queasy, dehydrated
+Addiction | addiction, addicted, craving, relapse, withdrawal, rehab, sober
+Recovery from Addiction | sober, rehab, relapse, meeting, craving, clean, sponsor
+Hospitals | hospital, ward, nurse, doctor, gurney, monitor, corridor, waiting
+Surgery | surgery, surgeon, anaesthesia, scalpel, operating, recovery, stitches
+Doctors | doctor, physician, stethoscope, patient, diagnosis, clinic, prescription
+Nurses | nurse, ward, shift, patient, chart, hospital, scrubs
+Coma | coma, comatose, bedside, ventilator, monitor, unconscious, machines
+Fainting | fainted, collapsed, dizzy, swayed, blackout, limp, caught
+Torture | tortured, interrogation, screamed, bound, whipped, chains, pliers
+Kidnapping | kidnapped, abducted, ransom, captor, bound, blindfold, hostage
+Prison | prison, cell, inmate, guards, warden, bars, sentence
+Rescue | rescued, rescue, saved, carried, dragged, pulled, rope
+Hallucinations | hallucinated, hallucinating, visions, delirious, imagined, voices
+Crying | crying, tears, sobbed, wept, sniffled, tearful, weeping
+Falling Asleep | asleep, drifted, dozed, yawned, nodded, eyelids, snoring
+Hair Braiding | braid, braided, plaited, ribbons, hair, strands
+
+# Grief and death
+Grief/Mourning | grief, mourning, mourned, funeral, grave, condolences, wept, widow
+Death | died, dead, death, corpse, dying, deceased, mourning
+Character Death |
+Fix-It | alive, saved, rewritten, undone, survived, changed
+Murder | murder, murdered, killed, killer, corpse, knife, victim
+Assassination | assassin, assassination, target, poison, dagger, contract, silent
+Violence | violence, punched, struck, brawl, beaten, fists, blood
+Fighting | fought, fight, punched, brawl, blows, swung, struck
+Battle | battle, battlefield, army, charge, soldiers, warriors, clash
+War | war, soldiers, battlefield, trench, army, siege, enemy
+Aftermath | aftermath, ruins, rubble, survivors, wake, debris
+Guilt | guilt, guilty, blamed, remorse, ashamed, regret, burden
+Regret | regret, regretted, wished, remorse, should, rued
+Revenge | revenge, vengeance, avenge, retribution, vowed, payback
+Ghosts | ghost, ghosts, haunted, spectral, apparition, phantom, spirit
+Afterlife | afterlife, heaven, soul, spirit, beyond, reaper, underworld
+
+# Family
+Family | family, mother, father, siblings, relatives, dinner, household
+Siblings | sibling, siblings, sister, brother, twin, younger, older
+Sibling Rivalry | sibling, sister, brother, bickered, rival, competition
+Twins | twin, twins, identical, matching, mirrored
+Parent-Child Relationships | mother, father, daughter, son, parent, child, parenting
+Parenthood | parent, nappy, diaper, bottle, bedtime, toddler, parenting
+Dysfunctional Family | shouting, argued, neglect, cold, resentment, estranged
+Abusive Parents | beaten, cruel, afraid, shouted, belt, locked, neglect
+Neglect | neglected, ignored, alone, hungry, unwanted, forgotten
+Adoption | adopted, adoption, orphanage, paperwork, social, foster, adoptive
+Foster Care | foster, social, placement, caseworker, adoption, group
+Babysitting | babysitter, toddler, bedtime, nappy, diaper, babysat, bottle
+Teenagers | teenager, teenage, curfew, homework, prom, locker, grounded
+Teenage Dumbassery | prank, teenage, dare, detention, reckless, locker
+Coming of Age | growing, adulthood, graduation, teenager, maturity, adolescence
+Growing Up | growing, grew, childhood, teenager, adulthood, outgrown
+Grandparents | grandmother, grandfather, grandma, grandpa, nana, granddad
+Dogs | dog, puppy, barked, leash, fetch, tail, paws, walkies
+Cats | cat, kitten, purred, whiskers, meowed, litter, paws
+Animals | animal, animals, fur, paws, feathers, creature, wildlife
+
+# Setting / AU
+Alternate Universe - Modern Setting | apartment, phone, laptop, subway, coffee, internet, office
+Alternate Universe - Coffee Shops & Cafés | barista, latte, espresso, café, cafe, counter, mug
+Alternate Universe - College/University | dorm, campus, lecture, professor, semester, roommate, library
+Alternate Universe - High School | locker, homeroom, prom, detention, classmates, cafeteria, principal
+Alternate Universe - Fantasy | magic, sword, realm, sorcerer, quest, elves
+Alternate Universe - Medieval | castle, knight, peasants, feast, squire, moat
+Alternate Universe - Soulmates | soulmate, mark, destined, fate, bond, colours
+Alternate Universe - Royalty | prince, princess, crown, palace, throne, coronation, courtiers
+Alternate Universe - Historical | carriage, corset, cravat, gaslight, petticoat, parlour, gentleman
+Alternate Universe - Regency | ballroom, carriage, cravat, bonnet, chaperone, gentleman, estate
+Alternate Universe - Pirates | ship, pirate, captain, deck, treasure, cutlass, sails
+Alternate Universe - Superheroes | hero, villain, cape, powers, mask, superhero, vigilante
+Alternate Universe - Vampires | vampire, fangs, blood, immortal, coffin, bite, nocturnal
+Alternate Universe - Werewolves | werewolf, wolf, pack, howl, moon, shifted, alpha
+Alternate Universe - Magic | magic, spell, wand, enchanted, wizard, sorcery, charm
+Alternate Universe - Post-Apocalypse | apocalypse, ruins, scavenged, survivors, wasteland, ration, fallout
+Alternate Universe - Space | spaceship, starship, galaxy, orbit, planet, airlock, cosmos
+Alternate Universe - Western | saloon, cowboy, sheriff, revolver, frontier, ranch, outlaw
+Alternate Universe - Mafia | mafia, boss, gang, syndicate, mob, godfather, don
+Alternate Universe - Office | office, desk, boss, meeting, cubicle, deadline, coworker
+Alternate Universe - Hospital | hospital, doctor, nurse, ward, surgeon, patient, intern
+Alternate Universe - Police | detective, precinct, badge, squad, patrol, suspect, officer
+Alternate Universe - Bookstore | bookstore, shelves, bookshop, novels, paperback, cashier, browsing
+Alternate Universe - Bar | bartender, bar, tab, stool, whiskey, pint, tavern
+Alternate Universe - Time Travel | timeline, paradox, travelled, past, future, century
+Alternate Universe - Road Trip | road, highway, car, motel, gas, map, radio
+Alternate Universe - Band | band, guitar, drummer, concert, tour, stage, lyrics
+Alternate Universe - Sports | stadium, coach, match, locker, team, trophy, training
+Canon Divergence |
+Canon Compliant |
+Canon-Typical Violence | violence, blood, blade, bruised, struck, wounded
+Post-Canon |
+Alternate Timeline | timeline, alternate, diverged, parallel, version
+Time Travel | timeline, paradox, travelled, future, past, century, machine
+Time Loop | loop, repeated, reset, groundhog, morning, resets
+Multiverse | multiverse, dimension, counterpart, portal, parallel, alternate
+Reincarnation | reincarnated, rebirth, past, lifetime, remembered, previous
+Historical | carriage, candlelight, horseback, cobblestones, petticoat, parlour
+Fantasy | magic, sword, realm, sorcerer, quest, elves
+Space | spaceship, orbit, galaxy, airlock, stars, cosmos, starship
+Post-Apocalypse | wasteland, ruins, scavenged, survivors, ration, collapse
+Dystopia | regime, surveillance, rebellion, oppressive, resistance, curfew
+Zombies | zombie, zombies, undead, horde, infected, groaning, barricade
+Vampires | vampire, fangs, blood, immortal, coffin, bite
+Werewolves | werewolf, wolf, pack, howl, moon, shifted, alpha
+Witches | witch, coven, spell, cauldron, broomstick, hex, potion
+Mermaids | mermaid, tail, ocean, scales, siren, tide
+Fae | fae, fairy, glamour, court, enchanted, bargain, iron
+Demons | demon, demons, hellfire, summoned, infernal, horns
+Angels | angel, angels, wings, halo, heavenly, divine
+Gods | god, gods, divine, worship, temple, mortal, oracle
+Magic | magic, spell, enchanted, wand, sorcery, charm, incantation
+Shapeshifting | shapeshifter, shifted, transformed, morphed, changed, shapeshifting
+Superpowers | powers, superhuman, ability, telekinesis, strength, flight
+Mutants | mutant, mutation, gene, powers, abilities, manifested
+Superheroes | hero, villain, cape, powers, mask, vigilante
+Artificial Intelligence | artificial, intelligence, algorithm, program, code, sentient
+Aliens | alien, aliens, extraterrestrial, planet, abduction, saucer, ufo
+Royalty | king, queen, prince, princess, crown, palace, throne
+Knights | knight, knights, armour, squire, lance, chivalry, sword
+Pirates | pirate, ship, captain, deck, treasure, cutlass, sails
+College | dorm, campus, lecture, professor, semester, roommate
+High School | locker, homeroom, prom, detention, classmates, cafeteria
+Camping | tent, campfire, marshmallows, hiking, lantern, trail
+Ocean | ocean, waves, tide, salt, seagulls, current, horizon
+Snow | snow, snowflakes, snowman, frost, blizzard, drifts, icy
+Winter | winter, snow, frost, coats, scarf, freezing, chilly
+Rain | rain, drizzle, downpour, umbrella, puddles, drenched, thunder
+Christmas | christmas, tree, ornaments, stockings, carols, presents, tinsel, mistletoe
+Halloween | halloween, costume, pumpkin, trick, candy, haunted, lantern
+New Year's Eve | midnight, countdown, fireworks, champagne, resolutions, confetti
+Birthday | birthday, cake, candles, balloons, presents, party, wish
+Parties | party, music, drinks, dancing, guests, host, balloons
+Festivals | festival, lanterns, stalls, crowds, fireworks, carnival
+Stargazing | stars, telescope, constellations, sky, galaxy, blanket
+Fireworks | fireworks, sparkled, bursts, explosions, sky, colours
+Libraries | library, shelves, librarian, books, stacks, quiet
+Bookstores | bookstore, shelves, bookshop, novels, paperback
+
+# Genre
+Mystery | mystery, clue, clues, suspect, detective, investigation, puzzle
+Crime | crime, criminal, police, heist, theft, suspect, evidence
+Heists | heist, vault, crew, plan, alarm, safe, getaway
+Espionage | spy, agent, covert, undercover, mission, handler
+Undercover | undercover, cover, disguise, informant, wire, identity
+Adventure | adventure, quest, journey, expedition, explore, treasure
+Quests | quest, journey, companions, artefact, prophecy, destination
+Action | explosion, chase, gunfire, fight, sprinted, ambush
+Horror | horror, terror, scream, shadows, creeping, gore, dread
+Thriller | tension, chase, pursuit, conspiracy, danger, ticking
+Suspense | tension, dread, silence, creaking, footsteps, waiting
+Political Intrigue | court, scheming, alliance, treaty, conspiracy, senate, betrayal
+Conspiracy | conspiracy, secret, cover, cabal, hidden, plot
+Drama | argued, shouted, tears, confrontation, slammed, scandal
+Comedy | joked, laughed, ridiculous, absurd, chuckled, slapstick
+Slice of Life | morning, routine, groceries, commute, coffee, errands, chores
+Character Study | thoughts, reflected, memories, wondered, introspective, pondered
+Mythology | gods, myth, legend, oracle, titans, divine
+Fairy Tales | fairy, enchanted, cottage, spell, forest, witch
+Satire | satire, mocked, absurd, ridiculous, irony, sarcastic
+Poetry | poem, verse, stanza, rhyme, poetry, lines
+Songfic | lyrics, song, melody, chorus, verse, hummed
+Epistolary | letter, letters, diary, journal, email, text, entry
+Text Messages | text, texting, messages, phone, typed, emoji, replied
+Video Games | game, controller, console, level, player, pixels
+Sports | team, coach, match, stadium, trophy, training
+Dance | dancer, ballet, choreography, stage, rehearsal, studio
+Music | music, melody, guitar, piano, song, concert
+Writing | writing, typed, manuscript, novel, notebook, author, deadline
+Cooking | cooking, recipe, stove, oven, chopped, simmering, spatula
+Flowers | flowers, petals, bouquet, roses, blossoms, vase
+
+# Content
+Gore | gore, entrails, mangled, viscera, torn, guts
+Swearing | swore, cursed, damn, bastard, profanity, shit
+Guns | gun, pistol, rifle, trigger, bullet, holster, barrel
+Explosions | explosion, blast, shrapnel, debris, detonated, boom
+Stalking | stalker, followed, watched, obsession, photographs, creeping
+Manipulation | manipulated, manipulate, gaslit, coerced, scheming, controlled
+Bullying | bullied, bully, taunted, mocked, locker, shoved
+Homophobia | slur, homophobic, bigot, disgusted, sinful
+Racism | racist, racism, slur, prejudice, discrimination
+Religion | prayer, church, faith, priest, temple, bible, god
+Poverty | poverty, poor, rent, hungry, coins, eviction, shabby
+Homelessness | homeless, shelter, street, cardboard, begging, bench
+Blushing | blushed, blushing, flushed, cheeks, crimson, reddened
+Cliffhangers | cliffhanger, suddenly, darkness, unknown, footsteps
+Language Barrier | translate, language, accent, foreign, interpreter, words
+Moral Ambiguity | moral, ambiguous, grey, dilemma, ethics, conscience
+Character Development | grew, learned, changed, matured, growth
+Secret Identity | secret, identity, mask, disguise, hidden, alter
+Secrets | secret, secrets, hidden, whispered, concealed, confided
+Trans Character | transition, pronouns, dysphoria, binder, deadname, hormones
+Asexuality | asexual, ace, attraction, aromantic, platonic
+Neurodiversity | neurodivergent, sensory, stimming, overwhelmed, routine
+Autistic Character | autistic, stimming, sensory, routine, overwhelmed, meltdown
+ADHD | adhd, distracted, hyperfocus, forgetful, restless, fidgeting
+
+# Story structure
+Alternate Perspectives | perspective, viewpoint, meanwhile, point, narrator
+First Person Point of View |
+Second Person Point of View |
+Unreliable Narrator | lied, misremembered, misleading, delusion, narrator
+Stream of Consciousness | thoughts, rambling, thought, spiralling, wandering
+Memory Loss | amnesia, forgot, remembered, blank, memory, forgotten
+Amnesia | amnesia, forgot, memory, blank, remembered, forgotten
+Dreams | dream, dreamed, dreaming, asleep, vivid, surreal, awoke
+Epilogue | years, later, epilogue, afterwards, eventually
+Backstory | backstory, past, childhood, history, origin
+Origin Story |
+World Building | customs, history, world, map, geography
+Not Beta Read |
+Unbeta'd |
+Author is Sleep Deprived |
+Fix It Fic |
+Bad Puns | pun, puns, groaned, wordplay, punned, dad
+Pranks | prank, pranks, prankster, tricked, gag
+Chaos | chaos, mayhem, pandemonium, disaster, uproar, messy
+Stubbornness | stubborn, refused, obstinate, insisted, mulish
+Survival | survive, survival, rations, shelter, wilderness, scavenged
+
+# Sexual content
+Smut | undressed, naked, bed, kissed, touched, bare
+Porn with Feelings | undressed, tender, bed, naked, kissed, touched
+First Time | nervous, virgin, inexperienced, tender, hesitant
+Oral Sex | mouth, lips, tongue, knees, kneeling
+Masturbation | alone, hand, stroked, shower, privately
+Bondage | rope, bound, restraints, handcuffs, tied, ties, blindfold
+BDSM | submit, collar, safeword, restraints, dominant, submissive, kneel
+Dom/sub | dominant, submissive, collar, kneel, obey, command
+Consent | consent, consented, permission, asked, agreed, yes
+Aftercare | aftercare, blanket, water, cuddled, soothed, tender, wiped
+Kinks | kink, fetish, desire, curious, secret
+Seduction | seduced, seduce, enticed, tempted, smouldered
+Alpha/Beta/Omega Dynamics | alpha, omega, beta, scent, pack, bond, heat
+Omegaverse | omega, alpha, heat, scent, knot, nesting, bond

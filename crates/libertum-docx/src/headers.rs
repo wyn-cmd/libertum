@@ -332,45 +332,81 @@ pub(crate) fn plan(
 
 /// Puts `<w:evenAndOddHeaders/>` into `settings.xml`, creating the part when there is none.
 pub(crate) fn turn_on_even_and_odd(package: &mut Package) {
+    // The element sits before these in the schema's order; the first one found marks the
+    // place, and the end of the part is the fallback.
+    turn_on_setting(package, "evenAndOddHeaders", &EVEN_AND_ODD_LATER);
+}
+
+/// Puts `<w:displayBackgroundShape/>` into `settings.xml` (Word shows a page colour only
+/// with it), creating the part when there is none.
+pub(crate) fn turn_on_display_background(package: &mut Package) {
+    const LATER: [&str; 22] = [
+        "<w:printPostScriptOverText",
+        "<w:printFractionalCharacterWidth",
+        "<w:printFormsData",
+        "<w:embedTrueTypeFonts",
+        "<w:embedSystemFonts",
+        "<w:saveSubsetFonts",
+        "<w:saveFormsData",
+        "<w:mirrorMargins",
+        "<w:alignBordersAndEdges",
+        "<w:gutterAtTop",
+        "<w:hideSpellingErrors",
+        "<w:hideGrammaticalErrors",
+        "<w:activeWritingStyle",
+        "<w:proofState",
+        "<w:attachedTemplate",
+        "<w:documentProtection",
+        "<w:defaultTabStop",
+        "<w:evenAndOddHeaders",
+        "<w:characterSpacingControl",
+        "<w:compat",
+        "<w:rsids",
+        "</w:settings>",
+    ];
+    turn_on_setting(package, "displayBackgroundShape", &LATER);
+}
+
+const EVEN_AND_ODD_LATER: [&str; 13] = [
+    "<w:bookFoldRevPrinting",
+    "<w:characterSpacingControl",
+    "<w:footnotePr",
+    "<w:endnotePr",
+    "<w:compat",
+    "<w:docVars",
+    "<w:rsids",
+    "<m:mathPr",
+    "<w:themeFontLang",
+    "<w:clrSchemeMapping",
+    "<w:decimalSymbol",
+    "<w:listSeparator",
+    "</w:settings>",
+];
+
+/// Puts the empty on/off element `<w:{element}/>` into `settings.xml`, before the first of
+/// `later` found (the schema's order), creating the part when there is none.
+fn turn_on_setting(package: &mut Package, element: &str, later: &[&str]) {
     const NAME: &str = "word/settings.xml";
     let name = package
         .related_part("settings", NAME)
         .unwrap_or_else(|| NAME.to_owned());
+    let tag = format!("<w:{element}/>");
     match package.text(&name) {
-        Some(text) if text.contains("evenAndOddHeaders") => {}
+        Some(text) if text.contains(&format!("<w:{element}")) => {}
         Some(text) => {
-            // The element sits before these in the schema's order; the first one found marks
-            // the place, and the end of the part is the fallback.
-            let later = [
-                "<w:bookFoldRevPrinting",
-                "<w:characterSpacingControl",
-                "<w:footnotePr",
-                "<w:endnotePr",
-                "<w:compat",
-                "<w:docVars",
-                "<w:rsids",
-                "<m:mathPr",
-                "<w:themeFontLang",
-                "<w:clrSchemeMapping",
-                "<w:decimalSymbol",
-                "<w:listSeparator",
-                "</w:settings>",
-            ];
             let at = later
                 .iter()
                 .filter_map(|marker| text.find(marker))
                 .min()
                 .unwrap_or(text.len());
             let mut edited = text;
-            edited.insert_str(at, "<w:evenAndOddHeaders/>");
+            edited.insert_str(at, &tag);
             package.set_text(&name, edited);
         }
         None => {
             package.set_text(
                 NAME,
-                format!(
-                    "{XML_DECL}<w:settings xmlns:w=\"{W_NS}\"><w:evenAndOddHeaders/></w:settings>"
-                ),
+                format!("{XML_DECL}<w:settings xmlns:w=\"{W_NS}\">{tag}</w:settings>"),
             );
             ensure_content_type(package, NAME, CT_SETTINGS);
             crate::write::ensure_relationship(package, "settings.xml", "settings");

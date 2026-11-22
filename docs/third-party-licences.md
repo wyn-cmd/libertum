@@ -59,6 +59,18 @@ The bundled dictionaries:
 
 Both licence files are kept beside the dictionaries and must be included in packaged notices.
 
+## HTML import and comparison (release 0.5.0, 2026-11-22)
+
+- **`html5ever` 0.40** (MIT OR Apache-2.0) parses HTML in `libertum-html`. Its 35-crate tree
+  was checked with `cargo metadata`: all MIT, Apache-2.0 or Unlicense-OR-MIT, plus
+  Unicode-3.0 on `unicode-ident` (already in the tree through `syn`). `markup5ever_rcdom` is
+  deliberately not used. Base64 is written in the crate, so no new dependency is added for it.
+- **`similar` 3.2.1** (Apache-2.0, no extra crates with default features) compares paragraphs
+  and words in `libertum-diff`; words are split with the existing `unicode-segmentation`.
+- **The AO3 starter tag list** (`crates/libertum-export/data/ao3-starter-tags.txt`) is
+  hand-written from general knowledge for this release, not copied from AO3 or a tag dataset.
+  It carries no third-party data and no notice; it still needs the writer's review.
+
 ## AO3 rating and warning names
 
 `libertum-export` (`AO3_RATINGS`, `AO3_WARNINGS`) carries the names of the ratings and archive warnings that AO3's posting form offers, so the writer picks them instead of typing them. They are short factual labels, not AO3 code or text, and no AO3 content is bundled beyond them. They were taken from AO3's own pages (the Terms of Service FAQ, the Tags FAQ and the Posting a Work tutorial) through a web search on 2026-11-21; the live form was not read because AO3 rate-limited the request. "Underage Sex" is the name a 2024 AO3 guide gives; the older Tags FAQ says "Underage". Re-check both lists against the live form when the rate limit allows.

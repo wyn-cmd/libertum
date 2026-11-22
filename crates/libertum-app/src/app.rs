@@ -14,6 +14,7 @@ use iced::{
 };
 use libertum_docx::Docx;
 use libertum_export::{SUGGESTION_LIMIT, Tag, TagCategory, TagSuggestion};
+use libertum_html::{Html, HtmlFlavour};
 use libertum_layout::PageGeometry;
 use libertum_markdown::Markdown;
 use libertum_model::{
@@ -51,10 +52,18 @@ use crate::update::CHECK_INTERVAL_SECS;
 use crate::widgets::controls::flat;
 use crate::widgets::segmented::{self, Content, Look};
 
+mod ao3_post;
 mod bench_run;
+mod compare;
 mod macro_run;
 mod runner;
+mod work_tags;
+pub use ao3_post::Ao3PostMsg;
+pub use compare::CompareMsg;
 pub use runner::RunnerMsg;
+
+/// The tag library's file in the data folder.
+const TAG_LIBRARY_FILE: &str = "tag-library.json";
 
 /// Unix seconds from the system clock, for date and time fields.
 fn now_seconds() -> i64 {
@@ -104,6 +113,11 @@ pub enum DocumentMsg {
     WatermarkApply,
     WatermarkDiagonal(bool),
     WatermarkRemove,
+    /// Sets the page colour (`None` is white paper).
+    PageColour(Option<[u8; 4]>),
+    /// Page colour hex being typed; applied with `PageColourHexApply`.
+    PageColourHex(String),
+    PageColourHexApply,
     PageSize(PageSize),
     Orientation(Orientation),
     Header(bool),
@@ -145,6 +159,10 @@ enum Format {
     Rtf,
     /// The native `.lbtd` format.
     Native,
+    /// HTML (`.html`, `.htm`): opens pageless.
+    Html,
+    /// EPUB: imported as a new, unsaved document (never written back).
+    Epub,
 }
 
 impl Format {
@@ -155,6 +173,8 @@ impl Format {
             Some(s::EXT_MARKDOWN) => Format::Markdown,
             Some(s::EXT_RTF) => Format::Rtf,
             Some(s::EXT_NATIVE) => Format::Native,
+            Some(s::EXT_HTML | "htm" | "xhtml") => Format::Html,
+            Some(s::EXT_EPUB) => Format::Epub,
             _ => Format::Docx,
         }
     }
@@ -176,6 +196,8 @@ impl Format {
             Format::Markdown => s::EXT_MARKDOWN,
             Format::Rtf => s::EXT_RTF,
             Format::Native => s::EXT_NATIVE,
+            Format::Html => s::EXT_HTML,
+            Format::Epub => s::EXT_EPUB,
         }
     }
 }
@@ -188,6 +210,7 @@ enum FileContext {
     Markdown(Markdown),
     Rtf(Rtf),
     Native(Native),
+    Html(Html),
 }
 
 impl FileContext {
@@ -224,7 +247,24 @@ impl FileContext {
                 let document = native.document().clone();
                 Ok((Self::Native(native), document, Vec::new()))
             }
+            Format::Html => {
+                let html = Html::open(path).map_err(|error| error.to_string())?;
+                let document = html.document().clone();
+                let warnings = html.warnings().to_vec();
+                Ok((Self::Html(html), document, warnings))
+            }
+            Format::Epub => {
+                let (document, warnings) =
+                    libertum_html::import_epub(path).map_err(|error| error.to_string())?;
+                Ok((Self::Html(Html::new(document.clone())), document, warnings))
+            }
         }
+    }
+
+    /// An AO3 download (HTML), which opens as a new document so the download is never
+    /// rewritten in Libertum's own HTML.
+    fn is_ao3(&self) -> bool {
+        matches!(self, Self::Html(html) if html.is_ao3())
     }
 
     fn format(&self) -> Format {
@@ -234,6 +274,7 @@ impl FileContext {
             Self::Markdown(_) => Format::Markdown,
             Self::Rtf(_) => Format::Rtf,
             Self::Native(_) => Format::Native,
+            Self::Html(_) => Format::Html,
         }
     }
 
@@ -244,6 +285,7 @@ impl FileContext {
             Self::Markdown(markdown) => markdown.set_document(document),
             Self::Rtf(rtf) => rtf.set_document(document),
             Self::Native(native) => *native.document_mut() = document,
+            Self::Html(html) => html.set_document(document),
         }
     }
 
@@ -253,7 +295,7 @@ impl FileContext {
         match self {
             Self::Docx(docx) => docx.set_toc_pages(pages),
             Self::Odt(odt) => odt.set_toc_pages(pages),
-            Self::Markdown(_) | Self::Rtf(_) | Self::Native(_) => {}
+            Self::Markdown(_) | Self::Rtf(_) | Self::Native(_) | Self::Html(_) => {}
         }
     }
 
@@ -320,6 +362,7 @@ impl FileContext {
             }
             Self::Rtf(rtf) => rtf.save(path).map_err(|error| error.to_string()),
             Self::Native(native) => native.save(path).map_err(|error| error.to_string()),
+            Self::Html(html) => html.save(path).map_err(|error| error.to_string()),
         }
     }
 
@@ -331,6 +374,7 @@ impl FileContext {
             Format::Markdown => Self::Markdown(Markdown::new(document)),
             Format::Rtf => Self::Rtf(Rtf::new(document)),
             Format::Native => Self::Native(Native::new(document)),
+            Format::Html | Format::Epub => Self::Html(Html::new(document)),
         }
     }
 }
@@ -346,6 +390,8 @@ pub enum ExportFormat {
     Rtf,
     Text,
     Markdown,
+    /// HTML with the text's structure only (no fonts, colours or layout).
+    PlainHtml,
 }
 
 impl ExportFormat {
@@ -356,6 +402,7 @@ impl ExportFormat {
             Self::Rtf => s::EXT_RTF,
             Self::Text => "txt",
             Self::Markdown => s::EXT_MARKDOWN,
+            Self::PlainHtml => s::EXT_HTML,
         }
     }
 
@@ -366,6 +413,7 @@ impl ExportFormat {
             Self::Rtf => s::FILE_FILTER_RTF,
             Self::Text => s::FILE_FILTER_TEXT,
             Self::Markdown => s::FILE_FILTER_MARKDOWN,
+            Self::PlainHtml => s::FILE_FILTER_PLAIN_HTML,
         }
     }
 
@@ -431,7 +479,12 @@ enum Modal {
     /// Overwrite saves anyway, Save a Copy asks for another name.
     ChangedOnDisk { path: PathBuf },
     /// Saving `path` as Markdown would drop the listed formatting; Save writes it anyway.
-    MarkdownLoss { path: PathBuf, losses: Vec<String> },
+    MarkdownLoss {
+        path: PathBuf,
+        losses: Vec<String>,
+        /// The prompt's title (Markdown or HTML).
+        title: &'static str,
+    },
     /// A snapshot from the last session is waiting: restore or discard it.
     Recovery,
     /// Documents are being picked and ordered for stitching.
@@ -531,6 +584,10 @@ pub enum Message {
     OpenLibrary,
     ChooseLibraryFolder,
     CloseLibrary,
+    /// Compare mode (View > Compare with Posted) and its bar.
+    Compare(compare::CompareMsg),
+    /// The chapter window's Mark as Posted.
+    Ao3Post(ao3_post::Ao3PostMsg),
     /// Version history of a library document, or of the open document when `None`.
     OpenHistory(Option<PathBuf>),
     HistoryBack,
@@ -701,6 +758,11 @@ pub enum Message {
     Ime(input_method::Event),
     /// Result of an asynchronous clipboard read.
     PasteText(Option<String>),
+    /// Insert > Chapter from File: pick a file and insert its text after the caret.
+    ImportChapterFile,
+    /// Insert > Chapter from Copied HTML: read the clipboard as HTML.
+    ImportChapterClipboard,
+    ImportChapterPasted(Option<String>),
     SystemTheme(theme::Mode),
     Canvas(CanvasEvent),
     Doc(DocEvent),
@@ -717,6 +779,8 @@ pub enum Message {
     /// A spelling check finished. Results from an older generation are ignored.
     /// The two-second spell-check timer fired.
     SpellTick,
+    /// Test hook `LIBERTUM_TYPE`: types the next character.
+    TypeHookTick,
     SpellChecked {
         generation: u64,
         result: Result<Vec<spell::Span>, String>,
@@ -758,6 +822,15 @@ pub enum Message {
     ToggleSuggestedTag(usize),
     /// Copy the ticked tags, comma separated, for AO3's tag field.
     CopySuggestedTags,
+    /// The tag library: use the starter list, import a file, forget learned tags.
+    SetStarterTags(bool),
+    ImportTagFile,
+    TagFileImported(Result<Vec<libertum_export::Tag>, String>),
+    ForgetLearnedTags,
+    /// The – button: hide an unrelated suggestion for this work.
+    DismissSuggestedTag(usize),
+    /// Show the tags hidden for this work (copied or removed) again.
+    ShowHiddenTags,
     /// Turn the suggestions drawn from the chapter's own text on or off.
     SetAutoTags(bool),
     /// Open the local AO3 tag vocabulary window.
@@ -880,17 +953,73 @@ fn blink_ticks() -> UnboundedReceiver<Instant> {
     rx
 }
 
-/// How often spelling is rechecked.
-const SPELL_INTERVAL: Duration = Duration::from_secs(2);
+/// The `LIBERTUM_TYPE` hook's typing speed: about eight characters a second.
+fn type_ticks() -> UnboundedReceiver<()> {
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    let _ = std::thread::Builder::new()
+        .name("libertum-type-hook".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(120));
+                if tx.unbounded_send(()).is_err() {
+                    return;
+                }
+            }
+        });
+    rx
+}
 
-/// One tick every [`SPELL_INTERVAL`] on a small thread, for the spell-check timer.
+/// How often spelling is rechecked when nothing asks sooner (a fallback: scrolling, layout).
+const SPELL_INTERVAL: Duration = Duration::from_secs(2);
+/// How long after the last keystroke spelling is checked: a short pause in typing.
+const SPELL_QUIET: Duration = Duration::from_millis(450);
+/// How often the spell timer thread looks at the clock. It wakes the app only when a check
+/// is due, so this costs nothing on the UI thread.
+const SPELL_POLL: Duration = Duration::from_millis(100);
+
+/// The last edit, in milliseconds since [`spell_clock`] started (0 = no edit waiting).
+static SPELL_EDITED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spell_clock() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
+/// Records an edit, so spelling is checked once typing pauses for [`SPELL_QUIET`].
+fn note_spell_edit() {
+    let now = spell_clock().elapsed().as_millis() as u64;
+    SPELL_EDITED_AT.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ticks for the spell check on a small thread: one [`SPELL_QUIET`] after the last edit, and
+/// one every [`SPELL_INTERVAL`] otherwise.
 fn spell_ticks() -> UnboundedReceiver<()> {
     let (tx, rx) = iced::futures::channel::mpsc::unbounded();
     let spawned = std::thread::Builder::new()
         .name("libertum-spell".into())
         .spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut last_tick = Instant::now();
             loop {
-                std::thread::sleep(SPELL_INTERVAL);
+                std::thread::sleep(SPELL_POLL);
+                let now = spell_clock().elapsed().as_millis() as u64;
+                let edited = SPELL_EDITED_AT.load(Ordering::Relaxed);
+                let quiet =
+                    edited != 0 && now.saturating_sub(edited) >= SPELL_QUIET.as_millis() as u64;
+                let due = last_tick.elapsed() >= SPELL_INTERVAL;
+                if !quiet && !due {
+                    continue;
+                }
+                if quiet {
+                    // Only clear the edit that was seen: a keystroke in between keeps waiting.
+                    let _ = SPELL_EDITED_AT.compare_exchange(
+                        edited,
+                        0,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
+                last_tick = Instant::now();
                 if tx.unbounded_send(()).is_err() {
                     return;
                 }
@@ -952,6 +1081,25 @@ pub struct App {
     user_templates: Vec<UserTemplate>,
     /// Misspellings in the paragraphs last checked.
     spell_errors: Vec<spell::Span>,
+    /// Test hook `LIBERTUM_TYPE=<text>`: characters still to type, one per tick, through the
+    /// same path as a real key press (for reproducing typing problems with a screenshot).
+    type_hook: std::collections::VecDeque<char>,
+    /// When the hook starts typing (`LIBERTUM_TYPE_AFTER=<seconds>` after start-up).
+    type_hook_from: Instant,
+    /// Compare mode, while it is on (the document view is then read-only).
+    compare: Option<compare::CompareMode>,
+    /// The writer's tag library: learned and imported tags (`tag-library.json` in the data
+    /// folder; in memory only when settings are not persisted).
+    tag_cache: libertum_export::TagCache,
+    tag_cache_path: Option<PathBuf>,
+    /// What the tag library last did (an import's result), shown in the vocabulary window.
+    tag_cache_notice: Option<String>,
+    /// Tags this work no longer needs suggested (copied, or removed as unrelated), and which
+    /// document (view id, file) they belong to.
+    work_tags: work_tags::WorkTags,
+    work_tags_for: (Option<u64>, Option<PathBuf>),
+    /// What the chapter window's Mark as Posted last did.
+    ao3_post_notice: Option<String>,
     /// Bumped whenever `spell_errors` changes, so the underline rectangles are recomputed.
     spell_errors_epoch: u64,
     /// Cached underline rectangles, keyed by the spell epoch and page generation.
@@ -1150,6 +1298,23 @@ impl App {
             templates_dir,
             user_templates,
             spell_errors: Vec::new(),
+            compare: None,
+            type_hook_from: Instant::now()
+                + Duration::from_secs(
+                    std::env::var("LIBERTUM_TYPE_AFTER")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                ),
+            type_hook: std::env::var("LIBERTUM_TYPE")
+                .map(|text| text.replace("\\n", "\n").chars().collect())
+                .unwrap_or_default(),
+            ao3_post_notice: None,
+            tag_cache: libertum_export::TagCache::default(),
+            tag_cache_path: None,
+            tag_cache_notice: None,
+            work_tags: work_tags::WorkTags::default(),
+            work_tags_for: (None, None),
             spell_errors_epoch: 0,
             spell_rect_cache: std::sync::Mutex::new(None),
             spell_generation: 0,
@@ -1219,6 +1384,21 @@ impl App {
             fps: crate::fps::FrameCounter::default(),
             context_menu: None,
         };
+        // The dictionary loads in the background now, not on the first check.
+        if app.settings.spellcheck {
+            spell::warm(app.settings.spellcheck_language);
+        }
+        // The tag library lives beside the other data, and only when settings persist (tests
+        // keep it in memory).
+        if app.settings_path.is_some() {
+            app.tag_cache_path = recovery::data_dir().map(|dir| dir.join(TAG_LIBRARY_FILE));
+            if let Some(path) = &app.tag_cache_path {
+                app.tag_cache = std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                    .unwrap_or_default();
+            }
+        }
         app.refresh_document();
         app.headings = app.headings();
         app.notes = app.notes();
@@ -1411,6 +1591,7 @@ impl App {
                         Format::Markdown => DocView::open_markdown(document),
                         // RTF has no reliable page model of its own, so it reads pageless.
                         Format::Rtf => DocView::open_pageless(document),
+                        Format::Html | Format::Epub => DocView::open_pageless(document),
                         // A native document remembers whether it was read pageless.
                         Format::Native if view.as_ref().is_some_and(|view| view.pageless) => {
                             DocView::open_pageless(document)
@@ -1495,6 +1676,19 @@ impl App {
     /// The start-up screenshot hooks, shared by every way `boot` can finish so they also work
     /// over a document opened with `LIBERTUM_OPEN`.
     fn apply_start_hooks(&mut self, tasks: &mut Vec<Task<Message>>) {
+        // `LIBERTUM_COMPARE=1` starts in Compare with Posted, and `=next` also steps to the
+        // first change, so a screenshot can show the compare bar and its marks.
+        if let Ok(value) = std::env::var("LIBERTUM_COMPARE")
+            && !value.is_empty()
+            && value != "0"
+            && self.doc.is_some()
+        {
+            tasks.push(self.update(Message::Compare(compare::CompareMsg::Toggle)));
+            if value == "next" {
+                self.compare_now();
+                tasks.push(self.update(Message::Compare(compare::CompareMsg::Next)));
+            }
+        }
         // `LIBERTUM_TAG_SEED=1` fills an empty vocabulary with example tags, in memory only
         // (nothing is written to the settings file), so a screenshot can show the feature.
         if std::env::var("LIBERTUM_TAG_SEED").is_ok_and(|v| v != "0" && !v.is_empty())
@@ -2606,6 +2800,8 @@ impl App {
 
     fn finish_edit(&mut self, result: Result<(), libertum_editor::EditorError>) -> Task<Message> {
         match result {
+            // Compare mode is read-only: a blocked edit changed nothing.
+            Ok(()) if self.doc.as_ref().is_some_and(|doc| doc.read_only) => {}
             Ok(()) => {
                 self.dirty = true;
                 self.after_edit();
@@ -2619,6 +2815,20 @@ impl App {
         let Some(doc) = &self.doc else {
             return;
         };
+        // Check spelling as soon as typing pauses, and meanwhile drop underlines whose word
+        // is no longer at their place: an edit moved or changed it.
+        note_spell_edit();
+        let document = doc.document();
+        let before = self.spell_errors.len();
+        self.spell_errors.retain(|error| {
+            document
+                .paragraph(error.block)
+                .and_then(|p| p.text().get(error.start..error.end))
+                .is_some_and(|word| word == error.word)
+        });
+        if self.spell_errors.len() != before {
+            self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
+        }
         self.state.word_count = doc.word_count();
         self.state.page_count = doc.page_total();
         self.ime_preedit = None;
@@ -2726,6 +2936,10 @@ impl App {
     /// must clear them. They are ignored when the window is too short to honour them.
     fn canvas_insets(&self) -> (f32, f32) {
         let top = if self.state.find.open {
+            FIND_BAR_COVER
+        } else {
+            0.0
+        } + if self.compare_on() {
             FIND_BAR_COVER
         } else {
             0.0
@@ -2909,7 +3123,7 @@ impl App {
         if self.spell_signature == Some(signature) {
             return Task::none();
         }
-        let targets = doc.visible_paragraphs(pages);
+        let targets = doc.visible_paragraphs(pages.clone());
         if targets.is_empty() {
             self.spell_generation = self.spell_generation.wrapping_add(1);
             self.spell_signature = None;
@@ -2919,10 +3133,34 @@ impl App {
         self.spell_signature = Some(signature);
         self.spell_generation = self.spell_generation.wrapping_add(1);
         let generation = self.spell_generation;
+        tracing::debug!(
+            generation,
+            paragraphs = targets.len(),
+            pages = ?pages,
+            "spell check started"
+        );
         let personal = self.spell_personal.clone();
         let ignored = self.spell_ignored_document.clone();
+        // Its own short-lived thread, not the shared task pool: a long autosave or export on
+        // the pool must not hold the underlines back.
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("libertum-spell-check".into())
+            .spawn(move || {
+                let _ = tx.send(spell::check_paragraphs(
+                    &targets, language, &personal, &ignored,
+                ));
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start the spell check");
+            self.spell_signature = None;
+            return Task::none();
+        }
         Task::perform(
-            async move { spell::check_paragraphs(&targets, language, &personal, &ignored) },
+            async move {
+                rx.await
+                    .unwrap_or_else(|_| Err("the spell check stopped".to_owned()))
+            },
             move |result| Message::SpellChecked { generation, result },
         )
     }
@@ -3074,6 +3312,9 @@ impl App {
                     s::EXT_DOCX,
                     s::EXT_MARKDOWN,
                     s::EXT_RTF,
+                    s::EXT_HTML,
+                    "htm",
+                    s::EXT_EPUB,
                 ],
             )
             .add_filter(s::FILE_FILTER_NATIVE, &[s::EXT_NATIVE])
@@ -3081,6 +3322,8 @@ impl App {
             .add_filter(s::FILE_FILTER_DOCX, &[s::EXT_DOCX])
             .add_filter(s::FILE_FILTER_MARKDOWN, &[s::EXT_MARKDOWN])
             .add_filter(s::FILE_FILTER_RTF, &[s::EXT_RTF])
+            .add_filter(s::FILE_FILTER_HTML, &[s::EXT_HTML, "htm"])
+            .add_filter(s::FILE_FILTER_EPUB, &[s::EXT_EPUB])
             .set_title(s::FILE_OPEN_TITLE)
             .pick_file()
         else {
@@ -3152,6 +3395,49 @@ impl App {
         task
     }
 
+    /// Import Chapter needs an open, editable document.
+    fn import_blocked(&mut self) -> bool {
+        match &self.doc {
+            None => true,
+            Some(doc) if doc.read_only => {
+                self.modal = Some(Modal::Error(s::IMPORT_READ_ONLY.to_owned()));
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Reads any format Libertum opens and inserts its text after the caret. The open
+    /// document's file is not touched until the writer saves.
+    fn import_chapter_file(&mut self, path: &std::path::Path) -> Task<Message> {
+        match FileContext::open(path) {
+            Ok((_, document, warnings)) => {
+                for warning in &warnings {
+                    tracing::info!(%warning, path = %path.display(), "import warning");
+                }
+                self.import_chapter(&document)
+            }
+            Err(error) => {
+                self.modal = Some(Modal::Error(format!(
+                    "{} {error}",
+                    s::IMPORT_CHAPTER_FAILED
+                )));
+                Task::none()
+            }
+        }
+    }
+
+    /// Inserts `document`'s body after the caret's block as one undoable edit.
+    fn import_chapter(&mut self, document: &Document) -> Task<Message> {
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let result = doc.edit(|ed| ed.insert_document(document));
+        let task = self.finish_edit(result);
+        self.refresh_format();
+        task
+    }
+
     /// Reads `path` and replaces the open document with it. Parsing runs on the UI thread;
     /// an ODT or DOCX opens in well under a second (the budget is in PLAN §2) and the dialog
     /// is already modal.
@@ -3171,10 +3457,15 @@ impl App {
             .iter()
             .any(|warning| warning == libertum_formats_common::toc::TOC_REBUILT_WARNING);
         let view = context.view();
+        // An EPUB or an AO3 download is imported: it opens as a new, unsaved document, so the
+        // original file is never rewritten in Libertum's own HTML.
+        let imported = Format::for_path(&path) == Format::Epub || context.is_ao3();
         let (mut doc, events) = match context.format() {
             Format::Markdown => DocView::open_markdown(document),
             // RTF carries a page size but its flow is best read as one continuous column.
             Format::Rtf => DocView::open_pageless(document),
+            // HTML has no pages: it reads as one long column, like the browser shows it.
+            Format::Html | Format::Epub => DocView::open_pageless(document),
             // A native document remembers whether it was read pageless.
             Format::Native if view.as_ref().is_some_and(|view| view.pageless) => {
                 DocView::open_pageless(document)
@@ -3202,6 +3493,15 @@ impl App {
             detail: s::TOC_NOTICE_DETAIL.to_owned(),
         });
         self.after_save = None;
+        if imported {
+            self.file = None;
+            self.disk_stamp = None;
+            self.file_context = None;
+            self.modal = Some(Modal::Notice {
+                title: s::IMPORTED_TITLE.to_owned(),
+                detail: s::IMPORTED_DETAIL.to_owned(),
+            });
+        }
         self.scroll = (0.0, 0.0);
         self.canvas_focused = true;
         self.ime_preedit = None;
@@ -3755,7 +4055,34 @@ impl App {
                 .map(ToString::to_string)
                 .collect();
             if !losses.is_empty() {
-                self.modal = Some(Modal::MarkdownLoss { path, losses });
+                self.modal = Some(Modal::MarkdownLoss {
+                    path,
+                    losses,
+                    title: s::MARKDOWN_LOSS_TITLE,
+                });
+                return Task::none();
+            }
+        }
+        // HTML keeps the text and its formatting, not the page furniture: say what would go.
+        if Format::for_path(&path) == Format::Html {
+            let flavour = match &self.file_context {
+                Some(FileContext::Html(html)) => html.flavour(),
+                _ => HtmlFlavour::Full,
+            };
+            let losses: Vec<String> = self
+                .doc
+                .as_ref()
+                .map(|doc| libertum_html::loss_report(doc.document(), flavour))
+                .unwrap_or_default()
+                .iter()
+                .map(|loss| loss.kind.label().to_owned())
+                .collect();
+            if !losses.is_empty() {
+                self.modal = Some(Modal::MarkdownLoss {
+                    path,
+                    losses,
+                    title: s::HTML_LOSS_TITLE,
+                });
                 return Task::none();
             }
         }
@@ -4032,6 +4359,9 @@ impl App {
         // redraws continuously, which is also what makes its figures meaningful.
         if self.settings.show_performance && self.doc.is_some() {
             subs.push(window::frames().map(Message::FpsFrame));
+        }
+        if !self.type_hook.is_empty() {
+            subs.push(Subscription::run(type_ticks).map(|_| Message::TypeHookTick));
         }
         if self.doc.is_some() && self.settings.spellcheck {
             subs.push(Subscription::run(spell_ticks).map(|_| Message::SpellTick));
@@ -4354,6 +4684,8 @@ impl App {
                 }
             }
             Message::CloseLibrary => self.modal = None,
+            Message::Compare(msg) => return self.update_compare(msg),
+            Message::Ao3Post(msg) => return self.update_ao3_post(msg),
             Message::OpenHistory(path) => {
                 self.state.open_menu = None;
                 let from_library = path.is_some();
@@ -4540,6 +4872,7 @@ impl App {
             }
             Message::SetSpellLanguage(language) => {
                 self.settings.spellcheck_language = language;
+                spell::warm(language);
                 self.save_settings();
                 return self.schedule_spell_check();
             }
@@ -4839,6 +5172,11 @@ impl App {
                 if self.state.find.open {
                     self.close_find();
                 }
+                // With nothing else in front, Escape leaves compare mode.
+                if !something_open && self.compare_on() {
+                    self.exit_compare();
+                    return Task::none();
+                }
                 self.state.open_menu = None;
                 self.state.open_swatch = None;
                 // With nothing else in front, Escape leaves full screen first.
@@ -4956,8 +5294,13 @@ impl App {
                     return Task::none();
                 };
                 let html = libertum_export::ao3_fragment(doc.document(), &chapter);
+                self.sync_work_tags();
+                let Some(doc) = self.doc.as_ref() else {
+                    return Task::none();
+                };
                 let suggestions = self.chapter_suggestions(doc.document(), &chapter);
                 let selected = vec![false; suggestions.len()];
+                self.ao3_post_notice = None;
                 self.modal = Some(Modal::Ao3Chapter {
                     chapter: index,
                     title: chapter.title,
@@ -5019,9 +5362,89 @@ impl App {
                     let text = libertum_export::tags_to_text(suggestions, selected);
                     if !text.is_empty() {
                         *tags_copied = true;
+                        // What the writer copies is what they use: remember it for later
+                        // chapters and stories (characters give the name book full names).
+                        let used: Vec<libertum_export::Tag> = suggestions
+                            .iter()
+                            .zip(selected.iter())
+                            .filter(|(_, on)| **on)
+                            .map(|(suggestion, _)| suggestion.tag.clone())
+                            .collect();
+                        self.tag_cache.learn(&used);
+                        self.save_tag_cache();
+                        // They are on the work now: later chapters do not offer them again.
+                        self.work_tags.add(used);
+                        self.save_work_tags();
                         return iced::clipboard::write(text);
                     }
                 }
+            }
+            Message::SetStarterTags(on) => {
+                self.settings.use_starter_tags = on;
+                self.save_settings();
+                self.rerank_suggestions();
+            }
+            Message::ImportTagFile => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter(s::TAG_IMPORT_FILTER, &["txt", "csv", "tsv", "list"])
+                    .set_title(s::TAG_IMPORT_TITLE)
+                    .pick_file()
+                else {
+                    return Task::none();
+                };
+                self.tag_cache_notice = Some(s::TAG_IMPORT_WORKING.to_owned());
+                // A large file is read off the UI thread.
+                return Task::perform(
+                    async move {
+                        std::fs::File::open(&path)
+                            .map(|file| {
+                                libertum_export::parse_tag_import(std::io::BufReader::new(file))
+                            })
+                            .map_err(|error| error.to_string())
+                    },
+                    Message::TagFileImported,
+                );
+            }
+            Message::TagFileImported(result) => {
+                self.tag_cache_notice = Some(match result {
+                    Ok(tags) => {
+                        let read = tags.len();
+                        let added = self.tag_cache.import(tags);
+                        self.save_tag_cache();
+                        self.rerank_suggestions();
+                        s::tag_import_done(read, added)
+                    }
+                    Err(error) => format!("{} {error}", s::TAG_IMPORT_FAILED),
+                });
+            }
+            Message::DismissSuggestedTag(index) => {
+                if let Some(Modal::Ao3Chapter {
+                    suggestions,
+                    selected,
+                    tags_copied,
+                    ..
+                }) = &mut self.modal
+                    && index < suggestions.len()
+                {
+                    let removed = suggestions.remove(index);
+                    if index < selected.len() {
+                        selected.remove(index);
+                    }
+                    *tags_copied = false;
+                    self.work_tags.dismiss(removed.tag);
+                    self.save_work_tags();
+                }
+            }
+            Message::ShowHiddenTags => {
+                self.work_tags = work_tags::WorkTags::default();
+                self.save_work_tags();
+                self.rerank_suggestions();
+            }
+            Message::ForgetLearnedTags => {
+                self.tag_cache.forget_learned();
+                self.save_tag_cache();
+                self.tag_cache_notice = None;
+                self.rerank_suggestions();
             }
             Message::OpenTagVocabulary => {
                 self.tag_draft.clear();
@@ -5094,11 +5517,52 @@ impl App {
             }
             Message::Doc(event) => return self.on_doc_event(event),
             Message::SpellTick => return self.check_spelling_if_changed(),
+            Message::TypeHookTick => {
+                if Instant::now() < self.type_hook_from {
+                    return Task::none();
+                }
+                let Some(c) = self.type_hook.pop_front() else {
+                    return Task::none();
+                };
+                self.canvas_focused = true;
+                let text = c.to_string();
+                let key = if c == '\n' {
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                } else {
+                    keyboard::Key::Character(text.as_str().into())
+                };
+                return self.update(Message::Keyboard(keyboard::Event::KeyPressed {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key: keyboard::key::Physical::Unidentified(
+                        keyboard::key::NativeCode::Unidentified,
+                    ),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::default(),
+                    text: (c != '\n').then(|| text.as_str().into()),
+                    repeat: false,
+                }));
+            }
             Message::SpellChecked { generation, result } => {
+                tracing::debug!(
+                    generation,
+                    current = self.spell_generation,
+                    errors = result.as_ref().map_or(0, Vec::len),
+                    "spell check finished"
+                );
                 if generation == self.spell_generation {
                     match result {
                         Ok(errors) => {
-                            self.spell_errors = errors
+                            // Typing may have gone on while the check ran: keep only the
+                            // words still at their place (the next check covers the rest).
+                            let document = self.doc.as_ref().map(DocView::document);
+                            let still_there = |error: &spell::Span| {
+                                document
+                                    .and_then(|d| d.paragraph(error.block))
+                                    .and_then(|p| p.text().get(error.start..error.end))
+                                    .is_some_and(|word| word == error.word)
+                            };
+                            let wanted: Vec<spell::Span> = errors
                                 .into_iter()
                                 .filter(|error| {
                                     !self.spell_ignored_once.contains(&(
@@ -5109,6 +5573,13 @@ impl App {
                                     ))
                                 })
                                 .collect();
+                            let fresh = wanted.len();
+                            self.spell_errors =
+                                wanted.into_iter().filter(|e| still_there(e)).collect();
+                            if self.spell_errors.len() < fresh {
+                                // Some were out of date: look again once typing pauses.
+                                self.spell_signature = None;
+                            }
                             self.spell_errors_epoch = self.spell_errors_epoch.wrapping_add(1);
                         }
                         Err(error) => {
@@ -5174,6 +5645,48 @@ impl App {
             }
             Message::Keyboard(event) => return self.on_keyboard(event),
             Message::Ime(event) => return self.on_ime(event),
+            Message::ImportChapterFile => {
+                self.state.open_menu = None;
+                if self.import_blocked() {
+                    return Task::none();
+                }
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter(
+                        s::IMPORT_CHAPTER_FILTER,
+                        &[
+                            s::EXT_HTML,
+                            "htm",
+                            s::EXT_EPUB,
+                            s::EXT_NATIVE,
+                            s::EXT_ODT,
+                            s::EXT_DOCX,
+                            s::EXT_MARKDOWN,
+                            s::EXT_RTF,
+                        ],
+                    )
+                    .set_title(s::IMPORT_CHAPTER_TITLE)
+                    .pick_file()
+                else {
+                    return Task::none();
+                };
+                return self.import_chapter_file(&path);
+            }
+            Message::ImportChapterClipboard => {
+                self.state.open_menu = None;
+                if self.import_blocked() {
+                    return Task::none();
+                }
+                return iced::clipboard::read().map(Message::ImportChapterPasted);
+            }
+            Message::ImportChapterPasted(text) => {
+                let text = text.unwrap_or_default();
+                if text.trim().is_empty() {
+                    self.modal = Some(Modal::Error(s::IMPORT_CLIPBOARD_EMPTY.to_owned()));
+                    return Task::none();
+                }
+                let document = libertum_html::parse_fragment(&text);
+                return self.import_chapter(&document);
+            }
             Message::PasteText(text) => {
                 if let Some(text) = text
                     && self.canvas_focused
@@ -6085,6 +6598,28 @@ impl App {
                 }
                 self.refresh_document();
             }
+            DocumentMsg::PageColour(colour) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| ed.set_page_colour(colour));
+                    let _ = self.finish_edit(result);
+                }
+                self.refresh_document();
+            }
+            DocumentMsg::PageColourHex(text) => {
+                self.state.document.page_colour_hex = text;
+            }
+            DocumentMsg::PageColourHexApply => {
+                let Some(colour) =
+                    crate::state::parse_page_colour_hex(&self.state.document.page_colour_hex)
+                else {
+                    return;
+                };
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| ed.set_page_colour(Some(colour)));
+                    let _ = self.finish_edit(result);
+                }
+                self.refresh_document();
+            }
             DocumentMsg::Hyphenation(on) => {
                 if let Some(doc) = self.doc.as_mut() {
                     let result = doc.edit(|ed| ed.set_document_hyphenation(on));
@@ -6279,6 +6814,11 @@ impl App {
         d.watermark_on = watermark.is_some();
         d.watermark_diagonal = watermark.as_ref().is_none_or(|w| w.diagonal);
         d.watermark_text = watermark.map(|w| w.text).unwrap_or_default();
+        d.page_colour = doc.editor().page_colour();
+        d.page_colour_hex = d
+            .page_colour
+            .map(|[r, g, b, _]| format!("#{r:02X}{g:02X}{b:02X}"))
+            .unwrap_or_default();
         self.refresh_section();
     }
 
@@ -6372,6 +6912,7 @@ impl App {
                 Some(_) => stack![home, self.modal_layer(t)].into(),
             };
         };
+        let (compare_added, compare_removed) = self.compare_rects();
         // The canvas uses the geometry the document is laid out with, so a page-setup change
         // resizes the pages as soon as `DocView` has re-paginated.
         let canvas = canvas::view(
@@ -6382,12 +6923,15 @@ impl App {
                 scale_factor: self.scale_factor,
                 scroll: self.scroll,
                 source: doc.source.clone(),
+                paper: doc.editor().page_colour(),
                 caret: doc.caret_rect().filter(|_| self.caret_on),
                 ime_enabled: self.canvas_focused && self.state.editing.is_none(),
                 ime_caret: doc.caret_rect(),
                 selection: doc.selection_rects_on(self.pages_near_view()),
                 find: self.find_match_rects(),
                 spell: self.spell_rects(),
+                compare_added: compare_added.clone(),
+                compare_removed: compare_removed.clone(),
                 preedit: self.preedit_overlay(),
                 animate: self.autoscroll.as_ref().is_some_and(AutoScroll::active),
                 booklet: self.state.booklet,
@@ -6483,6 +7027,11 @@ impl App {
             };
         let base: Element<'_, Message> = if self.state.find.open {
             stack![base, self.find_layer(t)].into()
+        } else {
+            base
+        };
+        let base: Element<'_, Message> = if self.compare_on() {
+            stack![base, self.compare_layer(t)].into()
         } else {
             base
         };
@@ -7346,7 +7895,7 @@ impl App {
             }),
         ]
         .spacing(16)
-        .width(Length::Fixed(400.0));
+        .width(Length::Fixed(460.0));
         let body_height = (self.window_height - 160.0).max(240.0);
         let body = iced::widget::scrollable(sections)
             .height(Length::Fixed(body_height))
@@ -7363,7 +7912,7 @@ impl App {
             .spacing(16),
         )
         .padding(20)
-        .width(Length::Fixed(460.0))
+        .width(Length::Fixed(520.0))
         .style(move |_| container::Style {
             background: Some(t.chrome.into()),
             border: border::rounded(10),
@@ -7381,27 +7930,119 @@ impl App {
         .into()
     }
 
-    /// The tags suggested for one chapter: the writer's vocabulary ranked against it, then (when
-    /// the setting is on) characters, pairings and keywords found in its own text that the
-    /// vocabulary does not already have.
+    /// The tags suggested for one chapter, in this order: the writer's vocabulary ranked
+    /// against it; then (when the setting is on) pairings remembered from earlier use, and the
+    /// characters, pairings and phrases found in its own text, with names resolved to the full
+    /// names the whole document (or the library) uses; then library and starter-list tags whose
+    /// words the chapter keeps using. A tag is never offered twice.
     fn chapter_suggestions(
         &self,
         document: &Document,
         chapter: &libertum_export::Chapter,
     ) -> Vec<TagSuggestion> {
-        let ranked = libertum_export::suggest_for_chapter(
-            document,
-            chapter,
-            &self.settings.tags,
-            SUGGESTION_LIMIT,
-        );
-        if !self.settings.auto_suggest_tags {
-            return ranked;
+        use libertum_export::{TagCategory, TagMatch};
+        let text = libertum_export::chapter_text(document, chapter);
+        let mut out = libertum_export::suggest_tags(&text, &self.settings.tags, SUGGESTION_LIMIT);
+        if self.settings.auto_suggest_tags {
+            let mut book =
+                libertum_export::NameBook::from_text(&libertum_export::document_text(document));
+            book.remember(self.tag_cache.names(TagCategory::Character));
+            let auto = libertum_export::auto_suggestions_with(&text, &book);
+            // A pairing used before, written the writer's way, when both people are here.
+            let present: Vec<&str> = auto
+                .iter()
+                .filter(|s| s.tag.category == TagCategory::Character)
+                .map(|s| s.tag.name.as_str())
+                .collect();
+            let remembered: Vec<TagSuggestion> = self
+                .tag_cache
+                .names(TagCategory::Relationship)
+                .filter_map(|pairing| {
+                    let people: Vec<&str> = pairing
+                        .split(['/', '&'])
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .collect();
+                    (people.len() >= 2 && people.iter().all(|p| present.contains(p))).then(|| {
+                        TagSuggestion {
+                            tag: libertum_export::Tag::new(pairing, TagCategory::Relationship),
+                            score: 0.0,
+                            matched: vec![TagMatch {
+                                term: s::TAG_USED_BEFORE.to_owned(),
+                                count: 1,
+                            }],
+                        }
+                    })
+                })
+                .collect();
+            // The auto pairing of the same two people gives way to the remembered one.
+            let same_people = |a: &str, b: &str| {
+                let key = |x: &str| {
+                    let mut people: Vec<String> = x
+                        .split(['/', '&'])
+                        .map(|p| p.trim().to_lowercase())
+                        .collect();
+                    people.sort();
+                    people
+                };
+                key(a) == key(b)
+            };
+            let auto: Vec<TagSuggestion> = auto
+                .into_iter()
+                .filter(|s| {
+                    s.tag.category != TagCategory::Relationship
+                        || !remembered
+                            .iter()
+                            .any(|r| same_people(&r.tag.name, &s.tag.name))
+                })
+                .collect();
+            out = libertum_export::merge_suggestions(out, remembered);
+            out = libertum_export::merge_suggestions(out, auto);
         }
-        libertum_export::merge_suggestions(
-            ranked,
-            libertum_export::auto_suggestions_for_chapter(document, chapter),
-        )
+        // Library tags need two uses of their words; starter tags three, from at least two
+        // different words (they are generic).
+        let library = libertum_export::suggest_tags_with(
+            &text,
+            &self.tag_cache.rankable(),
+            SUGGESTION_LIMIT,
+            2,
+            1,
+        );
+        out = libertum_export::merge_suggestions(out, library);
+        if self.settings.use_starter_tags {
+            let starter = libertum_export::suggest_tags_with(
+                &text,
+                &libertum_export::starter_tags(),
+                SUGGESTION_LIMIT / 2,
+                3,
+                2,
+            );
+            out = libertum_export::merge_suggestions(out, starter);
+        }
+        // Tags already on the work, or removed as unrelated, are not offered again.
+        self.work_tags.filter(out)
+    }
+
+    /// Writes the tag library (when it has a file).
+    fn save_tag_cache(&self) {
+        let Some(path) = &self.tag_cache_path else {
+            return;
+        };
+        let write = || -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let bytes = serde_json::to_vec(&self.tag_cache).map_err(std::io::Error::other)?;
+            libertum_library::save_atomic(path, |temporary| std::fs::write(temporary, &bytes))
+                .map_err(|error| match error {
+                    libertum_library::SaveError::Write(error)
+                    | libertum_library::SaveError::Permissions(error)
+                    | libertum_library::SaveError::Replace(error) => error,
+                })
+        };
+        if let Err(error) = write() {
+            tracing::warn!(%error, "could not keep the tag library");
+        }
     }
 
     /// Re-ranks an open AO3 chapter after the vocabulary changed, keeping the writer's
@@ -7464,7 +8105,7 @@ impl App {
             )
             .padding(8),
         )
-        .height(Length::Fixed(190.0));
+        .height(Length::Fixed(130.0));
 
         // Suggested tags, grouped by the category AO3 files them under. Empty categories are
         // left out so the list stays about this chapter.
@@ -7481,6 +8122,21 @@ impl App {
                     .map(|hit| format!("{} \u{d7}{}", hit.term, hit.count))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // The – button: not about this work, so hide it for the whole work.
+                let dismiss = iced::widget::tooltip(
+                    button(text("\u{2212}").size(13).color(t.text_secondary))
+                        .padding([0, 7])
+                        .style(move |_, status| controls::flat(t, status))
+                        .on_press(Message::DismissSuggestedTag(index)),
+                    container(text(s::TAG_DISMISS_TIP).size(12))
+                        .padding(4)
+                        .style(move |_| container::Style {
+                            background: Some(t.chrome.into()),
+                            border: border::rounded(4),
+                            ..container::Style::default()
+                        }),
+                    iced::widget::tooltip::Position::Left,
+                );
                 rows.push(
                     row![
                         controls::checkbox_row(
@@ -7492,6 +8148,7 @@ impl App {
                         ),
                         space::horizontal(),
                         text(why).size(11).color(t.text_secondary),
+                        dismiss,
                     ]
                     .spacing(8)
                     .align_y(Center)
@@ -7611,6 +8268,7 @@ impl App {
                     Message::SetAutoTags,
                 ),
                 tag_area,
+                self.hidden_tags_line(t),
                 if self.settings.auto_suggest_tags {
                     controls::caption(t, s::AO3_TAGS_AUTO_HINT)
                 } else {
@@ -7619,6 +8277,8 @@ impl App {
                 row![edit, space::horizontal(), close, copy_tags, copy]
                     .spacing(8)
                     .align_y(Center),
+                controls::divider(t),
+                self.ao3_post_section(t),
             ]
             .spacing(10),
         )
@@ -7639,6 +8299,91 @@ impl App {
                 .center_y(Length::Fill),
         ]
         .into()
+    }
+
+    /// "3 tags hidden for this work" and Show Again, when any are hidden.
+    fn hidden_tags_line(&self, t: Tokens) -> Element<'_, Message> {
+        let hidden = self.work_tags.hidden();
+        if hidden == 0 {
+            return space::vertical().height(Length::Shrink).into();
+        }
+        row![
+            text(s::tags_hidden_for_work(hidden))
+                .size(12)
+                .color(t.text_secondary),
+            space::horizontal(),
+            button(text(s::TAG_SHOW_AGAIN).size(12))
+                .padding([3, 10])
+                .style(move |_, status| flat(t, status))
+                .on_press(Message::ShowHiddenTags),
+        ]
+        .align_y(Center)
+        .into()
+    }
+
+    /// Mark as Posted, for Compare with Posted, and what it last did.
+    fn ao3_post_section(&self, t: Tokens) -> Element<'_, Message> {
+        use crate::widgets::controls;
+        let mark = button(text(s::AO3_POST_MARK).size(12))
+            .padding([5, 10])
+            .style(move |_, status| flat(t, status))
+            .on_press(Message::Ao3Post(Ao3PostMsg::MarkPosted));
+        let mut body = column![
+            row![
+                controls::caption(t, s::AO3_POST_HINT),
+                space::horizontal(),
+                mark
+            ]
+            .spacing(8)
+            .align_y(Center),
+        ]
+        .spacing(6);
+        if let Some(notice) = &self.ao3_post_notice {
+            body = body.push(text(notice.clone()).size(12).color(t.accent));
+        }
+        body.into()
+    }
+
+    /// The tag library in the vocabulary window: what it holds, the starter list switch,
+    /// Import and Forget.
+    fn tag_library_section(&self, t: Tokens) -> Element<'_, Message> {
+        use crate::widgets::controls;
+        let (learned, imported) = self.tag_cache.counts();
+        let flat_button = |label: &'static str, message: Message| {
+            button(text(label).size(12))
+                .padding([5, 10])
+                .style(move |_, status| flat(t, status))
+                .on_press(message)
+        };
+        let mut body = column![
+            text(s::TAG_LIBRARY_TITLE)
+                .size(13)
+                .font(controls::bold())
+                .color(t.text),
+            controls::caption(t, s::TAG_LIBRARY_HINT),
+            controls::checkbox_row(
+                t,
+                s::TAG_STARTER_LIST,
+                self.settings.use_starter_tags,
+                false,
+                Message::SetStarterTags,
+            ),
+            row![
+                text(s::tag_library_counts(learned, imported))
+                    .size(12)
+                    .color(t.text_secondary),
+                space::horizontal(),
+                flat_button(s::TAG_IMPORT, Message::ImportTagFile),
+                flat_button(s::TAG_FORGET_LEARNED, Message::ForgetLearnedTags),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        ]
+        .spacing(6);
+        if let Some(notice) = &self.tag_cache_notice {
+            body = body.push(text(notice.clone()).size(12).color(t.accent));
+        }
+        body.into()
     }
 
     /// The local AO3 tag vocabulary: what chapter suggestions are ranked against. Stored in
@@ -7756,6 +8501,8 @@ impl App {
                 controls::caption(t, s::TAG_VOCAB_HINT),
                 row![field, category, add].spacing(8).align_y(Center),
                 list,
+                controls::divider(t),
+                self.tag_library_section(t),
                 row![space::horizontal(), done],
             ]
             .spacing(12),
@@ -7877,6 +8624,74 @@ impl App {
             .into()
     }
 
+    /// The compare bar: where the current change is, what was posted, and the actions.
+    fn compare_layer(&self, t: Tokens) -> Element<'_, Message> {
+        let Some(mode) = self.compare.as_ref() else {
+            return space().into();
+        };
+        let has_changes = !mode.visible().is_empty();
+        let has_current = mode.has_current();
+        let action = |label: &'static str, message: Option<compare::CompareMsg>| {
+            button(text(label).size(12))
+                .padding([4, 8])
+                .style(move |_, status| flat(t, status))
+                .on_press_maybe(message.map(Message::Compare))
+        };
+        let bar = row![
+            action(
+                s::COMPARE_PREVIOUS,
+                has_changes.then_some(compare::CompareMsg::Previous)
+            ),
+            action(
+                s::COMPARE_NEXT,
+                has_changes.then_some(compare::CompareMsg::Next)
+            ),
+            action(
+                s::COMPARE_KEEP,
+                has_current.then_some(compare::CompareMsg::Keep)
+            ),
+            action(
+                s::COMPARE_REVERT,
+                has_current.then_some(compare::CompareMsg::Revert)
+            ),
+            action(s::COMPARE_MARK, Some(compare::CompareMsg::MarkPosted)),
+            action(s::COMPARE_DONE, Some(compare::CompareMsg::Exit)),
+            text(mode.summary())
+                .size(12)
+                .color(t.text_secondary)
+                .width(Length::Shrink),
+        ]
+        .spacing(4)
+        .align_y(Center);
+        let bar = mouse_area(
+            container(bar)
+                .padding([6, 8])
+                .max_width(900)
+                .style(move |_| container::Style {
+                    background: Some(t.chrome.into()),
+                    border: border::rounded(8),
+                    ..container::Style::default()
+                }),
+        )
+        .on_press(Message::FindBarPressed)
+        .on_right_press(Message::FindBarPressed);
+        let below_find = if self.state.find.open {
+            FIND_BAR_COVER
+        } else {
+            0.0
+        };
+        container(bar)
+            .padding(Padding {
+                top: crate::toolbar::HEIGHT + 10.0 + below_find,
+                ..Padding::ZERO
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Center)
+            .align_top(Length::Fill)
+            .into()
+    }
+
     /// The unsaved-changes or error prompt, with a dimmed backdrop.
     fn modal_layer(&self, t: Tokens) -> Element<'_, Message> {
         let Some(modal) = &self.modal else {
@@ -7970,7 +8785,7 @@ impl App {
                 s::CHANGED_ON_DISK_TITLE.to_owned(),
                 s::CHANGED_ON_DISK_DETAIL.to_owned(),
             ),
-            Modal::MarkdownLoss { losses, .. } => {
+            Modal::MarkdownLoss { losses, title, .. } => {
                 // The first few kinds; a long list would not fit the prompt.
                 const SHOWN: usize = 8;
                 let mut detail = losses
@@ -7983,7 +8798,7 @@ impl App {
                     detail.push('\n');
                     detail.push_str(s::MARKDOWN_LOSS_MORE);
                 }
-                (s::MARKDOWN_LOSS_TITLE.to_owned(), detail)
+                ((*title).to_owned(), detail)
             }
         };
         let buttons: Vec<Element<'_, Message>> = match modal {
@@ -8334,6 +9149,7 @@ fn save_filters(current: Format) -> Vec<(&'static str, &'static str)> {
         (Format::Docx, s::FILE_FILTER_DOCX),
         (Format::Rtf, s::FILE_FILTER_RTF),
         (Format::Markdown, s::FILE_FILTER_MARKDOWN),
+        (Format::Html, s::FILE_FILTER_HTML),
     ];
     let mut out: Vec<(&'static str, &'static str)> = all
         .iter()
@@ -8437,6 +9253,8 @@ fn ensure_extension(mut path: PathBuf, fallback: Format) -> PathBuf {
             || extension.eq_ignore_ascii_case(s::EXT_MARKDOWN)
             || extension.eq_ignore_ascii_case(s::EXT_RTF)
             || extension.eq_ignore_ascii_case(s::EXT_NATIVE)
+            || extension.eq_ignore_ascii_case(s::EXT_HTML)
+            || extension.eq_ignore_ascii_case("htm")
     });
     if !known {
         path.set_extension(fallback.extension());
@@ -8492,6 +9310,12 @@ fn write_export(
             for warning in warnings {
                 tracing::warn!(%warning, path = %path.display(), "Markdown export warning");
             }
+        }
+        ExportFormat::PlainHtml => {
+            let mut html = Html::new(document);
+            html.set_flavour(HtmlFlavour::Plain);
+            html.save(&path)
+                .map_err(|error| failed(error.to_string()))?;
         }
         ExportFormat::Text => {
             std::fs::write(&path, libertum_export::document_text(&document))
@@ -10242,6 +11066,10 @@ mod tests {
         assert!(app.dirty, "a failed save leaves the document edited");
     }
 
+    pub(super) fn synced_folder_for_tags(name: &str) -> PathBuf {
+        synced_folder(name)
+    }
+
     fn synced_folder(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("libertum-app-sync-{name}-{}", std::process::id()));
@@ -10295,6 +11123,173 @@ mod tests {
             .filter(|entry| !entry.file_name().to_string_lossy().starts_with(".libertum"))
             .collect();
         assert_eq!(visible.len(), 1, "no temporary file is left: {visible:?}");
+    }
+
+    #[test]
+    fn compare_mode_is_read_only_and_marks_keeps_and_reverts_changes_since_posting() {
+        use libertum_model::{BlockId, Document, ParaProps, Paragraph, StyleId};
+        let dir = synced_folder("compare");
+        let path = dir.join("story.lbtd");
+        let heading = Paragraph::new(BlockId(1), "Chapter One").with_props(ParaProps {
+            style: StyleId::HEADING_1,
+            outline_level: Some(1),
+            ..ParaProps::default()
+        });
+        let document = Document::from_paragraphs(vec![
+            heading,
+            Paragraph::new(BlockId(2), "The quick brown fox."),
+            Paragraph::new(BlockId(3), "It jumped."),
+        ]);
+        FileContext::new(Format::Native, document.clone())
+            .save(&path)
+            .expect("save");
+        let mut app = app();
+        let (doc, _rx) = DocView::open(document);
+        app.doc = Some(doc);
+        app.file = Some(path.clone());
+        let text = |app: &App| {
+            app.doc()
+                .document()
+                .paragraph_at(1)
+                .expect("p")
+                .text()
+                .to_owned()
+        };
+
+        // Without a file there is nowhere to keep posted copies.
+        app.file = None;
+        let _ = app.update(Message::Compare(CompareMsg::Toggle));
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        assert!(!app.doc().read_only);
+        app.modal = None;
+        app.file = Some(path.clone());
+
+        let _ = app.update(Message::Compare(CompareMsg::Toggle));
+        assert!(app.doc().read_only && app.state.compare);
+        app.compare_now();
+        assert_eq!(app.compare_visible(), 0, "nothing posted yet");
+        let _ = app.update(Message::Compare(CompareMsg::MarkPosted));
+        assert_eq!(libertum_library::list_posted(&path).len(), 1);
+        app.compare_now();
+        assert_eq!(app.compare_visible(), 0, "the posted copy matches");
+        // Typing does nothing while comparing.
+        let result = app.doc_mut().edit(|ed| ed.insert_text("x"));
+        let _ = app.finish_edit(result);
+        assert_eq!(text(&app), "The quick brown fox.");
+        assert!(!app.dirty);
+
+        let _ = app.update(Message::Compare(CompareMsg::Exit));
+        assert!(!app.doc().read_only && !app.state.compare);
+        let block = BlockId(2);
+        let result = app
+            .doc_mut()
+            .edit(|ed| ed.replace_in_paragraph(block, &[(4..9, "slow".into())]));
+        let _ = app.finish_edit(result);
+        assert_eq!(text(&app), "The slow brown fox.");
+
+        let _ = app.update(Message::Compare(CompareMsg::Toggle));
+        app.compare_now();
+        assert_eq!(app.compare_visible(), 1);
+        let (added, removed) = app.compare_rects();
+        assert!(
+            !added.is_empty() || !removed.is_empty(),
+            "the change is marked"
+        );
+        let _ = app.update(Message::Compare(CompareMsg::Next));
+        let _ = app.update(Message::Compare(CompareMsg::Keep));
+        assert_eq!(app.compare_visible(), 0, "kept");
+        app.compare_now();
+        assert_eq!(app.compare_visible(), 0, "a kept change stays kept");
+
+        // Leaving and coming back forgets what was kept; Revert puts the posted text back.
+        let _ = app.update(Message::Compare(CompareMsg::Exit));
+        let _ = app.update(Message::Compare(CompareMsg::Toggle));
+        app.compare_now();
+        let _ = app.update(Message::Compare(CompareMsg::Next));
+        let _ = app.update(Message::Compare(CompareMsg::Revert));
+        assert_eq!(text(&app), "The quick brown fox.");
+        assert!(app.dirty);
+        app.compare_now();
+        assert_eq!(app.compare_visible(), 0);
+        // Escape leaves compare mode.
+        let _ = app.update(Message::Shortcut(Shortcut::CloseMenu));
+        assert!(!app.state.compare && !app.doc().read_only);
+    }
+
+    #[test]
+    fn mark_as_posted_in_the_chapter_window_keeps_the_posted_copy() {
+        use libertum_model::{BlockId, Document, ParaProps, Paragraph, StyleId};
+        let dir = synced_folder("ao3-post");
+        let path = dir.join("Rainy Harbour.lbtd");
+        let document = Document::from_paragraphs(vec![
+            Paragraph::new(BlockId(1), "Chapter One").with_props(ParaProps {
+                style: StyleId::HEADING_1,
+                outline_level: Some(1),
+                ..ParaProps::default()
+            }),
+            Paragraph::new(BlockId(2), "The rain had not stopped."),
+        ]);
+        let mut app = app();
+        let (doc, _rx) = DocView::open(document);
+        app.doc = Some(doc);
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(0));
+        // Without a file there is nowhere to keep it.
+        let _ = app.update(Message::Ao3Post(Ao3PostMsg::MarkPosted));
+        assert_eq!(app.ao3_post_notice.as_deref(), Some(s::AO3_POST_SAVE_FIRST));
+        app.file = Some(path.clone());
+        let _ = app.update(Message::Ao3Post(Ao3PostMsg::MarkPosted));
+        let posted = libertum_library::list_posted(&path);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(
+            posted[0].paragraphs,
+            ["Chapter One", "The rain had not stopped."]
+        );
+    }
+
+    #[test]
+    fn underlines_follow_the_text_as_it_is_typed() {
+        use libertum_model::{BlockId, Document, Paragraph};
+        let mut app = app();
+        let document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Teh cat sat.")]);
+        let (doc, _rx) = DocView::open(document);
+        app.doc = Some(doc);
+        let block = app.doc().document().paragraph_at(0).expect("p").id;
+        let span = |start: usize, end: usize, word: &str| spell::Span {
+            block,
+            start,
+            end,
+            word: word.to_owned(),
+        };
+        // A result for the current text is shown.
+        app.spell_generation = 7;
+        let _ = app.update(Message::SpellChecked {
+            generation: 7,
+            result: Ok(vec![span(0, 3, "Teh")]),
+        });
+        assert_eq!(app.spell_errors.len(), 1);
+        // Typing in front of the word moves it: the old underline is dropped at once rather
+        // than drawn under the wrong letters, and a check is asked for once typing pauses.
+        SPELL_EDITED_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        let result = app.doc_mut().edit(|ed| ed.insert_text("So "));
+        let _ = app.finish_edit(result);
+        assert!(app.spell_errors.is_empty(), "the stale underline is gone");
+        assert_ne!(
+            SPELL_EDITED_AT.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a check is due when typing pauses"
+        );
+        // A result that came back for older text keeps only the words still in place, and
+        // asks for another look.
+        app.spell_generation = 8;
+        app.spell_signature = Some(1);
+        let _ = app.update(Message::SpellChecked {
+            generation: 8,
+            result: Ok(vec![span(0, 3, "Teh"), span(3, 6, "Teh")]),
+        });
+        assert_eq!(app.spell_errors, vec![span(3, 6, "Teh")]);
+        assert_eq!(app.spell_signature, None, "checks again");
     }
 
     /// A native document with `text` as its only paragraph, saved to `path`.
@@ -11535,6 +12530,163 @@ mod tests {
         assert!(app.modal.is_none());
     }
 
+    fn html_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/html")
+            .join(name)
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("libertum-html-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the folder");
+        dir.join(name)
+    }
+
+    #[test]
+    fn html_opens_pageless_and_keeps_its_page_colour_through_a_save() {
+        let mut document =
+            libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+                libertum_model::BlockId(1),
+                "A web page",
+            )]);
+        document.sections[0].page_colour = Some([0xE1, 0xEE, 0xFA, 0xFF]);
+        let path = temp_file("page.html");
+        Html::new(document).save(&path).expect("write");
+        let mut app = app();
+        let _ = app.open_path(path.clone());
+        assert!(app.state.pageless, "HTML opens pageless");
+        assert_eq!(
+            app.file.as_ref(),
+            Some(&path),
+            "a plain HTML file is opened, not imported"
+        );
+        assert_eq!(
+            app.doc().editor().page_colour(),
+            Some([0xE1, 0xEE, 0xFA, 0xFF])
+        );
+        let _ = app.update(Message::Document(DocumentMsg::PageColour(Some([
+            0xFC, 0xE4, 0xE4, 0xFF,
+        ]))));
+        assert!(app.dirty);
+        // The save itself runs on a task; write through the open file's package as it does.
+        let mut context = app.file_context.clone().expect("the HTML package");
+        assert_eq!(context.format(), Format::Html);
+        context.set_document(app.doc().document().clone());
+        context.save(&path).expect("save");
+        let reopened = Html::open(&path).expect("read");
+        assert_eq!(
+            reopened.document().sections[0].page_colour,
+            Some([0xFC, 0xE4, 0xE4, 0xFF])
+        );
+        assert_eq!(Format::for_path(&PathBuf::from("a.HTM")), Format::Html);
+        assert_eq!(
+            ensure_extension(PathBuf::from("book"), Format::Html),
+            PathBuf::from("book.html")
+        );
+    }
+
+    #[test]
+    fn an_ao3_download_and_an_epub_open_as_new_unsaved_documents() {
+        let download = temp_file("ao3-download.html");
+        std::fs::copy(html_fixture("ao3-download.html"), &download).expect("copy");
+        let before = std::fs::read(&download).expect("read");
+        let mut app = app();
+        let _ = app.open_path(download.clone());
+        assert!(app.file.is_none(), "an AO3 download is imported");
+        assert!(
+            matches!(&app.modal, Some(Modal::Notice { title, .. }) if title == s::IMPORTED_TITLE)
+        );
+        assert!(app.state.pageless);
+        assert_eq!(
+            std::fs::read(&download).expect("read"),
+            before,
+            "the download is untouched"
+        );
+        app.modal = None;
+
+        let book = libertum_model::Document::from_paragraphs(vec![
+            libertum_model::Paragraph::new(libertum_model::BlockId(1), "Chapter One").with_props(
+                libertum_model::ParaProps {
+                    style: libertum_model::StyleId::HEADING_1,
+                    outline_level: Some(1),
+                    ..libertum_model::ParaProps::default()
+                },
+            ),
+            libertum_model::Paragraph::new(libertum_model::BlockId(2), "Once upon a time."),
+        ]);
+        let epub = temp_file("book.epub");
+        let bytes = libertum_export::build_epub(
+            &book,
+            libertum_export::ChapterLevels::default(),
+            "Book",
+            "en-GB",
+        )
+        .expect("epub");
+        std::fs::write(&epub, bytes).expect("write");
+        let _ = app.open_path(epub);
+        assert!(app.file.is_none(), "an EPUB is imported");
+        let texts = paragraph_texts(&app);
+        assert!(texts.iter().any(|t| t == "Once upon a time."), "{texts:?}");
+    }
+
+    #[test]
+    fn a_chapter_imports_after_the_caret_from_a_file_or_copied_html_and_undoes() {
+        let mut app = app();
+        let before = paragraph_texts(&app);
+        let _ = app.import_chapter_file(&html_fixture("emphasis.html"));
+        let after_file = paragraph_texts(&app);
+        assert!(
+            after_file.len() > before.len(),
+            "the file's paragraphs are inserted"
+        );
+        assert!(app.dirty);
+        let _ = app.update(Message::ImportChapterPasted(Some(
+            "<h2>Chapter 2</h2><p>Hello <em>there</em>.</p>".to_owned(),
+        )));
+        let after_paste = paragraph_texts(&app);
+        assert!(
+            after_paste.iter().any(|t| t == "Hello there."),
+            "{after_paste:?}"
+        );
+        let _ = app.undo();
+        assert_eq!(
+            paragraph_texts(&app),
+            after_file,
+            "one undo removes the paste"
+        );
+        // An empty clipboard says so.
+        let _ = app.update(Message::ImportChapterPasted(None));
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        app.modal = None;
+        // Compare mode is read-only: importing waits until it is left.
+        app.doc_mut().read_only = true;
+        let _ = app.update(Message::ImportChapterClipboard);
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+    }
+
+    #[test]
+    fn plain_html_export_writes_no_styles() {
+        let mut document =
+            libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+                libertum_model::BlockId(1),
+                "Plain",
+            )]);
+        document.sections[0].page_colour = Some([0xF4, 0xB6, 0xB6, 0xFF]);
+        let path = temp_file("plain.html");
+        write_export(
+            ExportFormat::PlainHtml,
+            document,
+            libertum_export::ChapterLevels::default(),
+            "Plain".to_owned(),
+            path.clone(),
+        )
+        .expect("export");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("Plain"));
+        assert!(!text.contains("style="), "{text}");
+        assert!(!text.contains("<style"), "{text}");
+    }
+
     #[test]
     fn rtf_opens_pageless_docx_paged_and_the_view_menu_toggles() {
         let mut app = app();
@@ -12578,9 +13730,10 @@ mod tests {
             Format::Docx,
             Format::Rtf,
             Format::Markdown,
+            Format::Html,
         ] {
             let filters = save_filters(current);
-            assert_eq!(filters.len(), 5);
+            assert_eq!(filters.len(), 6);
             assert_eq!(
                 filters[0].1,
                 current.extension(),
@@ -12588,7 +13741,7 @@ mod tests {
             );
             let mut extensions: Vec<&str> = filters.iter().map(|f| f.1).collect();
             extensions.sort_unstable();
-            assert_eq!(extensions, vec!["docx", "lbtd", "md", "odt", "rtf"]);
+            assert_eq!(extensions, vec!["docx", "html", "lbtd", "md", "odt", "rtf"]);
         }
         // The native format is in the list by name, not only by extension.
         assert!(
@@ -13708,6 +14861,211 @@ mod date_time_tests {
                 ..
             })
         ));
+    }
+
+    /// An app showing a two-chapter story, for the tag library tests.
+    fn library_app(paragraphs: &[(&str, bool)]) -> App {
+        use libertum_model::{BlockId, Document, ParaProps, Paragraph, StyleId};
+        let mut app = app();
+        let document = Document::from_paragraphs(
+            paragraphs
+                .iter()
+                .enumerate()
+                .map(|(i, (text, heading))| {
+                    let p = Paragraph::new(BlockId(i as u64 + 1), *text);
+                    if *heading {
+                        p.with_props(ParaProps {
+                            style: StyleId::HEADING_1,
+                            outline_level: Some(1),
+                            ..ParaProps::default()
+                        })
+                    } else {
+                        p
+                    }
+                })
+                .collect(),
+        );
+        let (doc, _rx) = DocView::open(document);
+        app.doc = Some(doc);
+        app
+    }
+
+    fn library_suggested(app: &App) -> Vec<(TagCategory, String)> {
+        match &app.modal {
+            Some(Modal::Ao3Chapter { suggestions, .. }) => suggestions
+                .iter()
+                .map(|s| (s.tag.category, s.tag.name.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn full_names_come_from_the_whole_story_and_copied_tags_are_remembered() {
+        let mut app = library_app(&[
+            ("One", true),
+            ("Mara Ellison met Tomas Reyes at the harbour.", false),
+            ("Later Mara Ellison wrote to Tomas Reyes.", false),
+            ("Two", true),
+            ("Then Mara kissed Tomas.", false),
+            ("And Mara held Tomas, her love.", false),
+            ("So Mara watched Tomas sleep; she kissed him.", false),
+        ]);
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(1));
+        let tags = library_suggested(&app);
+        assert!(
+            tags.contains(&(TagCategory::Character, "Mara Ellison".into())),
+            "{tags:?}"
+        );
+        assert!(
+            tags.contains(&(TagCategory::Character, "Tomas Reyes".into())),
+            "{tags:?}"
+        );
+        assert!(
+            tags.contains(&(TagCategory::Relationship, "Mara Ellison/Tomas Reyes".into())),
+            "{tags:?}"
+        );
+        // Ticking the characters and copying them puts them in the library.
+        let index = suggestion_index(&app, "Mara Ellison");
+        let _ = app.update(Message::ToggleSuggestedTag(index));
+        let _ = app.update(Message::CopySuggestedTags);
+        assert_eq!(
+            app.tag_cache
+                .names(TagCategory::Character)
+                .collect::<Vec<_>>(),
+            ["Mara Ellison"]
+        );
+
+        // Another story that never writes the full name still finds it from the library.
+        app.tag_cache.learn(&[libertum_export::Tag::new(
+            "Tomas Reyes/Mara Ellison",
+            TagCategory::Relationship,
+        )]);
+        app.tag_cache.learn(&[libertum_export::Tag::new(
+            "Tomas Reyes",
+            TagCategory::Character,
+        )]);
+        let mut other = library_app(&[
+            ("Three", true),
+            ("Then Mara kissed Tomas.", false),
+            ("And Mara held Tomas, her love.", false),
+            ("So Mara watched Tomas sleep; she kissed him.", false),
+        ]);
+        other.tag_cache = app.tag_cache.clone();
+        let _ = other.update(Message::OpenAo3Chapters);
+        let _ = other.update(Message::Ao3Chapter(0));
+        let tags = library_suggested(&other);
+        assert!(
+            tags.contains(&(TagCategory::Character, "Mara Ellison".into())),
+            "{tags:?}"
+        );
+        // The pairing comes back written the writer's way, once.
+        let pairs: Vec<&String> = tags
+            .iter()
+            .filter(|(c, _)| *c == TagCategory::Relationship)
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(pairs, ["Tomas Reyes/Mara Ellison"], "{tags:?}");
+    }
+
+    #[test]
+    fn copied_and_removed_tags_are_hidden_for_the_work_until_shown_again() {
+        let story = [
+            ("One", true),
+            ("Mara Ellison met Tomas Reyes at the harbour.", false),
+            ("Later Mara Ellison wrote to Tomas Reyes.", false),
+            ("Then Mara kissed Tomas.", false),
+            ("Two", true),
+            ("Then Mara kissed Tomas.", false),
+            ("And Mara held Tomas, her love.", false),
+            ("So Mara watched Tomas sleep; she kissed him.", false),
+        ];
+        let mut app = library_app(&story);
+        let has = |app: &App, name: &str| library_suggested(app).iter().any(|(_, n)| n == name);
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(1));
+        assert!(has(&app, "Mara Ellison") && has(&app, "Tomas Reyes"));
+        // Copying Mara: it stays in view now, and is gone the next time.
+        let index = suggestion_index(&app, "Mara Ellison");
+        let _ = app.update(Message::ToggleSuggestedTag(index));
+        let _ = app.update(Message::CopySuggestedTags);
+        assert!(has(&app, "Mara Ellison"), "still shown right after copying");
+        let _ = app.update(Message::CloseAo3);
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(0));
+        assert!(!has(&app, "Mara Ellison"), "already on the work");
+        // The – button hides at once, and in every chapter.
+        let index = suggestion_index(&app, "Tomas Reyes");
+        let _ = app.update(Message::DismissSuggestedTag(index));
+        assert!(!has(&app, "Tomas Reyes"));
+        let _ = app.update(Message::Ao3Chapter(1));
+        assert!(!has(&app, "Tomas Reyes"), "hidden for the whole work");
+        assert_eq!(app.work_tags.hidden(), 2);
+        // Show Again brings both back.
+        let _ = app.update(Message::ShowHiddenTags);
+        assert!(has(&app, "Mara Ellison") && has(&app, "Tomas Reyes"));
+
+        // Kept beside the file: the unsaved document's list is written on its first save
+        // and read back for the same file later.
+        let index = suggestion_index(&app, "Tomas Reyes");
+        let _ = app.update(Message::DismissSuggestedTag(index));
+        let dir = super::tests::synced_folder_for_tags("work-tags");
+        let path = dir.join("story.lbtd");
+        app.file = Some(path.clone());
+        let _ = app.update(Message::Ao3Chapter(1));
+        let mut again = library_app(&story);
+        again.file = Some(path);
+        let _ = again.update(Message::OpenAo3Chapters);
+        let _ = again.update(Message::Ao3Chapter(1));
+        assert!(
+            !has(&again, "Tomas Reyes"),
+            "read back from beside the file"
+        );
+        assert!(has(&again, "Mara Ellison"));
+    }
+
+    #[test]
+    fn starter_and_imported_tags_are_suggested_from_the_chapters_words() {
+        let mut app = library_app(&[
+            ("One", true),
+            ("She pressed a bandage to the wound.", false),
+            ("The fever broke at dawn; the wound was clean.", false),
+            ("He changed the bandage again and held her.", false),
+        ]);
+        app.settings.use_starter_tags = true;
+        let _ = app.update(Message::OpenAo3Chapters);
+        let _ = app.update(Message::Ao3Chapter(0));
+        let tags = library_suggested(&app);
+        assert!(
+            tags.contains(&(TagCategory::Freeform, "Hurt/Comfort".into())),
+            "the starter list knows Hurt/Comfort: {tags:?}"
+        );
+        let _ = app.update(Message::SetStarterTags(false));
+        assert!(!library_suggested(&app).contains(&(TagCategory::Freeform, "Hurt/Comfort".into())));
+
+        // An imported tag is suggested once the chapter uses its words twice.
+        let imported = libertum_export::parse_tag_import("Freeform: Field Medicine\n".as_bytes());
+        let _ = app.update(Message::TagFileImported(Ok(imported)));
+        assert_eq!(app.tag_cache.counts(), (0, 1));
+        assert!(app.tag_cache_notice.is_some());
+        let _ = app.update(Message::Ao3Chapter(0));
+        let _ = app.update(Message::TagFileImported(Ok(Vec::new())));
+        let mut medic = library_app(&[
+            ("One", true),
+            ("The medicine was in the field kit.", false),
+            ("Out in the field, medicine ran short.", false),
+        ]);
+        medic.tag_cache = app.tag_cache.clone();
+        let _ = medic.update(Message::OpenAo3Chapters);
+        let _ = medic.update(Message::Ao3Chapter(0));
+        assert!(
+            library_suggested(&medic).contains(&(TagCategory::Freeform, "Field Medicine".into())),
+            "{:?}",
+            library_suggested(&medic)
+        );
+        let _ = app.update(Message::ForgetLearnedTags);
+        assert_eq!(app.tag_cache.counts(), (0, 1), "imported tags stay");
     }
 
     #[test]

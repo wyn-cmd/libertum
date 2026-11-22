@@ -492,6 +492,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a680398c10c7bc0488067c4612226ea905a85f607134b69f3068d505d58c4214"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1917,6 +1927,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "html5ever"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "456a1a377e608e555d22ddab27ac0114bc7a7b4199078108e34c2aeae6c9b130"
+dependencies = [
+ "log",
+ "markup5ever",
+ "memchr",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,17 +2809,19 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libertum-app"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "directories",
  "iced",
  "image",
  "koto",
  "libc",
+ "libertum-diff",
  "libertum-docx",
  "libertum-editor",
  "libertum-export",
  "libertum-formats-common",
+ "libertum-html",
  "libertum-layout",
  "libertum-library",
  "libertum-markdown",
@@ -2824,8 +2847,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libertum-diff"
+version = "0.5.0"
+dependencies = [
+ "libertum-model",
+ "proptest",
+ "similar",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "libertum-docx"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "libertum-formats-common",
  "libertum-model",
@@ -2836,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-editor"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2848,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-export"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "libertum-model",
@@ -2859,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-formats-common"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "image",
  "libertum-model",
@@ -2868,15 +2901,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "libertum-html"
+version = "0.5.0"
+dependencies = [
+ "html5ever",
+ "libertum-export",
+ "libertum-formats-common",
+ "libertum-model",
+ "proptest",
+ "quick-xml 0.42.0",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
 name = "libertum-installer"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "libertum-layout"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "hypher",
@@ -2886,11 +2933,15 @@ dependencies = [
 
 [[package]]
 name = "libertum-library"
-version = "0.4.3"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "libertum-markdown"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "comrak",
  "libertum-formats-common",
@@ -2900,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-mcp"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2914,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-model"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "proptest",
  "serde",
@@ -2923,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-native"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "libertum-model",
  "proptest",
@@ -2935,7 +2986,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-odt"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "libertum-formats-common",
  "libertum-model",
@@ -2946,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-render"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "image",
@@ -2966,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "libertum-rtf"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "encoding_rs",
  "libertum-formats-common",
@@ -3099,6 +3150,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "markup5ever"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ab3dc68ac4a0f5719e560136778c1ee716e296030d75dbd4484e37e39e3a842"
+dependencies = [
+ "log",
+ "tendril",
+ "web_atoms",
 ]
 
 [[package]]
@@ -3326,6 +3388,12 @@ checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
 ]
+
+[[package]]
+name = "new_debug_unreachable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nix"
@@ -4229,6 +4297,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "precomputed-hash"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
+[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5087,6 +5161,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "similar"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f8bec09ae8fae0f4f265a4559a9334be3929d8504e9b536df0a41302bd1733"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "simplecss"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5312,6 +5395,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "string_cache"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa8a5dbe8b3f0bbe29d4c3225daafaeead63afdc1b65fc4c01a1384166038e6"
+dependencies = [
+ "new_debug_unreachable",
+ "parking_lot",
+ "phf_shared",
+ "precomputed-hash",
+]
+
+[[package]]
+name = "string_cache_codegen"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928dcdf75e47626b3617a976ec205d9f057584c371c1f23b782129268d0e6edc"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "stringmetrics"
 version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5417,6 +5524,15 @@ dependencies = [
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tendril"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
+dependencies = [
+ "new_debug_unreachable",
 ]
 
 [[package]]
@@ -6392,6 +6508,18 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "web_atoms"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7572660c8890448ba236b7376f27e389c6a7e1c70195622faced601f855c0ada"
+dependencies = [
+ "phf",
+ "phf_codegen",
+ "string_cache",
+ "string_cache_codegen",
 ]
 
 [[package]]

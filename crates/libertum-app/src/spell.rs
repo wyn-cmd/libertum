@@ -100,6 +100,19 @@ fn build_dictionary(language: Language) -> Result<Dictionary, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Builds the dictionary for `language` on a background thread, so the first check after a
+/// document opens does not wait for it (building takes from about 0.1 s to a few seconds
+/// while a large document is being laid out).
+pub fn warm(language: Language) {
+    let _ = std::thread::Builder::new()
+        .name("libertum-spell-warm".into())
+        .spawn(move || {
+            if let Err(error) = dictionary(language) {
+                tracing::warn!(%error, "could not load the dictionary");
+            }
+        });
+}
+
 /// Checks `text` and returns the misspelt spans, skipping the personal and per-document
 /// ignore lists (both held lowercased).
 pub fn check(
@@ -122,6 +135,13 @@ fn check_with(
 ) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     for (start, word) in dict.check_indices(text) {
+        // A lone character (`-`, `—`, a quotation mark, a digit or a single letter) is not
+        // a word to correct. The dictionary reports some of them as misspellings.
+        let mut chars = word.chars();
+        let single = chars.next().is_some() && chars.next().is_none();
+        if single || !word.chars().any(char::is_alphabetic) {
+            continue;
+        }
         if !personal.is_empty() || !ignored.is_empty() {
             let lower = word.to_lowercase();
             if personal.contains(&lower) || ignored.contains(&lower) {
@@ -328,6 +348,18 @@ mod tests {
         )
         .expect("dictionary");
         assert_eq!(errors, vec![(2, 7, "smple".to_owned())]);
+    }
+
+    #[test]
+    fn single_characters_and_punctuation_are_not_misspellings() {
+        for text in ["-", "\u{2014}", "'", "\u{2019}", "1", "x"] {
+            assert!(
+                check(text, Language::British, &HashSet::new(), &HashSet::new())
+                    .expect("dictionary")
+                    .is_empty(),
+                "{text:?} must not be underlined"
+            );
+        }
     }
 
     #[test]

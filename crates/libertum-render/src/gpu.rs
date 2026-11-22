@@ -182,10 +182,14 @@ pub fn build_scene(state: &LayoutState, page_index: usize) -> Option<Scene> {
     let page = state.pages().get(page_index)?;
     let geo = state.page_geometry(page_index);
     let mut scene = Scene::new();
+    let paper = match state.page_colour(page_index) {
+        Some([r, g, b, _]) => Color::from_rgba8(r, g, b, 255),
+        None => Color::WHITE,
+    };
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
-        Color::WHITE,
+        paper,
         None,
         &Rect::new(0.0, 0.0, f64::from(geo.width_pt), f64::from(geo.height_pt)),
     );

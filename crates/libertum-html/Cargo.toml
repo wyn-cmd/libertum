@@ -1,0 +1,18 @@
+[package]
+name = "libertum-html"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libertum-model = { workspace = true }
+libertum-formats-common = { workspace = true }
+html5ever = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+libertum-export = { workspace = true }
+proptest = { workspace = true }

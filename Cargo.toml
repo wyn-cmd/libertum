@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -23,6 +23,8 @@ libertum-markdown = { path = "crates/libertum-markdown" }
 libertum-editor = { path = "crates/libertum-editor" }
 libertum-export = { path = "crates/libertum-export" }
 libertum-mcp = { path = "crates/libertum-mcp" }
+libertum-diff = { path = "crates/libertum-diff" }
+libertum-html = { path = "crates/libertum-html" }
 
 # UI
 iced = "0.14"
@@ -34,6 +36,9 @@ swash = "0.2"
 tiny-skia = "0.12"
 vello = "0.7"  # 0.7 is the last vello on wgpu 27, which iced_wgpu 0.14 uses (vello 0.11 needs wgpu 30)
 unicode-segmentation = "1"
+# Text comparison for "compare with last posted" (Apache-2.0, no dependencies with the
+# default features). See docs/decisions.md.
+similar = "3.2.1"
 # Hyphenation (MIT OR Apache-2.0). Only languages whose embedded TeX patterns carry a
 # permissive licence are enabled; see docs/third-party-licences.md.
 hypher = { version = "0.1.8", default-features = false, features = ["alloc", "english"] }
@@ -43,6 +48,10 @@ hypher = { version = "0.1.8", default-features = false, features = ["alloc", "en
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
 quick-xml = "0.42"
 comrak = "0.59"
+# HTML import (MIT OR Apache-2.0, with every transitive dependency MIT, Apache-2.0 or
+# Unlicense-OR-MIT; checked 2026-11-22). Only the parser: Libertum builds its own tree, so
+# markup5ever_rcdom (an unsupported test DOM) and xml5ever are not pulled in.
+html5ever = "0.40"
 # Decoding and PNG re-encoding of inline images (MIT OR Apache-2.0). Only the codecs the
 # formats need; no rayon.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
@@ -105,3 +114,11 @@ codegen-units = 1
 # Keep dependencies optimised in dev so text shaping and rasterisation are representative.
 [profile.dev.package."*"]
 opt-level = 2
+
+# ICU4X prints "ICU4X data error: No segmentation model for complex script" with eprintln!
+# for every line-break pass over Chinese or Japanese text when debug assertions are on (a
+# release build compiles the message out). Parley is built without its optional
+# complex-script dictionaries, so the message is expected and only floods the terminal and
+# slows debug builds down. docs/decisions.md, 2026-11-22.
+[profile.dev.package.icu_provider]
+debug-assertions = false

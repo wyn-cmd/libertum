@@ -80,6 +80,21 @@ const FIND_MATCH_COLOUR: iced::Color = iced::Color {
     b: 0.0,
     a: 0.5,
 };
+/// Compare mode: text added since posting (green, translucent so the glyphs stay readable on
+/// white or coloured paper in both themes).
+const COMPARE_ADDED_COLOUR: iced::Color = iced::Color {
+    r: 0.2,
+    g: 0.72,
+    b: 0.35,
+    a: 0.3,
+};
+/// Compare mode: where posted text was removed (a solid red bar).
+const COMPARE_REMOVED_COLOUR: iced::Color = iced::Color {
+    r: 0.85,
+    g: 0.12,
+    b: 0.12,
+    a: 1.0,
+};
 /// Misspelling underline; readable on white paper in both themes.
 const SPELL_COLOUR: iced::Color = iced::Color {
     r: 0.82,
@@ -546,6 +561,9 @@ pub struct CanvasProps {
     /// Scroll offset in physical pixels.
     pub scroll: (f32, f32),
     pub source: PageSource,
+    /// The document's page colour (straight RGBA); `None` is white paper. Drawn under each
+    /// page so a page that is still rendering already shows its colour.
+    pub paper: Option<[u8; 4]>,
     /// Caret rectangle in page coordinates, drawn as an overlay (never baked into the bitmap).
     pub caret: Option<CaretRect>,
     /// Selection highlight rectangles in page coordinates.
@@ -555,6 +573,10 @@ pub struct CanvasProps {
     pub find: Vec<SelectionRect>,
     /// Misspelling underline rectangles, page coordinates.
     pub spell: Vec<SelectionRect>,
+    /// Compare mode: text added since the chapter was posted, page coordinates.
+    pub compare_added: Vec<SelectionRect>,
+    /// Compare mode: thin bars where posted text was removed, page coordinates.
+    pub compare_removed: Vec<SelectionRect>,
     /// IME composition text, drawn inline at the caret until it is committed.
     pub preedit: Option<PreeditOverlay>,
     /// Keep requesting a redraw every frame (autoscroll test; `App` ticks on `window::frames`).
@@ -1261,14 +1283,16 @@ where
                 if !m.continuous {
                     draw_shadow(renderer, rect);
                 }
-                // White paper under every page. Quads paint below images in a layer, so
-                // it only shows where no strip is drawn yet.
+                // Paper under every page (white, or the document's page colour). Quads paint
+                // below images in a layer, so it only shows where no strip is drawn yet.
                 renderer.fill_quad(
                     Quad {
                         bounds: rect,
                         ..Quad::default()
                     },
-                    Color::WHITE,
+                    self.props
+                        .paper
+                        .map_or(Color::WHITE, |[r, g, b, _]| Color::from_rgb8(r, g, b)),
                 );
                 // Older strips first, current strips over them (images in one layer paint in
                 // submission order), so a strip that is re-rendering after an edit keeps
@@ -1320,6 +1344,30 @@ where
 
             // The current Find match: amber over the selection tint, so it reads as "found
             // here" rather than as an ordinary selection, on white pages in both themes.
+            // Compare mode: added text tinted green, removed text marked by a red bar.
+            for (rects, colour) in [
+                (&self.props.compare_added, COMPARE_ADDED_COLOUR),
+                (&self.props.compare_removed, COMPARE_REMOVED_COLOUR),
+            ] {
+                for s in rects {
+                    if let Some(rect) = page_point_rect(
+                        &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
+                    ) && rect.intersects(&bounds)
+                    {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds: Rectangle::new(
+                                    rect.position(),
+                                    Size::new(rect.width.max(2.0), rect.height),
+                                ),
+                                ..Quad::default()
+                            },
+                            colour,
+                        );
+                    }
+                }
+            }
+
             for s in &self.props.find {
                 if let Some(rect) = page_point_rect(
                     &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
@@ -1605,10 +1653,13 @@ mod tests {
             scale_factor: 1.0,
             scroll: (0.0, 0.0),
             source: view.source.clone(),
+            paper: None,
             caret,
             selection: Vec::new(),
             find: Vec::new(),
             spell: Vec::new(),
+            compare_added: Vec::new(),
+            compare_removed: Vec::new(),
             preedit: None,
             animate: false,
             booklet: false,

@@ -117,7 +117,8 @@ kept so the mapping in code is mechanical (`serde` derives on `libertum-model` t
       "page_numbers": { "vertical": "bottom", "horizontal": "centre",
                         "start_at": 1, "mirror": false, "hide_first_page": false },
       "headers": { "default": { "text": "Halfway — {page}", "align": "start" } },
-      "footers": { "default": { "text": "{page} of {pages}", "align": "centre" } }
+      "footers": { "default": { "text": "{page} of {pages}", "align": "centre" } },
+      "page_colour": [244, 236, 216, 255]
     }
   ],
   "body": [

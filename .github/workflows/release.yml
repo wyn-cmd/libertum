@@ -7,13 +7,48 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  # A mistyped tag or a missing notes file must fail before four platform builds start.
+  preflight:
+    name: Check the tag and the notes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Check the version and the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag '$TAG' is not v<major>.<minor>.<patch>" >&2; exit 1 ;;
+          esac
+          crate_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$crate_version" != "$version" ]; then
+            echo "Cargo.toml says '$crate_version' but the tag says '$version'" >&2
+            exit 1
+          fi
+          notes="docs/RELEASE-${version}.md"
+          if [ ! -s "$notes" ]; then
+            echo "the release notes file '$notes' is missing or empty" >&2
+            exit 1
+          fi
+          echo "releasing Libertum $version from $GITHUB_SHA"
+
   build:
     name: ${{ matrix.name }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -119,10 +154,35 @@ jobs:
           if [ -f release/Libertum-Setup.exe ]; then
             cp release/Libertum-Setup.exe "release/Libertum-Setup-${version}.exe"
           fi
+          # Every platform must have produced what the notes promise before the release
+          # page is made; a missing bundle is a failed release, not a smaller one.
+          missing=0
+          for name in \
+            "Libertum-Setup.exe" \
+            "Libertum-Setup-${version}.exe" \
+            "libertum_${version}_amd64.deb" \
+            "libertum-${version}-1.x86_64.rpm" \
+            "Libertum-${version}-x86_64.AppImage" \
+            "Libertum-${version}-macos-arm64.dmg" \
+            "Libertum-${version}-macos-x64.dmg" \
+            "Libertum-${version}-macos-arm64.zip" \
+            "Libertum-${version}-macos-x64.zip"; do
+            if [ ! -f "release/$name" ]; then
+              echo "missing release file: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            ls -l release >&2
+            exit 1
+          fi
           cd release
-          sha256sum * > SHA256SUMS
+          # A rerun must not checksum the previous run's SHA256SUMS itself.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
           cat SHA256SUMS
           notes="../docs/RELEASE-${version}.md"
+          test -s "$notes"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file "$notes"
           else

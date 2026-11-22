@@ -607,6 +607,8 @@ pub struct DocView {
     pub geometry: PageGeometry,
     /// Pageless view: one endless column, drawn without page gaps or shadows.
     pub pageless: bool,
+    /// Compare mode: edits through [`edit`](Self::edit) and [`cut`](Self::cut) do nothing.
+    pub read_only: bool,
     /// Overrides the document's page setup while `continuous` is on.
     fixed_geometry: Option<PageGeometry>,
     word_count: usize,
@@ -802,6 +804,7 @@ impl DocView {
                 source,
                 geometry,
                 pageless: fixed_geometry.is_some(),
+                read_only: false,
                 fixed_geometry,
                 word_count,
                 chars,
@@ -1058,6 +1061,18 @@ impl DocView {
 
     /// Runs an editor command and synchronises layout, page hashes and word count.
     pub fn edit(
+        &mut self,
+        command: impl FnOnce(&mut Editor) -> Result<ChangeSet, EditorError>,
+    ) -> Result<(), EditorError> {
+        // Compare mode reads the document; its own reverts use `edit_unlocked`.
+        if self.read_only {
+            return Ok(());
+        }
+        self.edit_unlocked(command)
+    }
+
+    /// Applies an edit even while the view is read-only (compare mode's "Revert to posted").
+    pub fn edit_unlocked(
         &mut self,
         command: impl FnOnce(&mut Editor) -> Result<ChangeSet, EditorError>,
     ) -> Result<(), EditorError> {
@@ -1319,6 +1334,9 @@ impl DocView {
 
     /// Plain-text cut of the selection.
     pub fn cut(&mut self) -> Result<Option<String>, EditorError> {
+        if self.read_only {
+            return Ok(None);
+        }
         let Some(text) = self.editor.copy() else {
             return Ok(None);
         };
@@ -1439,6 +1457,14 @@ impl DocView {
         let index = self.editor.document().index_of(caret.block)?;
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
         layout.caret_rect(index, caret.offset, 1.0)
+    }
+
+    /// A thin bar at a text position, in page coordinates: where compare mode marks removed
+    /// text.
+    pub fn position_rect(&self, block: BlockId, offset: usize) -> Option<CaretRect> {
+        let index = self.editor.document().index_of(block)?;
+        let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+        layout.caret_rect(index, offset, 2.0)
     }
 
     /// The line box the caret is on, in page coordinates (see `LayoutState::line_rect`).
@@ -2501,5 +2527,73 @@ mod tests {
             "the layout changed, so the next call rebuilds"
         );
         assert_eq!(after.len(), view.page_total());
+    }
+}
+
+/// Timing probe for typing into a long document (`LIBERTUM_TYPING_PROBE=<file.lbtd>`, release
+/// build): opens it, waits for pagination, then times single-character edits at the start, in
+/// the middle and near the end, and how long the page map takes to be complete again.
+#[cfg(test)]
+mod typing_probe {
+    use super::*;
+
+    #[test]
+    #[ignore = "measures a real document; run with LIBERTUM_TYPING_PROBE=<file> --ignored"]
+    fn typing_into_a_long_document() {
+        let Some(path) = std::env::var_os("LIBERTUM_TYPING_PROBE") else {
+            return;
+        };
+        let native = libertum_native::Native::open(std::path::Path::new(&path)).expect("open");
+        let (mut view, _events) = DocView::open(native.document().clone());
+        let wait = |view: &DocView| {
+            let started = Instant::now();
+            while !view.source.pages.is_complete() {
+                std::thread::sleep(Duration::from_millis(5));
+                if started.elapsed() > Duration::from_secs(120) {
+                    break;
+                }
+            }
+            started.elapsed()
+        };
+        println!(
+            "initial pagination: {:?}, pages {}",
+            wait(&view),
+            view.page_total()
+        );
+        let ids: Vec<BlockId> = view.document().paragraph_ids().collect();
+        for (label, at) in [
+            ("start", 0),
+            ("middle", ids.len() / 2),
+            ("end", ids.len().saturating_sub(3)),
+        ] {
+            let block = ids[at];
+            view.move_caret(|ed| {
+                ed.set_caret(libertum_editor::DocPosition { block, offset: 0 }, false)
+            });
+            let mut sync = Vec::new();
+            let mut settle = Vec::new();
+            for c in "Teh quikc borwn fox jumpd ovr the dgo and kept running far past the end of the line so it wraps\n\n".chars() {
+                let t = Instant::now();
+                view.edit(|ed| ed.insert_text(&c.to_string())).expect("edit");
+                if c == '\n' {
+                    let synced = t.elapsed();
+                    let settled = wait(&view);
+                    println!("  Enter: edit sync {synced:?}, page map complete again {settled:?}");
+                }
+                sync.push(t.elapsed());
+                settle.push(wait(&view));
+            }
+            let ms = |d: &[Duration]| {
+                let mut v: Vec<f64> = d.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+                v.sort_by(f64::total_cmp);
+                (v[v.len() / 2], v[v.len() - 1])
+            };
+            let (sync_p50, sync_max) = ms(&sync);
+            let (settle_p50, settle_max) = ms(&settle);
+            println!(
+                "{label}: edit sync p50 {sync_p50:.1} ms max {sync_max:.1} ms; \
+                 page map complete again p50 {settle_p50:.1} ms max {settle_max:.1} ms"
+            );
+        }
     }
 }

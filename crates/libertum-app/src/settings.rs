@@ -96,6 +96,9 @@ pub struct Settings {
     /// Also suggest characters, pairings and keywords found in the chapter's own text, with no
     /// vocabulary needed (`libertum_export::auto_suggestions`). On by default; local only.
     pub auto_suggest_tags: bool,
+    /// Also suggest from the bundled starter list of common AO3 additional tags
+    /// (`libertum_export::starter_tags`). On by default; local only.
+    pub use_starter_tags: bool,
     /// Ask GitHub once a day whether a newer release exists. On by default; the check only
     /// reads the public releases API and never installs anything.
     pub check_for_updates: bool,
@@ -351,6 +354,7 @@ impl Default for Settings {
             chapter_headings: libertum_export::ChapterLevels::default(),
             tags: Vec::new(),
             auto_suggest_tags: true,
+            use_starter_tags: true,
             check_for_updates: true,
             spellcheck: true,
             spellcheck_language: SpellLanguage::British,
@@ -489,6 +493,7 @@ mod tests {
                 ),
             ],
             auto_suggest_tags: false,
+            use_starter_tags: false,
             check_for_updates: false,
             spellcheck: false,
             spellcheck_language: crate::spell::Language::American,

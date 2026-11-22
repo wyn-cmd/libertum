@@ -132,7 +132,7 @@ impl PageRenderer {
         let (w, h) = page_pixel_size(state, page_index, scale);
         let rows = rows.min(h.saturating_sub(y0));
         let mut pm = Pixmap::new(w, rows)?;
-        pm.fill(Color::WHITE);
+        pm.fill(page_fill(state.page_colour(page_index)));
         // The band in page points, and the shift from page points to band pixels.
         let shift = y0 as f32 / scale;
         let band_end = (y0 + rows) as f32 / scale;
@@ -580,5 +580,13 @@ fn blit_alpha(
                 data[i + c] = ((d * (255 - a) + s * a + 127) / 255) as u8;
             }
         }
+    }
+}
+
+/// The paper colour of a page: its own colour when it has one, otherwise white.
+fn page_fill(colour: Option<[u8; 4]>) -> Color {
+    match colour {
+        Some([r, g, b, _]) => Color::from_rgba8(r, g, b, 255),
+        None => Color::WHITE,
     }
 }

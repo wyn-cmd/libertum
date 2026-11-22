@@ -165,6 +165,19 @@ impl Exporter<'_> {
         };
         let page_height = geometry.height_pt;
 
+        // A page colour fills the whole sheet, under everything else (as the editor shows it).
+        if let Some(colour) = layout.page_colour(page_index) {
+            rect(
+                ops,
+                0.0,
+                0.0,
+                geometry.width_pt,
+                page_height,
+                colour,
+                page_height,
+            );
+        }
+
         // The watermark lies under everything else.
         if let Some(watermark) = layout.page_watermark(page_index) {
             let placement = Placement {

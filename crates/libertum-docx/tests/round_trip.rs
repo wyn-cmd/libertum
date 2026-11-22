@@ -1895,3 +1895,42 @@ fn entries_are_saved_without_page_numbers_when_the_layout_has_none_to_give() {
         xml.matches("w:fldCharType=\"end\"").count()
     );
 }
+
+#[test]
+fn the_page_colour_round_trips_and_word_is_told_to_show_it() {
+    let mut doc = Document::new();
+    for section in &mut doc.sections {
+        section.page_colour = Some([0xF4, 0xEC, 0xD8, 0xFF]);
+    }
+    let bytes = Docx::new(doc).to_bytes().expect("write");
+    let document_xml = zip_text(&bytes, "word/document.xml").expect("document part");
+    let background = document_xml.find("<w:background w:color=\"F4ECD8\"/>");
+    let body = document_xml.find("<w:body>");
+    assert!(
+        background.is_some() && background < body,
+        "the background comes before the body"
+    );
+    let settings = zip_text(&bytes, "word/settings.xml").expect("settings part");
+    assert!(settings.contains("<w:displayBackgroundShape/>"));
+    let back = Docx::parse(&bytes).expect("read");
+    assert!(
+        back.document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour == Some([0xF4, 0xEC, 0xD8, 0xFF]))
+    );
+
+    let plain = Docx::new(Document::new()).to_bytes().expect("write");
+    assert!(
+        !zip_text(&plain, "word/document.xml")
+            .expect("document part")
+            .contains("w:background")
+    );
+    let back = Docx::parse(&plain).expect("read");
+    assert!(
+        back.document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour.is_none())
+    );
+}

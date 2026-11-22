@@ -533,6 +533,11 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             Entry::item(s::VIEW_PAGELESS, Message::View(ViewAction::Pageless))
                 .checked(state.pageless),
             Entry::item(
+                s::VIEW_COMPARE,
+                Message::Compare(crate::app::CompareMsg::Toggle),
+            )
+            .checked(state.compare),
+            Entry::item(
                 s::VIEW_BOOKMARKS,
                 Message::ToggleInspector(Inspector::Bookmarks),
             )
@@ -577,6 +582,10 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 Entry::item(s::EXPORT_RTF, Message::Export(ExportFormat::Rtf)),
                 Entry::item(s::EXPORT_TEXT, Message::Export(ExportFormat::Text)),
                 Entry::item(s::EXPORT_MARKDOWN, Message::Export(ExportFormat::Markdown)),
+                Entry::item(
+                    s::EXPORT_PLAIN_HTML,
+                    Message::Export(ExportFormat::PlainHtml),
+                ),
                 Entry::Separator,
                 Entry::submenu(s::EXPORT_AO3, Message::OpenAo3Chapters, state.ao3_open),
             ];
@@ -610,6 +619,9 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 item(InsertAction::PageNumber),
                 Entry::Separator,
                 Entry::item(s::INSERT_DATE_TIME, Message::OpenDateTime),
+                Entry::Separator,
+                Entry::item(s::INSERT_CHAPTER_FILE, Message::ImportChapterFile),
+                Entry::item(s::INSERT_CHAPTER_HTML, Message::ImportChapterClipboard),
             ];
             // The Table button is gone from the toolbar; the caret's table commands live
             // here while the caret is in one.
@@ -1130,6 +1142,7 @@ mod tests {
                 s::EXPORT_RTF.to_owned(),
                 s::EXPORT_TEXT.to_owned(),
                 s::EXPORT_MARKDOWN.to_owned(),
+                s::EXPORT_PLAIN_HTML.to_owned(),
                 s::EXPORT_AO3.to_owned(),
             ]
         );

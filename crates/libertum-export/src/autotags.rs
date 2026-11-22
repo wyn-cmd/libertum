@@ -18,19 +18,147 @@
 //!   paragraph. Text alone cannot tell a romance from a friendship, so a pair is written the
 //!   romantic way (`A/B`) only when romantic cue words (kiss, love, lips ...) show up in
 //!   paragraphs they share; otherwise it is written the platonic way (`A & B`).
-//! * **Additional tags** are the words the chapter leans on most, after names, function words
-//!   and a list of very common narrative words are set aside. There is no corpus to compare
-//!   against, so this list is the noisiest of the three.
+//! * **Full names.** A [`NameBook`] holds the full names (two or three capitalised words, seen
+//!   at least twice) of the whole story, plus any the writer has used before. A chapter that
+//!   says only "Mara" suggests "Mara Ellison" when that is the one full name with "Mara" in
+//!   it; a part shared by two full names ("Ellison" in "Mara Ellison" and "James Ellison")
+//!   stays as it is. Mentions are counted over every form of the name, and pairings use the
+//!   full names and count a paragraph that uses any form.
+//! * **Additional tags** are the words and two-word phrases the chapter leans on most, after
+//!   names, function words and a list of very common narrative words are set aside. There is
+//!   no corpus to compare against, so this list is the noisiest of the three.
 //!
 //! The fandom cannot be told from a chapter's text and is never suggested, and neither are
 //! ratings or warnings, which the writer chooses on AO3.
 
 use std::collections::{HashMap, HashSet};
 
-use libertum_model::Document;
-
 use crate::tags::{Tag, TagCategory, TagMatch, TagSuggestion, is_stopword, stem};
-use crate::{Chapter, chapter_text};
+
+/// Times a run of capitalised words must appear in the whole story to count as a full name.
+const MIN_FULL_NAME: usize = 2;
+/// Times a two-word phrase must appear in a chapter to be suggested.
+const MIN_PHRASE: usize = 3;
+/// Most two-word phrases among the keyword suggestions.
+const MAX_PHRASES: usize = 3;
+
+/// The full names of a story's characters, so a chapter's "Mara" can be suggested as
+/// "Mara Ellison". Built from the whole story's text, and topped up with names the writer used
+/// before (a remembered name never overrides one the story itself uses).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameBook {
+    /// Each full name as its words.
+    full: Vec<Vec<String>>,
+}
+
+impl NameBook {
+    /// The full names in `text`: runs of two or three capitalised words seen at least twice.
+    pub fn from_text(text: &str) -> Self {
+        let paragraphs: Vec<&str> = text
+            .split('\n')
+            .map(str::trim)
+            .filter(|paragraph| !paragraph.is_empty())
+            .collect();
+        let scan = scan_names(&paragraphs);
+        let mut totals: HashMap<&String, usize> = HashMap::new();
+        for (run, count) in scan.runs.iter().chain(&scan.tails) {
+            *totals.entry(run).or_insert(0) += count;
+        }
+        let mut runs: Vec<(&String, usize)> = totals
+            .into_iter()
+            .filter(|(run, count)| {
+                *count >= MIN_FULL_NAME
+                    && run
+                        .split(' ')
+                        .all(|part| !scan.lower.contains(&part.to_lowercase()))
+            })
+            .collect();
+        // "Later Mara Ellison" gives way to "Mara Ellison" when the shorter name is seen as
+        // often: the extra word is a sentence's opening word.
+        let counts: HashMap<&String, usize> = runs.iter().map(|(r, c)| (*r, *c)).collect();
+        runs.retain(|(run, count)| {
+            run.split_once(' ').is_none_or(|(_, tail)| {
+                !tail.contains(' ')
+                    || !counts
+                        .iter()
+                        .any(|(other, c)| other.as_str() == tail && *c >= *count)
+            })
+        });
+        // Most used first, so a longer, rarer run does not shadow the usual full name.
+        runs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let mut book = Self::default();
+        for (run, _) in runs {
+            let parts: Vec<String> = run.split(' ').map(str::to_owned).collect();
+            // A run inside a full name already kept ("Mara Jane Ellison" vs "Jane Ellison")
+            // is the same person.
+            let inside = book
+                .full
+                .iter()
+                .any(|full| parts.iter().all(|part| full.contains(part)));
+            if !inside {
+                book.full.push(parts);
+            }
+        }
+        book
+    }
+
+    /// Adds full names remembered from earlier use. One whose words the story already uses
+    /// in a full name of its own is left out: the story's own names win.
+    pub fn remember<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        for name in names {
+            let parts: Vec<String> = name.split_whitespace().map(str::to_owned).collect();
+            if parts.len() < 2 || parts.len() > MAX_NAME_WORDS {
+                continue;
+            }
+            let clashes = self
+                .full
+                .iter()
+                .any(|full| parts.iter().any(|part| full.contains(part)));
+            if !clashes {
+                self.full.push(parts);
+            }
+        }
+    }
+
+    /// The full names, as text.
+    pub fn names(&self) -> Vec<String> {
+        self.full.iter().map(|parts| parts.join(" ")).collect()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.full.iter().any(|parts| parts.join(" ") == name)
+    }
+
+    /// The one full name `part` belongs to, if exactly one has it.
+    fn resolve(&self, part: &str) -> Option<&Vec<String>> {
+        let mut found = self
+            .full
+            .iter()
+            .filter(|full| full.iter().any(|p| p == part));
+        match (found.next(), found.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    }
+
+    /// The single words that stand for `full` alone (its parts no other full name has).
+    fn aliases(&self, full: &[String]) -> Vec<String> {
+        full.iter()
+            .filter(|part| self.resolve(part).is_some_and(|f| f.as_slice() == full))
+            .cloned()
+            .collect()
+    }
+}
+
+/// A character found in a chapter: the name to suggest and every form the text uses.
+struct Character {
+    name: String,
+    mentions: usize,
+    /// The full name (if it has more than one word) and the single words that stand for it.
+    forms: Vec<String>,
+    /// The short forms this chapter actually uses, for the evidence line.
+    used_short: Vec<String>,
+}
 
 /// Most suggestions of each kind.
 pub const MAX_CHARACTERS: usize = 8;
@@ -336,48 +464,61 @@ const ROMANTIC_CUES: &[&str] = &[
 /// Suggestions drawn from `text` alone: characters first, then relationships, then additional
 /// tags. Deterministic for a given text.
 pub fn auto_suggestions(text: &str) -> Vec<TagSuggestion> {
+    auto_suggestions_with(text, &NameBook::from_text(text))
+}
+
+/// [`auto_suggestions`] with the story's full names (see [`NameBook`]).
+pub fn auto_suggestions_with(text: &str, book: &NameBook) -> Vec<TagSuggestion> {
     let paragraphs: Vec<&str> = text
         .split('\n')
         .map(str::trim)
         .filter(|paragraph| !paragraph.is_empty())
         .collect();
     let scan = scan_names(&paragraphs);
-    let characters = characters(&scan);
+    let characters = resolve_characters(&paragraphs, characters(&scan), book);
     let relationships = relationships(&paragraphs, &characters);
     let name_words: HashSet<String> = characters
         .iter()
-        .flat_map(|(name, _)| name.split(' ').map(str::to_lowercase))
+        .flat_map(|c| {
+            c.forms
+                .iter()
+                .flat_map(|f| f.split(' ').map(str::to_lowercase))
+        })
         .chain(scan.all_name_words())
         .collect();
     let keywords = keywords(&paragraphs, &name_words);
 
     let mut out = Vec::new();
-    for (name, count) in &characters {
+    for character in &characters {
+        // "mentions (as Mara, Ellison)" when the chapter also uses the short forms.
+        let term = if character.name.contains(' ') && !character.used_short.is_empty() {
+            format!("mentions (as {})", character.used_short.join(", "))
+        } else {
+            "mentions".to_owned()
+        };
         out.push(suggestion(
-            name.clone(),
+            character.name.clone(),
             TagCategory::Character,
-            *count as f32,
+            character.mentions as f32,
             vec![TagMatch {
-                term: "mentions".to_owned(),
-                count: *count,
+                term,
+                count: character.mentions,
             }],
         ));
     }
     out.extend(relationships);
     for (word, count) in keywords {
         out.push(suggestion(
-            capitalise(&word),
+            word.split(' ')
+                .map(capitalise)
+                .collect::<Vec<_>>()
+                .join(" "),
             TagCategory::Freeform,
             count as f32,
             vec![TagMatch { term: word, count }],
         ));
     }
     out
-}
-
-/// [`auto_suggestions`] for one chapter's text.
-pub fn auto_suggestions_for_chapter(document: &Document, chapter: &Chapter) -> Vec<TagSuggestion> {
-    auto_suggestions(&chapter_text(document, chapter))
 }
 
 /// `vocabulary` suggestions followed by the `auto` ones the vocabulary does not already cover
@@ -521,6 +662,9 @@ struct NameScan {
     initial_comma: HashMap<String, usize>,
     /// Occurrences of each run of two or more capitalised words.
     runs: HashMap<String, usize>,
+    /// Runs of three that open a sentence, without their first word ("Later Mara Ellison"
+    /// gives "Mara Ellison"): the opening word may be an ordinary word, capitalised.
+    tails: HashMap<String, usize>,
     /// Every word that also appears in lower case.
     lower: HashSet<String>,
 }
@@ -538,14 +682,20 @@ fn scan_names(paragraphs: &[&str]) -> NameScan {
         initial: HashMap::new(),
         initial_comma: HashMap::new(),
         runs: HashMap::new(),
+        tails: HashMap::new(),
         lower: HashSet::new(),
     };
     for paragraph in paragraphs {
         let words = words(paragraph);
         let mut run: Vec<&str> = Vec::new();
-        let flush_run = |run: &mut Vec<&str>, scan: &mut NameScan| {
+        // The run's first word opened a sentence.
+        let mut opens = false;
+        let flush_run = |run: &mut Vec<&str>, scan: &mut NameScan, opens: bool| {
             if run.len() >= 2 {
                 *scan.runs.entry(run.join(" ")).or_insert(0) += 1;
+            }
+            if run.len() >= 3 && opens {
+                *scan.tails.entry(run[1..].join(" ")).or_insert(0) += 1;
             }
             run.clear();
         };
@@ -558,12 +708,12 @@ fn scan_names(paragraphs: &[&str]) -> NameScan {
                 if word.text.chars().next().is_some_and(char::is_lowercase) {
                     scan.lower.insert(lower);
                 }
-                flush_run(&mut run, &mut scan);
+                flush_run(&mut run, &mut scan, opens);
                 continue;
             }
             // A new sentence starts a new run: "...Voss. Mara..." is two names, not one.
             if word.initial {
-                flush_run(&mut run, &mut scan);
+                flush_run(&mut run, &mut scan, opens);
                 *scan.initial.entry(word.text.clone()).or_insert(0) += 1;
                 if word.comma {
                     *scan.initial_comma.entry(word.text.clone()).or_insert(0) += 1;
@@ -572,11 +722,18 @@ fn scan_names(paragraphs: &[&str]) -> NameScan {
                 *scan.middle.entry(word.text.clone()).or_insert(0) += 1;
             }
             if run.len() == MAX_NAME_WORDS {
-                flush_run(&mut run, &mut scan);
+                flush_run(&mut run, &mut scan, opens);
+            }
+            if run.is_empty() {
+                opens = word.initial;
             }
             run.push(&word.text);
+            // A comma ends a name: "Later, Mara Ellison" is not "Later Mara Ellison".
+            if word.comma {
+                flush_run(&mut run, &mut scan, opens);
+            }
         }
-        flush_run(&mut run, &mut scan);
+        flush_run(&mut run, &mut scan, opens);
     }
     scan
 }
@@ -639,8 +796,102 @@ fn characters(scan: &NameScan) -> Vec<(String, usize)> {
         found.push((run.clone(), count));
     }
     found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    found.truncate(MAX_CHARACTERS);
     found
+}
+
+/// Folds the names found in a chapter into the story's full names, counts every form of each
+/// name, and keeps the most mentioned.
+fn resolve_characters(
+    paragraphs: &[&str],
+    found: Vec<(String, usize)>,
+    book: &NameBook,
+) -> Vec<Character> {
+    let mut out: Vec<Character> = Vec::new();
+    for (name, _) in found {
+        let full: Option<Vec<String>> = if book.contains(&name) {
+            Some(name.split(' ').map(str::to_owned).collect())
+        } else if !name.contains(' ') {
+            book.resolve(&name).cloned()
+        } else {
+            // "Later Mara Ellison": a sentence's opening word in front of a known full name.
+            name.split_once(' ')
+                .filter(|(_, tail)| book.contains(tail))
+                .map(|(_, tail)| tail.split(' ').map(str::to_owned).collect())
+        };
+        let (canonical, forms) = match full {
+            Some(parts) => {
+                let joined = parts.join(" ");
+                let mut forms = vec![joined.clone()];
+                forms.extend(book.aliases(&parts));
+                (joined, forms)
+            }
+            None => (name.clone(), vec![name]),
+        };
+        if out.iter().any(|c| c.name == canonical) {
+            continue;
+        }
+        let (mentions, used_short) = count_mentions(paragraphs, &forms);
+        if mentions >= MIN_MENTIONS {
+            out.push(Character {
+                name: canonical,
+                mentions,
+                forms,
+                used_short,
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        b.mentions
+            .cmp(&a.mentions)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out.truncate(MAX_CHARACTERS);
+    out
+}
+
+/// How often any of `forms` appears (a multi-word form counts once, not once per word), and
+/// which single-word forms were used, in the order they first appear.
+fn count_mentions(paragraphs: &[&str], forms: &[String]) -> (usize, Vec<String>) {
+    let long: Vec<Vec<&str>> = forms
+        .iter()
+        .filter(|f| f.contains(' '))
+        .map(|f| f.split(' ').collect())
+        .collect();
+    let single: HashSet<&str> = forms
+        .iter()
+        .filter(|f| !f.contains(' '))
+        .map(String::as_str)
+        .collect();
+    let mut count = 0;
+    let mut used: Vec<String> = Vec::new();
+    for paragraph in paragraphs {
+        let words = words(paragraph);
+        let mut i = 0;
+        while i < words.len() {
+            if let Some(n) = long.iter().map(Vec::len).find(|&n| {
+                long.iter().any(|parts| {
+                    parts.len() == n
+                        && words.len() >= i + n
+                        && parts
+                            .iter()
+                            .zip(&words[i..i + n])
+                            .all(|(p, w)| *p == w.text)
+                })
+            }) {
+                count += 1;
+                i += n;
+                continue;
+            }
+            if single.contains(words[i].text.as_str()) {
+                count += 1;
+                if !used.contains(&words[i].text) {
+                    used.push(words[i].text.clone());
+                }
+            }
+            i += 1;
+        }
+    }
+    (count, used)
 }
 
 // ------------------------------------------------------------------ relationships
@@ -654,8 +905,8 @@ fn mentions(paragraph: &str, name: &str) -> bool {
     })
 }
 
-fn relationships(paragraphs: &[&str], characters: &[(String, usize)]) -> Vec<TagSuggestion> {
-    let pool: Vec<&(String, usize)> = characters.iter().take(PAIR_POOL).collect();
+fn relationships(paragraphs: &[&str], characters: &[Character]) -> Vec<TagSuggestion> {
+    let pool: Vec<&Character> = characters.iter().take(PAIR_POOL).collect();
     if pool.len() < 2 {
         return Vec::new();
     }
@@ -666,7 +917,7 @@ fn relationships(paragraphs: &[&str], characters: &[(String, usize)]) -> Vec<Tag
         let present: Vec<usize> = pool
             .iter()
             .enumerate()
-            .filter(|(_, (name, _))| mentions(paragraph, name))
+            .filter(|(_, character)| character.forms.iter().any(|form| mentions(paragraph, form)))
             .map(|(index, _)| index)
             .collect();
         if present.len() < 2 {
@@ -697,7 +948,7 @@ fn relationships(paragraphs: &[&str], characters: &[(String, usize)]) -> Vec<Tag
         .map(|((a, b), (together, cue))| {
             let romantic = cue >= MIN_ROMANTIC_PARAGRAPHS;
             let separator = if romantic { "/" } else { " & " };
-            let name = format!("{}{separator}{}", pool[a].0, pool[b].0);
+            let name = format!("{}{separator}{}", pool[a].name, pool[b].name);
             let mut matched = vec![TagMatch {
                 term: "paragraphs together".to_owned(),
                 count: together,
@@ -749,12 +1000,55 @@ fn keywords(paragraphs: &[&str], names: &HashSet<String>) -> Vec<(String, usize)
             (forms.remove(0).0, total)
         })
         .collect();
+    let phrases = phrases(paragraphs, names);
+    // A word that is mostly used inside a suggested phrase is that phrase.
+    ranked.retain(|(word, count)| {
+        !phrases.iter().any(|(phrase, phrase_count)| {
+            phrase.split(' ').any(|part| part == word) && phrase_count * 2 >= *count
+        })
+    });
     ranked.sort_by(|a, b| {
         b.1.cmp(&a.1)
             .then_with(|| b.0.len().cmp(&a.0.len()))
             .then_with(|| a.0.cmp(&b.0))
     });
-    ranked.truncate(MAX_KEYWORDS);
+    let mut out = phrases;
+    out.extend(ranked);
+    out.truncate(MAX_KEYWORDS);
+    out
+}
+
+/// Two-word phrases the chapter repeats ("harbour lights"), most used first: neither word a
+/// name, a function word or a very common narrative word, and no sentence break or comma
+/// between them.
+fn phrases(paragraphs: &[&str], names: &HashSet<String>) -> Vec<(String, usize)> {
+    let usable = |lower: &str| {
+        lower.chars().count() >= 3
+            && !names.contains(lower)
+            && !is_stopword(lower)
+            && !COMMON_WORDS.contains(&lower)
+            && lower.chars().all(char::is_alphabetic)
+    };
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for paragraph in paragraphs {
+        let words = words(paragraph);
+        for pair in words.windows(2) {
+            let (first, second) = (&pair[0], &pair[1]);
+            if first.comma || second.initial {
+                continue;
+            }
+            let (a, b) = (first.text.to_lowercase(), second.text.to_lowercase());
+            if usable(&a) && usable(&b) && a != b {
+                *counts.entry(format!("{a} {b}")).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(_, count)| *count >= MIN_PHRASE)
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(MAX_PHRASES);
     ranked
 }
 
@@ -905,5 +1199,105 @@ Then Hope laughed. Hope said hope was enough. Hope stayed.";
         assert_eq!(dragons, 1);
         // The writer's own entry comes first.
         assert_eq!(merged[0].tag.name, "dragon");
+    }
+
+    // ------------------------------------------------------------ full names and phrases
+
+    fn names_of(suggestions: &[TagSuggestion], category: TagCategory) -> Vec<String> {
+        suggestions
+            .iter()
+            .filter(|s| s.tag.category == category)
+            .map(|s| s.tag.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_first_name_is_suggested_as_the_full_name_the_story_uses() {
+        let story = "Mara Ellison came home late.\nLater, Mara Ellison slept.\n\
+                     The rain fell on Mara.\nIt woke Mara at dawn.\nShe found Mara's coat.";
+        let book = NameBook::from_text(story);
+        assert_eq!(book.names(), ["Mara Ellison"]);
+        // A chapter that only says "Mara".
+        let chapter = "The rain fell on Mara.\nIt woke Mara at dawn.\nThey called Mara in.";
+        let found = auto_suggestions_with(chapter, &book);
+        let characters = names_of(&found, TagCategory::Character);
+        assert_eq!(characters, ["Mara Ellison"]);
+        let evidence = &found[0].matched[0];
+        assert_eq!(evidence.count, 3);
+        assert_eq!(evidence.term, "mentions (as Mara)");
+    }
+
+    #[test]
+    fn a_surname_two_people_share_stays_as_it_is() {
+        let story = "Then Mara Ellison spoke. Then Mara Ellison left.\n\
+                     Then James Ellison spoke. Then James Ellison left.";
+        let book = NameBook::from_text(story);
+        assert_eq!(book.names().len(), 2);
+        let chapter = "The letter was for Ellison.\nAnd Ellison read it.\nSo Ellison wept.";
+        let characters = names_of(
+            &auto_suggestions_with(chapter, &book),
+            TagCategory::Character,
+        );
+        assert_eq!(characters, ["Ellison"], "ambiguous: not folded");
+        // But each first name still finds its full name.
+        let chapter = "Then Mara ran.\nAnd Mara hid.\nSo Mara waited.";
+        let characters = names_of(
+            &auto_suggestions_with(chapter, &book),
+            TagCategory::Character,
+        );
+        assert_eq!(characters, ["Mara Ellison"]);
+    }
+
+    #[test]
+    fn remembered_names_fill_in_but_never_override_the_story() {
+        let mut book = NameBook::from_text("Then Mara Quinn spoke. Then Mara Quinn left.");
+        book.remember(["Mara Ellison", "Tomas Reyes", "Solo"]);
+        assert_eq!(book.names(), ["Mara Quinn", "Tomas Reyes"]);
+        let chapter = "Then Tomas laughed.\nAnd Tomas sang.\nSo Tomas left.";
+        let characters = names_of(
+            &auto_suggestions_with(chapter, &book),
+            TagCategory::Character,
+        );
+        assert_eq!(characters, ["Tomas Reyes"]);
+    }
+
+    #[test]
+    fn pairings_use_full_names_and_count_any_form() {
+        let mut book = NameBook::default();
+        book.remember(["Mara Ellison", "Tomas Reyes"]);
+        let chapter = "Then Mara kissed Tomas.\nAnd Mara held Tomas, her love.\n\
+                       So Mara watched Tomas sleep.\nThen Mara and Tomas kissed again.";
+        let found = auto_suggestions_with(chapter, &book);
+        let pairs = names_of(&found, TagCategory::Relationship);
+        assert_eq!(pairs, ["Mara Ellison/Tomas Reyes"]);
+    }
+
+    #[test]
+    fn a_repeated_two_word_phrase_is_suggested_once_as_a_phrase() {
+        let chapter = "The harbour lights blinked.\nShe watched the harbour lights.\n\
+                       Below, the harbour lights shone.\nThe harbour was quiet.";
+        let freeform = names_of(&auto_suggestions(chapter), TagCategory::Freeform);
+        assert!(
+            freeform.contains(&"Harbour Lights".to_owned()),
+            "{freeform:?}"
+        );
+        assert!(
+            !freeform.contains(&"Harbour".to_owned()),
+            "folded into the phrase"
+        );
+    }
+
+    #[test]
+    fn an_opening_word_in_front_of_a_full_name_is_not_part_of_it() {
+        let story =
+            "Later Mara Ellison wrote.\nLater Mara Ellison wrote.\nLater Mara Ellison slept.";
+        let book = NameBook::from_text(story);
+        assert!(
+            book.names().contains(&"Mara Ellison".to_owned()),
+            "{:?}",
+            book.names()
+        );
+        let characters = names_of(&auto_suggestions_with(story, &book), TagCategory::Character);
+        assert_eq!(characters, ["Mara Ellison"]);
     }
 }

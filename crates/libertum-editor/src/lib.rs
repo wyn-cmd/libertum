@@ -1589,6 +1589,36 @@ impl Editor {
         Ok(b.dirty)
     }
 
+    /// The document's page colour (the first section's; the app sets them all together).
+    pub fn page_colour(&self) -> Option<[u8; 4]> {
+        self.doc.sections.first().and_then(|s| s.page_colour)
+    }
+
+    /// Sets (or, with `None`, removes) the page colour on every section, as one undoable
+    /// step. The colour is stored opaque: a page has nothing behind it to show through.
+    pub fn set_page_colour(&mut self, colour: Option<[u8; 4]>) -> Result<ChangeSet, EditorError> {
+        let colour = colour.map(|[r, g, b, _]| [r, g, b, 255]);
+        if self.doc.sections.iter().all(|s| s.page_colour == colour) {
+            return Ok(ChangeSet::default());
+        }
+        let sections: Vec<Section> = self
+            .doc
+            .sections
+            .iter()
+            .cloned()
+            .map(|mut section| {
+                section.page_colour = colour;
+                section
+            })
+            .collect();
+        let mut b = EditBuilder::default();
+        for (index, section) in sections.into_iter().enumerate() {
+            b.apply(&mut self.doc, Operation::SetSection { index, section })?;
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
     /// Turns the document's default ligature use on (standard ligatures) or off, one undoable
     /// step. Runs that set their own ligatures keep them.
     pub fn set_document_ligatures(
@@ -2079,6 +2109,223 @@ impl Editor {
             )?;
         }
         Ok(())
+    }
+
+    /// Replaces byte ranges of one paragraph's text, as one undoable step ("Revert to
+    /// posted" in compare mode). The ranges must not overlap; they are applied from the last
+    /// to the first, so every range is an offset into the paragraph as it is now. Inserted
+    /// text takes the formatting of the character before it. The caret lands after the first
+    /// replacement.
+    pub fn replace_in_paragraph(
+        &mut self,
+        block: BlockId,
+        edits: &[(std::ops::Range<usize>, String)],
+    ) -> Result<ChangeSet, EditorError> {
+        let mut ordered: Vec<&(std::ops::Range<usize>, String)> = edits.iter().collect();
+        ordered.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        let mut b = EditBuilder::default();
+        for (range, text) in &ordered {
+            if !range.is_empty() {
+                b.apply(
+                    &mut self.doc,
+                    Operation::DeleteRange {
+                        block,
+                        range: range.clone(),
+                    },
+                )?;
+            }
+            if !text.is_empty() {
+                b.apply(
+                    &mut self.doc,
+                    Operation::InsertText {
+                        block,
+                        offset: range.start,
+                        text: text.clone(),
+                        format: None,
+                    },
+                )?;
+            }
+        }
+        if let Some((range, text)) = ordered.last() {
+            self.selection = Selection::caret(DocPosition {
+                block,
+                offset: range.start + text.len(),
+            });
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
+    /// Removes the top-level paragraphs `remove` and puts body paragraphs holding `texts` in
+    /// their place, as one undoable step ("Revert to posted" for whole paragraphs). With
+    /// nothing to remove, the new paragraphs go after `after`, or else before `before`, or
+    /// else at the start. The document always keeps at least one paragraph. The caret lands
+    /// at the start of the first new paragraph (or where the removed ones were).
+    pub fn replace_paragraphs(
+        &mut self,
+        remove: &[BlockId],
+        after: Option<BlockId>,
+        before: Option<BlockId>,
+        texts: &[String],
+    ) -> Result<ChangeSet, EditorError> {
+        let index = match remove.first() {
+            Some(first) => self
+                .doc
+                .index_of(*first)
+                .ok_or(ModelError::BlockNotFound(*first))?,
+            None => match (after, before) {
+                (Some(after), _) => {
+                    self.doc
+                        .index_of(after)
+                        .ok_or(ModelError::BlockNotFound(after))?
+                        + 1
+                }
+                (None, Some(before)) => self
+                    .doc
+                    .index_of(before)
+                    .ok_or(ModelError::BlockNotFound(before))?,
+                (None, None) => 0,
+            },
+        };
+        let mut b = EditBuilder::default();
+        for id in remove.iter().rev() {
+            b.apply(&mut self.doc, Operation::RemoveBlock { block: *id })?;
+        }
+        let mut texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        if texts.is_empty() && self.doc.body().is_empty() {
+            texts.push("");
+        }
+        let mut first_new = None;
+        for (k, text) in texts.into_iter().enumerate() {
+            let id = self.doc.alloc_id();
+            first_new.get_or_insert(id);
+            b.apply(
+                &mut self.doc,
+                Operation::InsertBlock {
+                    index: index + k,
+                    block: Block::Paragraph(Paragraph::new(id, text)),
+                },
+            )?;
+        }
+        let caret_block = first_new.or_else(|| {
+            let len = self.doc.body().len();
+            (len > 0)
+                .then(|| self.doc.body().id_at(index.min(len - 1)))
+                .flatten()
+        });
+        if let Some(block) = caret_block {
+            self.selection = Selection::caret(DocPosition { block, offset: 0 });
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
+    /// Inserts another document's body after the caret's top-level block, as one undoable
+    /// step (Import Chapter). Every block gets a fresh id; paragraph styles are matched by
+    /// name (a name this document lacks becomes Body); list groups move past the ones in use;
+    /// generated contents entries and bookmarks whose names are taken are left out. Returns
+    /// the change; the caret moves to the start of the first inserted paragraph.
+    pub fn insert_document(&mut self, source: &Document) -> Result<ChangeSet, EditorError> {
+        let caret = self.clamp(self.selection.head);
+        let at = self
+            .doc
+            .location_of(caret.block)
+            .map_or(self.doc.body().len(), |location| location.block + 1);
+        // Each source style's place in this document's sheet, matched by name.
+        let names: Vec<String> = (0..)
+            .map_while(|i| self.doc.styles.get(StyleId(i)))
+            .map(|style| style.name.to_ascii_lowercase())
+            .collect();
+        let style_map: Vec<StyleId> = (0..)
+            .map_while(|i| source.styles.get(StyleId(i)))
+            .map(|style| {
+                names
+                    .iter()
+                    .position(|name| *name == style.name.to_ascii_lowercase())
+                    .map_or(StyleId::BODY, |i| StyleId(i as u32))
+            })
+            .collect();
+        let style_for = move |id: StyleId| {
+            style_map
+                .get(id.0 as usize)
+                .copied()
+                .unwrap_or(StyleId::BODY)
+        };
+        let list_shift = self.doc.max_list_group() + 1;
+        let mut taken: std::collections::HashSet<String> = self
+            .doc
+            .paragraphs()
+            .flat_map(|p| p.bookmarks().iter().map(|b| b.name.to_ascii_lowercase()))
+            .collect();
+        let mut blocks: Vec<Block> = Vec::new();
+        for block in source.body().iter() {
+            match block {
+                Block::Paragraph(p) if p.props.toc_target.is_some() => {}
+                Block::Paragraph(p) => blocks.push(Block::Paragraph(p.clone())),
+                Block::Table(t) => blocks.push(Block::Table(t.clone())),
+            }
+        }
+        let fix =
+            |p: &mut Paragraph, id: BlockId, taken: &mut std::collections::HashSet<String>| {
+                p.id = id;
+                let mut props = p.props;
+                props.style = style_for(props.style);
+                if let Some(list) = &mut props.list {
+                    list.group = list.group.saturating_add(list_shift);
+                }
+                p.props = props;
+                let kept: Vec<Bookmark> = p
+                    .bookmarks()
+                    .iter()
+                    .filter(|b| taken.insert(b.name.to_ascii_lowercase()))
+                    .cloned()
+                    .collect();
+                if kept.len() != p.bookmarks().len() {
+                    p.set_bookmarks(kept);
+                }
+            };
+        let mut b = EditBuilder::default();
+        let mut first_paragraph = None;
+        for (k, mut block) in blocks.into_iter().enumerate() {
+            match &mut block {
+                Block::Paragraph(p) => {
+                    let id = self.doc.alloc_id();
+                    fix(p, id, &mut taken);
+                    first_paragraph.get_or_insert(id);
+                    b.apply(
+                        &mut self.doc,
+                        Operation::InsertBlock {
+                            index: at + k,
+                            block,
+                        },
+                    )?;
+                }
+                Block::Table(table) => {
+                    let mut table = table.clone();
+                    table.id = self.doc.alloc_id();
+                    for row in &mut table.rows {
+                        for cell in &mut row.cells {
+                            for p in &mut cell.paragraphs {
+                                let id = self.doc.alloc_id();
+                                fix(p, id, &mut taken);
+                            }
+                        }
+                    }
+                    b.apply(
+                        &mut self.doc,
+                        Operation::InsertTable {
+                            index: at + k,
+                            table,
+                        },
+                    )?;
+                }
+            }
+        }
+        if let Some(block) = first_paragraph {
+            self.selection = Selection::caret(DocPosition { block, offset: 0 });
+        }
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
     }
 
     /// Brings the TOC up to date, then records the transaction.

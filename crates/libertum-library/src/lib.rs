@@ -15,11 +15,18 @@
 //!   "name (conflicted copy ...)", "name (1)" or "name-MACHINE"; these are recognised so the
 //!   library can point at them.
 //! - **The library folder** ([`scan_library`]): the documents in one folder tree, newest first.
+//! - **"Last posted" copies** ([`save_posted`], [`load_posted`]): a chapter's text as it was
+//!   when the writer last marked it posted, kept in the history folder for comparison.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod posted;
+pub use posted::{
+    ChapterKey, POSTED_DIR, PostedCopy, list_posted, load_posted, posted_dir, save_posted,
+};
 
 /// The hidden folder, beside a document, that holds its earlier versions.
 pub const HISTORY_DIR: &str = ".libertum-history";

@@ -1484,6 +1484,7 @@ impl LayoutState {
             note.text.hash(&mut h);
         }
         self.section(pg.section).watermark.hash(&mut h);
+        self.section(pg.section).page_colour.hash(&mut h);
         pg.endnotes.hash(&mut h);
         if !self.pageless {
             self.numbering.hash(&mut h);
@@ -1558,6 +1559,13 @@ impl LayoutState {
             });
         }
         out
+    }
+
+    /// The background colour of page `page` (straight RGBA), if its section has one. `None`
+    /// is white paper.
+    pub fn page_colour(&self, page: usize) -> Option<[u8; 4]> {
+        let pg = self.pages.get(page)?;
+        self.section(pg.section).page_colour
     }
 
     /// The watermark of page `page`, if its section has one: the text sized to span most of
@@ -2039,6 +2047,17 @@ impl LayoutState {
         };
         let geo = pg.geometry;
         let mut out = Vec::new();
+        // A page colour lies under the whole page: every strip repaints when it changes.
+        if let Some(colour) = self.section(pg.section).page_colour {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            colour.hash(&mut h);
+            (geo.width_pt.to_bits(), geo.height_pt.to_bits()).hash(&mut h);
+            out.push(PageItem {
+                top: 0.0,
+                bottom: geo.height_pt,
+                key: h.finish(),
+            });
+        }
         // A watermark lies under the whole page: every strip repaints when it changes.
         if let Some(watermark) = self.section(pg.section).watermark.as_ref() {
             let mut h = std::collections::hash_map::DefaultHasher::new();

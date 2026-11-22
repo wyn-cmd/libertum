@@ -2264,6 +2264,123 @@ fn a_watermark_goes_on_every_section_and_undoes_in_one_step() {
     assert!(ed.document().sections.iter().all(|s| s.watermark.is_none()));
 }
 
+#[test]
+fn a_page_colour_goes_on_every_section_opaque_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let mut d = ed.document().clone();
+    d.sections.push(libertum_model::Section::default());
+    ed.replace_document(d);
+    assert!(ed.page_colour().is_none());
+    ed.set_page_colour(Some([0xF4, 0xB6, 0xB6, 0x10]))
+        .expect("set");
+    assert!(
+        ed.document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour == Some([0xF4, 0xB6, 0xB6, 0xFF])),
+        "every section, stored opaque"
+    );
+    let steps = ed.history().undo_len();
+    assert!(
+        ed.set_page_colour(Some([0xF4, 0xB6, 0xB6, 0xFF]))
+            .expect("same")
+            .is_empty()
+    );
+    assert_eq!(ed.history().undo_len(), steps);
+    ed.undo().expect("undo");
+    assert!(
+        ed.document()
+            .sections
+            .iter()
+            .all(|s| s.page_colour.is_none())
+    );
+}
+
+#[test]
+fn replacing_ranges_in_a_paragraph_is_one_undo_step() {
+    let mut ed = editor(&["The quick brown fox"]);
+    let block = ed.document().paragraph_at(0).expect("p").id;
+    ed.replace_in_paragraph(block, &[(4..9, "slow".into()), (16..19, "dog".into())])
+        .expect("replace");
+    assert_eq!(
+        ed.document().paragraph_at(0).expect("p").text(),
+        "The slow brown dog"
+    );
+    ed.undo().expect("undo");
+    assert_eq!(
+        ed.document().paragraph_at(0).expect("p").text(),
+        "The quick brown fox"
+    );
+}
+
+#[test]
+fn replacing_paragraphs_puts_them_back_in_place_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two", "Three"]);
+    let ids: Vec<_> = ed.document().paragraphs().map(|p| p.id).collect();
+    ed.replace_paragraphs(&[ids[1]], None, None, &["Deux".into(), "Zwei".into()])
+        .expect("replace");
+    let texts = |ed: &Editor| -> Vec<String> {
+        ed.document()
+            .paragraphs()
+            .map(|p| p.text().to_owned())
+            .collect()
+    };
+    assert_eq!(texts(&ed), ["One", "Deux", "Zwei", "Three"]);
+    ed.undo().expect("undo");
+    assert_eq!(texts(&ed), ["One", "Two", "Three"]);
+    // Nothing removed: the posted paragraph goes after `after`.
+    ed.replace_paragraphs(&[], Some(ids[2]), None, &["Four".into()])
+        .expect("insert");
+    assert_eq!(texts(&ed), ["One", "Two", "Three", "Four"]);
+    // Removing everything leaves one empty paragraph.
+    let all: Vec<_> = ed.document().paragraphs().map(|p| p.id).collect();
+    ed.replace_paragraphs(&all, None, None, &[]).expect("clear");
+    assert_eq!(texts(&ed), [""]);
+}
+
+#[test]
+fn an_imported_document_goes_after_the_caret_with_fresh_ids_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let first = ed.document().paragraph_at(0).expect("p").id;
+    ed.set_caret(
+        DocPosition {
+            block: first,
+            offset: 0,
+        },
+        false,
+    );
+    let mut source = Document::from_paragraphs(vec![
+        Paragraph::new(BlockId(1), "Chapter").with_props(ParaProps {
+            style: StyleId::HEADING_1,
+            outline_level: Some(1),
+            ..ParaProps::default()
+        }),
+        Paragraph::new(BlockId(2), "Imported"),
+    ]);
+    source.styles = StyleSheet::default();
+    let before: Vec<BlockId> = ed.document().paragraphs().map(|p| p.id).collect();
+    ed.insert_document(&source).expect("import");
+    let texts: Vec<String> = ed
+        .document()
+        .paragraphs()
+        .map(|p| p.text().to_owned())
+        .collect();
+    assert_eq!(texts, ["One", "Chapter", "Imported", "Two"]);
+    let ids: std::collections::HashSet<BlockId> =
+        ed.document().paragraphs().map(|p| p.id).collect();
+    assert_eq!(ids.len(), 4, "every id is unique");
+    let chapter = ed.document().paragraph_at(1).expect("p");
+    assert_eq!(
+        chapter.props.style,
+        StyleId::HEADING_1,
+        "styles match by name"
+    );
+    assert_eq!(ed.caret().block, chapter.id);
+    ed.undo().expect("undo");
+    let after: Vec<BlockId> = ed.document().paragraphs().map(|p| p.id).collect();
+    assert_eq!(before, after);
+}
+
 // ---------------------------------------------------------------- date and time fields
 
 #[test]

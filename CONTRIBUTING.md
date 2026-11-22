@@ -158,6 +158,8 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_MACROS=<folder>` | Read recipe macros from that folder instead of `macros/` in the data folder (for screenshots and tests) |
 | `LIBERTUM_UPDATE=<version>` | Show the update prompt for that version at start (for screenshots; no network call) |
 | `LIBERTUM_TAG_SEED=1` | With `LIBERTUM_TAGS`, fill an empty tag vocabulary with example tags in memory (for screenshots; nothing is written) |
+| `LIBERTUM_TYPE=<text>` | Type that text into the open document through the real key path at about eight characters a second, then exit (for spellcheck and typing measurements); `LIBERTUM_TYPE_AFTER=<seconds>` delays the first key |
+| `LIBERTUM_COMPARE=1\|next` | Start in Compare with Posted; `next` also steps to the first change (for screenshots) |
 | `LIBERTUM_LIBRARY=<folder>` | Open the Library window on that folder at start (for screenshots) |
 | `LIBERTUM_HISTORY=<file>` | Open that document's version history window at start (for screenshots) |
 | `LIBERTUM_TEMPLATES=<folder>` | Use that folder for added templates instead of the platform data folder (for screenshots and tests) |

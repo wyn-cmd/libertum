@@ -5,8 +5,9 @@
 Libertum is a desktop word processor for long manuscripts. It runs on Windows, macOS and
 Linux, and it is written in Rust.
 
-It opens and saves ODT and DOCX directly, reads and writes RTF and Markdown, and keeps its own
-format (`.lbtd`) for documents that need more than the interchange formats can hold. The window
+It opens and saves ODT and DOCX directly, reads and writes RTF, Markdown and HTML, imports EPUB
+and AO3 downloads, and keeps its own format (`.lbtd`) for documents that need more than the
+interchange formats can hold. The window
 follows Pages: the page sits on the left and the inspector on the right, with the Format and
 Document buttons switching between the formatting and document panes.
 
@@ -24,25 +25,31 @@ cross-references.
   page and even page variants, page numbers, text watermarks, booklet view, page thumbnails,
   full screen and zoom, including a trackpad pinch on Wayland and macOS. There is also a
   pageless mode that shows the document as one long column.
+- Page colour: White, nine soft tints or any hex colour, shown in both themes and kept in
+  Libertum, Word, OpenDocument, HTML and PDF files.
 - Long documents: a table of contents that updates itself, footnotes and endnotes, bookmarks
   and cross-references, inline images, and tables that split across pages with repeating header
   rows and editable merged cells.
-- Files: ODT, DOCX, RTF, Markdown and `.lbtd`, with find and replace, autosave and crash
-  recovery, recent files, drag and drop, right-click menus, a settings window, version history
-  and a library view.
+- Files: ODT, DOCX, RTF, Markdown, HTML and `.lbtd`, plus EPUB and AO3 downloads imported as
+  new documents, with find and replace, autosave and crash recovery, recent files, drag and
+  drop, right-click menus, a settings window, version history and a library view.
+- Chapters: **Insert > Chapter from File…** and **Chapter from Copied HTML** add a chapter
+  after the caret as one undo step.
 - Templates: Blank, Manuscript and Book are built in. Add your own from an ODT, DOCX or
   Libertum (`.lbtd`) document on the home screen; the template is a copy in Libertum's data
   folder, and removing it leaves the original alone.
-- Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text and Markdown. A chapter
-  can also be exported as HTML for AO3, with tag suggestions ranked locally from your own tag
-  list.
+- Export: PDF with searchable text, PDF/A-2b, EPUB 3, RTF, plain text, Markdown and plain
+  HTML. A chapter can also be exported as HTML for AO3, with full names, repeated phrases and
+  tags learned in a local library.
 - Benchmark: **Settings > Benchmark** measures scrolling, typing and saving on generated
   documents of growing size, finds the largest size the computer holds at 60, 90 or 120 fps,
   and keeps the last ten results.
 - Tables of contents: opens a Word or LibreOffice contents list, rebuilds it from the headings,
   and saves its own as a live Word content-control TOC or ODT index.
 - AO3 export: suggests characters, pairings and keywords from the chapter's own text, and
-  copies a chapter title or the ticked tags.
+  copies a chapter title or the ticked tags. **Mark as Posted** keeps a local copy of a
+  chapter, and **View > Compare with Posted** shows what changed since then, with Keep and
+  Revert to Posted for each change.
 - Updates: asks GitHub at most once a day whether a newer release exists. **Update now**
   downloads the right build, checks it against `SHA256SUMS` and installs it by itself
   (Windows installer, AppImage, macOS app, or a `.deb`/`.rpm` through the desktop's own
@@ -72,8 +79,8 @@ A release includes a `.deb`, an `.rpm`, an AppImage and a zip with the plain bin
 all unsigned.
 
 ```sh
-sudo apt install ./libertum_0.4.3_amd64.deb                  # Debian, Ubuntu, ...
-sudo dnf install ./libertum-0.4.3-1.x86_64.rpm               # Fedora, openSUSE, ...
+sudo apt install ./libertum_0.5.0_amd64.deb                  # Debian, Ubuntu, ...
+sudo dnf install ./libertum-0.5.0-1.x86_64.rpm               # Fedora, openSUSE, ...
 ```
 
 The packages put `libertum` in `/usr/bin` and install a desktop entry, the icon and a MIME
@@ -89,8 +96,8 @@ The AppImage carries its own font, input, Wayland and graphics libraries, and on
 host's X11/XCB and glibc:
 
 ```sh
-chmod +x Libertum-0.4.3-x86_64.AppImage
-./Libertum-0.4.3-x86_64.AppImage
+chmod +x Libertum-0.5.0-x86_64.AppImage
+./Libertum-0.5.0-x86_64.AppImage
 ```
 
 Pinch-to-zoom needs a Wayland session. On X11, Ctrl + two-finger scroll zooms.
@@ -157,7 +164,8 @@ The full list is in `CONTRIBUTING.md`.
 | `crates/libertum-layout` | Text shaping (parley), line breaking, pagination |
 | `crates/libertum-render` | Page rendering: tiny-skia on the CPU, optionally vello on the GPU |
 | `crates/libertum-editor` | Cursor, selection, typing, formatting commands, find and replace |
-| `crates/libertum-docx`, `-odt`, `-rtf`, `-markdown`, `-native` | Format import and export |
+| `crates/libertum-docx`, `-odt`, `-rtf`, `-markdown`, `-html`, `-native` | Format import and export |
+| `crates/libertum-diff` | Paragraph and word comparison for Compare with Posted |
 | `crates/libertum-export` | Chapter splitting, AO3 HTML, EPUB and plain text |
 | `crates/libertum-library` | Atomic saves, change detection and version history on disk |
 | `crates/libertum-formats-common` | Code the format crates share |

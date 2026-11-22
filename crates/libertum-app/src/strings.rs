@@ -55,7 +55,8 @@ pub const FILE_FILTER_EPUB: &str = "EPUB (*.epub)";
 pub const FILE_FILTER_TEXT: &str = "Plain Text (*.txt)";
 pub const EXPORT_SAVE_TITLE: &str = "Export Document";
 pub const EXPORT_FAILED: &str = "The document could not be exported.";
-pub const FILE_FILTER_SUPPORTED: &str = "Documents (*.lbtd, *.odt, *.docx, *.md, *.rtf)";
+pub const FILE_FILTER_SUPPORTED: &str =
+    "Documents (*.lbtd, *.odt, *.docx, *.md, *.rtf, *.html, *.epub)";
 pub const SAVE: &str = "Save";
 pub const DONT_SAVE: &str = "Don't Save";
 pub const CANCEL: &str = "Cancel";
@@ -97,6 +98,7 @@ pub const EXPORT_EPUB: &str = "EPUB";
 pub const EXPORT_RTF: &str = "Rich Text Format (RTF)";
 pub const EXPORT_TEXT: &str = "Plain Text";
 pub const EXPORT_MARKDOWN: &str = "Markdown";
+pub const EXPORT_PLAIN_HTML: &str = "Plain HTML";
 pub const EXPORT_AO3: &str = "AO3 Chapter";
 pub const AO3_TITLE: &str = "AO3 Chapters";
 pub const AO3_EMPTY: &str = "No chapters yet. Add headings at the selected levels.";
@@ -357,6 +359,21 @@ pub const FORMAT_NATIVE: &str = "Libertum";
 pub const FILE_FILTER_NATIVE: &str = "Libertum documents (*.lbtd)";
 pub const EXT_MARKDOWN: &str = "md";
 pub const EXT_RTF: &str = "rtf";
+pub const EXT_HTML: &str = "html";
+pub const INSERT_CHAPTER_FILE: &str = "Chapter from File\u{2026}";
+pub const INSERT_CHAPTER_HTML: &str = "Chapter from Copied HTML";
+pub const IMPORT_CHAPTER_TITLE: &str = "Import a Chapter";
+pub const IMPORT_CHAPTER_FILTER: &str =
+    "Chapters (*.html, *.htm, *.epub, *.lbtd, *.odt, *.docx, *.md, *.rtf)";
+pub const IMPORT_CLIPBOARD_EMPTY: &str = "The clipboard has no text to import. Copy a chapter's HTML (for example from AO3's HTML editor) and try again.";
+pub const IMPORT_CHAPTER_FAILED: &str = "The chapter could not be imported:";
+pub const IMPORT_READ_ONLY: &str = "Leave Compare with Posted before importing a chapter.";
+pub const EXT_EPUB: &str = "epub";
+pub const FILE_FILTER_HTML: &str = "Web Page (*.html)";
+pub const FILE_FILTER_PLAIN_HTML: &str = "Plain Web Page (*.html)";
+pub const HTML_LOSS_TITLE: &str = "Saving as HTML will lose some formatting";
+pub const IMPORTED_TITLE: &str = "Opened as a new document";
+pub const IMPORTED_DETAIL: &str = "This file was imported (an AO3 download or an EPUB), so the original is left as it was. Use Save to keep the document in a format of your choice.";
 
 /// "Untitled.odt — Edited", as Pages shows the document name and its save state.
 pub fn window_title(name: &str, extension: &str, edited: bool) -> String {
@@ -754,6 +771,14 @@ pub const WATERMARK_APPLY: &str = "Apply";
 pub const WATERMARK_REMOVE: &str = "Remove";
 pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page, and kept in Libertum (.lbtd), Word (.docx) and OpenDocument (.odt) files and in PDF exports. RTF and Markdown files do not keep it.";
 
+// Page colour (Document pane).
+pub const SECTION_PAGE_COLOUR: &str = "Page Colour";
+pub const PAGE_COLOUR_NONE: &str = "White";
+pub const PAGE_COLOUR_HEX_PLACEHOLDER: &str = "Other colour, for example #F5EBDC";
+pub const PAGE_COLOUR_APPLY: &str = "Apply";
+pub const PAGE_COLOUR_HINT: &str = "The colour of every page. Kept in Libertum (.lbtd), Word (.docx), OpenDocument (.odt) and HTML files and in PDF exports. RTF and Markdown files do not keep it.";
+pub const PAGE_COLOUR_BAD_HEX: &str = "Type six hex digits, such as #F5EBDC.";
+
 // Library, version history and sync conflicts
 pub const VIEW_LIBRARY: &str = "Library\u{2026}";
 pub const VIEW_HISTORY: &str = "Version History\u{2026}";
@@ -786,6 +811,108 @@ pub const BORDER_TOP: &str = "Top";
 pub const BORDER_RIGHT: &str = "Right";
 pub const BORDER_BOTTOM: &str = "Bottom";
 pub const BORDER_LEFT: &str = "Left";
+
+// Compare with posted (View menu and the compare bar; AO3 plan stage B).
+pub const VIEW_COMPARE: &str = "Compare with Posted";
+pub const COMPARE_WORKING: &str = "Comparing with the posted copies\u{2026}";
+pub const COMPARE_NONE_POSTED: &str = "No chapter is marked as posted yet. Put the caret in a chapter you have posted and choose Mark Chapter as Posted.";
+pub const COMPARE_NO_FILE: &str =
+    "Save the document first: posted copies are kept beside its file.";
+pub const COMPARE_NOT_IN_CHAPTER: &str =
+    "Put the caret in a chapter first (text before the first chapter heading is not compared).";
+pub const COMPARE_MARK_FAILED: &str = "The posted copy could not be kept:";
+pub const COMPARE_PREVIOUS: &str = "Previous";
+pub const COMPARE_NEXT: &str = "Next";
+pub const COMPARE_KEEP: &str = "Keep";
+pub const COMPARE_REVERT: &str = "Revert to Posted";
+pub const COMPARE_MARK: &str = "Mark Chapter as Posted";
+pub const COMPARE_DONE: &str = "Done";
+
+pub fn compare_no_changes(posted_chapters: usize) -> String {
+    match posted_chapters {
+        1 => "No changes since the chapter was posted.".to_owned(),
+        n => format!("No changes in the {n} posted chapters."),
+    }
+}
+
+pub fn compare_count(changes: usize, posted_chapters: usize) -> String {
+    let changes = if changes == 1 {
+        "1 change".to_owned()
+    } else {
+        format!("{changes} changes")
+    };
+    let chapters = if posted_chapters == 1 {
+        "1 posted chapter".to_owned()
+    } else {
+        format!("{posted_chapters} posted chapters")
+    };
+    format!("{changes} since posting, in {chapters}. Choose Next to go through them.")
+}
+
+pub fn compare_position(position: usize, total: usize, chapter: &str) -> String {
+    format!("Change {position} of {total} \u{b7} {chapter}")
+}
+
+/// The posted text of a change, shortened for the bar.
+pub fn compare_posted_text(text: &str) -> String {
+    const MAX: usize = 80;
+    let short: String = text.chars().take(MAX).collect();
+    let more = if text.chars().count() > MAX {
+        "\u{2026}"
+    } else {
+        ""
+    };
+    format!("Posted: \u{201c}{short}{more}\u{201d}")
+}
+
+pub fn compare_marked(chapter: &str) -> String {
+    format!("\u{201c}{chapter}\u{201d} is marked as posted.")
+}
+
+pub fn compare_too_large(chapter: &str, error: &str) -> String {
+    format!("\u{201c}{chapter}\u{201d} could not be compared: {error}")
+}
+
+// Mark as Posted (the AO3 chapter window).
+pub const AO3_POST_HINT: &str = "After pasting this chapter into AO3 and posting it, mark it here so Compare with Posted can show what you change later.";
+pub const AO3_POST_MARK: &str = "Mark as Posted";
+pub const AO3_POST_SAVE_FIRST: &str =
+    "Save the document first: posted copies are kept beside its file.";
+
+// The tag library (the AO3 tag vocabulary window).
+pub const TAG_LIBRARY_TITLE: &str = "Tag Library";
+pub const TAG_LIBRARY_HINT: &str = "Tags you copy are remembered here, with the full names of your characters and your pairings, so later chapters and stories suggest them. Everything stays on this computer.";
+pub const TAG_STARTER_LIST: &str = "Also suggest common AO3 additional tags (built-in list)";
+pub const TAG_IMPORT: &str = "Import Tags\u{2026}";
+pub const TAG_FORGET_LEARNED: &str = "Forget Learned";
+pub const TAG_IMPORT_TITLE: &str = "Import Tags";
+pub const TAG_IMPORT_FILTER: &str = "Tag lists (*.txt, *.csv)";
+pub const TAG_IMPORT_WORKING: &str = "Reading the tag file\u{2026}";
+pub const TAG_IMPORT_FAILED: &str = "The tag file could not be read:";
+pub const TAG_USED_BEFORE: &str = "used before";
+
+pub fn tag_library_counts(learned: usize, imported: usize) -> String {
+    format!("{learned} learned, {imported} imported")
+}
+
+pub fn tag_import_done(read: usize, added: usize) -> String {
+    match (read, added) {
+        (0, _) => "No tags were found in that file. Use one tag per line (optionally \u{201c}Character: Name\u{201d}), or a CSV with name and type columns.".to_owned(),
+        (_, 0) => format!("{read} tags read; the library already had all of them."),
+        _ => format!("{read} tags read, {added} added to the library."),
+    }
+}
+
+// Tags hidden for one work (the AO3 chapter window).
+pub const TAG_DISMISS_TIP: &str = "Not about this work: hide it in every chapter";
+pub const TAG_SHOW_AGAIN: &str = "Show Again";
+
+pub fn tags_hidden_for_work(count: usize) -> String {
+    match count {
+        1 => "1 tag is hidden for this work (copied already, or removed).".to_owned(),
+        n => format!("{n} tags are hidden for this work (copied already, or removed)."),
+    }
+}
 
 #[cfg(test)]
 mod tests {

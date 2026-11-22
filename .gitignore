@@ -15,3 +15,6 @@ Thumbs.db
 # Generated bench corpus (see PLAN.md §2; regenerate with tools/)
 /bench/corpus/*.docx
 /bench/corpus/*.odt
+
+# Private AO3 page captures (may hold account details); scrubbed copies go to tests/fixtures
+/Downloaded/

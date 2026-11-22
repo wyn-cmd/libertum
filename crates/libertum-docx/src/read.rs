@@ -968,9 +968,16 @@ fn parse_body(
     // While Libertum is replacing a table of contents that was written as a bare field, the
     // entries between the field's start and its end are skipped; this counts the open fields.
     let mut toc_skip: Option<i32> = None;
+    // The page colour (`w:background w:color`, a sibling before `w:body`).
+    let mut page_colour: Option<[u8; 4]> = None;
 
     loop {
         match reader.read_event().map_err(|e| xml::xml_error(PART, e))? {
+            Event::Start(start) | Event::Empty(start)
+                if !in_body && start.local_name().as_ref() == "background" =>
+            {
+                page_colour = background_colour(&start);
+            }
             Event::Start(start) if start.local_name().as_ref() == "body" => in_body = true,
             Event::End(end) if end.local_name().as_ref() == "body" => in_body = false,
             Event::Start(start) if in_body => {
@@ -1112,6 +1119,10 @@ fn parse_body(
     if sections.is_empty() {
         sections.push(Section::default());
         extras.push(SectionExtras::default());
+    }
+    // DOCX keeps one page colour for the whole document; the model keeps it per section.
+    for section in &mut sections {
+        section.page_colour = page_colour;
     }
 
     Ok(Body {
@@ -1940,6 +1951,15 @@ fn parse_props(ppr: Option<&XmlNode>, styles: &Styles, numbering: &Numbering) ->
         }
     }
     props
+}
+
+/// The colour of a `w:background` element (`w:color`, six hex digits; "auto" is none).
+fn background_colour(start: &quick_xml::events::BytesStart<'_>) -> Option<[u8; 4]> {
+    start
+        .attributes()
+        .flatten()
+        .find(|attribute| attribute.key.local_name().as_ref() == "color")
+        .and_then(|attribute| parse_hex_colour(&attribute.value))
 }
 
 fn parse_hex_colour(value: &str) -> Option<[u8; 4]> {

@@ -350,3 +350,15 @@ fn a_watermark_round_trips() {
         document.sections[0].watermark
     );
 }
+
+#[test]
+fn the_page_colour_survives_a_round_trip() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Body")]);
+    document.sections[0].page_colour = Some([0xD9, 0xD9, 0xD9, 0xFF]);
+    let bytes = Native::new(document).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    assert_eq!(
+        read.document().sections[0].page_colour,
+        Some([0xD9, 0xD9, 0xD9, 0xFF])
+    );
+}

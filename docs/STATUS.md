@@ -2,7 +2,18 @@
 
 Update this file at the end of every unit of work: what changed, what's verified, and what's next. Keep it short and current. History lives in `docs/decisions.md` (newest first) and `docs/spikes.md`.
 
-_Last updated: 2026-11-22 (release 0.4.3: long-document performance pass)._
+_Last updated: 2026-11-22 (release 0.5.0: HTML/EPUB, Compare with Posted, page colour)._
+
+## Release 0.5.0 (2026-11-22)
+
+- **HTML and EPUB:** new `libertum-html` crate on `html5ever`. `.html`/`.htm` open pageless and save as a standalone page (Full flavour); Export > Plain HTML writes semantic markup. EPUBs and AO3 downloads import as new unsaved documents, so the original is never rewritten. Insert > Chapter from File… and Chapter from Copied HTML insert after the caret as one undo step. Remote images become alt text; the AO3 fixtures are hand-made and still need checking against a real download.
+- **Compare with Posted:** new `libertum-diff` crate on `similar`. Mark as Posted keeps a local copy of a chapter; View > Compare with Posted turns the view read-only and marks added text green and removed text with a red bar, with Previous/Next/Keep/Revert to Posted (one undo step). Posted copies live in `.libertum-history/<file>/posted/`; nothing is uploaded. Top-level paragraphs only: tables and generated contents lists are not compared, and front matter before the first chapter heading is skipped.
+- **Page colour:** White, nine soft tints or a hex value on the Document pane. Kept in `.lbtd`, DOCX, ODT, HTML and PDF/PDF-A; RTF and Markdown do not store it. The page hash and every strip include the colour, so a change repaints at once.
+- **AO3 tag suggestions:** story-wide full names, repeated two-word phrases, a local tag library (`tag-library.json`) that learns copied tags and imported text/CSV lists, the built-in starter list (354 tags, switchable), and tags hidden per work with Show Again. The starter list is hand-written from general knowledge and needs review.
+- **Spell checking:** checks run 450 ms after the last edit, the dictionary is built on a background thread at start-up and after a language change, stale underlines are dropped, and single characters/punctuation are ignored.
+- **Logs:** `iced_winit`'s INFO window dump (about a million lines per start) is suppressed, and ICU4X's debug-only complex-script warnings are silenced with `[profile.dev.package.icu_provider]`.
+- **Release:** version 0.5.0 in `Cargo.toml` and `Cargo.lock`; notes in `docs/RELEASE-0.5.0.md`. `.github/workflows/release.yml` now checks the tag, the Cargo version and the notes file before building, requires every platform artefact before publishing, and writes `SHA256SUMS` without checksumming itself on a rerun.
+- Verified: `cargo test --workspace` passes (1,036 tests, 2 ignored), `cargo fmt --all --check` is clean, and clippy with `--all-targets --all-features -- -D warnings` is clean. Not checked: the AO3 download fixtures against a live download; Compare with Posted against a real posted work; page colour in Word or LibreOffice; HTML import in a browser other than the fixtures' expectations.
 
 ## Release 0.4.3 (2026-11-22)
 

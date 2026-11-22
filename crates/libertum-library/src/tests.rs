@@ -255,3 +255,85 @@ fn two_versions_in_the_same_second_do_not_overwrite_each_other() {
     assert_eq!(all.len(), 2);
     assert_eq!(fs::read(&all[0].path).expect("read"), b"two");
 }
+
+// ------------------------------------------------------------------ last posted copies
+
+#[test]
+fn a_posted_copy_is_saved_and_loaded_by_its_chapter() {
+    let dir = folder("posted");
+    let file = dir.join("book.docx");
+    fs::write(&file, b"doc").expect("write");
+    let one = ChapterKey::new(0, "Chapter One");
+    let two = ChapterKey::new(1, "Chapter Two");
+    assert!(load_posted(&file, &one).is_none());
+    let paragraphs = vec!["Chapter One".to_owned(), "It began — “quietly”.".to_owned()];
+    let saved = save_posted(&file, &one, &paragraphs, at(1_000)).expect("save");
+    save_posted(&file, &two, &["Two".to_owned()], at(1_001)).expect("save");
+    assert!(saved.path.starts_with(history_dir(&file).join(POSTED_DIR)));
+
+    let loaded = load_posted(&file, &one).expect("loaded");
+    assert_eq!(loaded.paragraphs, paragraphs);
+    assert_eq!(loaded.saved_at, 1_000);
+    assert_eq!(loaded.key, one);
+
+    // Marking it again replaces the copy.
+    save_posted(&file, &one, &["New".to_owned()], at(2_000)).expect("save");
+    assert_eq!(
+        load_posted(&file, &one).expect("loaded").paragraphs,
+        ["New"]
+    );
+    let all = list_posted(&file);
+    assert_eq!(
+        all.iter().map(|c| c.key.clone()).collect::<Vec<_>>(),
+        vec![one.clone(), two]
+    );
+
+    // The posted folder is not mistaken for a version, and pruning leaves it alone.
+    assert!(versions(&file).is_empty());
+    keep_current(&file, at(3_000)).expect("snapshot");
+    assert_eq!(versions(&file).len(), 1);
+    assert!(load_posted(&file, &one).is_some());
+}
+
+#[test]
+fn a_moved_chapter_finds_its_copy_by_title_unless_the_title_is_shared() {
+    let dir = folder("posted-moved");
+    let file = dir.join("book.lbtd");
+    save_posted(
+        &file,
+        &ChapterKey::new(2, "Interlude"),
+        &["x".to_owned()],
+        at(5),
+    )
+    .expect("save");
+    let moved = load_posted(&file, &ChapterKey::new(4, "Interlude")).expect("by title");
+    assert_eq!(moved.key.index, 2);
+    assert!(load_posted(&file, &ChapterKey::new(2, "Something else")).is_none());
+
+    save_posted(
+        &file,
+        &ChapterKey::new(7, "Interlude"),
+        &["y".to_owned()],
+        at(6),
+    )
+    .expect("save");
+    assert!(
+        load_posted(&file, &ChapterKey::new(4, "Interlude")).is_none(),
+        "two copies share the title: no guess"
+    );
+    assert_eq!(
+        load_posted(&file, &ChapterKey::new(7, "Interlude"))
+            .expect("exact")
+            .paragraphs,
+        ["y"]
+    );
+}
+
+#[test]
+fn an_unreadable_posted_file_is_skipped() {
+    let dir = folder("posted-bad");
+    let file = dir.join("book.md");
+    fs::create_dir_all(posted_dir(&file)).expect("dir");
+    fs::write(posted_dir(&file).join("junk.json"), b"{not json").expect("write");
+    assert!(list_posted(&file).is_empty());
+}

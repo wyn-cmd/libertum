@@ -391,3 +391,16 @@ fn turning_antialiasing_off_gives_hard_edges_and_a_separate_cache_entry() {
         "switching back reuses the smooth page"
     );
 }
+
+#[test]
+fn a_page_colour_fills_the_page_margins_included() {
+    use libertum_model::{BlockId, Document, Paragraph};
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Body")]);
+    doc.sections[0].page_colour = Some([0xF4, 0xB6, 0xB6, 0xFF]);
+    let mut s = LayoutState::from_document(&doc, PageGeometry::a4(), LayoutOptions::default());
+    s.paginate_all();
+    assert_eq!(s.page_colour(0), Some([0xF4, 0xB6, 0xB6, 0xFF]));
+    let pm = render_page(&s, 0, 1.0).expect("page 0");
+    let i = ((5 * pm.width() + 5) * 4) as usize;
+    assert_eq!(&pm.data()[i..i + 3], &[0xF4, 0xB6, 0xB6]);
+}

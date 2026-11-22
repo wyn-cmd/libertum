@@ -134,6 +134,8 @@ pub(crate) struct PageLayout {
     pub column_gutter_pt: f32,
     pub header_distance_pt: f32,
     pub footer_distance_pt: f32,
+    /// `fo:background-color` of the page (the page colour).
+    pub background: Option<[u8; 4]>,
 }
 
 impl Default for PageLayout {
@@ -145,6 +147,7 @@ impl Default for PageLayout {
             column_gutter_pt: libertum_model::DEFAULT_COLUMN_GUTTER_PT,
             header_distance_pt: libertum_model::DEFAULT_HEADER_FOOTER_DISTANCE_PT,
             footer_distance_pt: libertum_model::DEFAULT_HEADER_FOOTER_DISTANCE_PT,
+            background: None,
         }
     }
 }
@@ -610,6 +613,15 @@ impl Styles {
         if let Some(number) = props.attr_u32("first-page-number") {
             layout.first_page_number = Some(number);
         }
+        // `fo:background-color` (ODF 1.2), or the fill attributes newer LibreOffice also writes.
+        layout.background = props
+            .attr("background-color")
+            .and_then(colour::parse)
+            .or_else(|| {
+                (props.attr("fill") == Some("solid"))
+                    .then(|| props.attr("fill-color").and_then(colour::parse))
+                    .flatten()
+            });
         if let Some(columns) = props.child("columns") {
             if let Some(count) = columns.attr_u32("column-count") {
                 layout.columns = (count as u8).clamp(1, libertum_model::MAX_COLUMNS);
@@ -861,6 +873,7 @@ impl Styles {
             section.first_page_number = layout.first_page_number;
             section.set_columns(layout.columns);
             section.set_column_gutter(layout.column_gutter_pt);
+            section.page_colour = layout.background;
             section.header_distance_pt = layout.header_distance_pt;
             section.footer_distance_pt = layout.footer_distance_pt;
         }

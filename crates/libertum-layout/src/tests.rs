@@ -2378,6 +2378,26 @@ fn the_caret_is_as_tall_as_the_text_not_the_line() {
 }
 
 #[test]
+fn a_page_colour_changes_the_page_hash_and_covers_every_strip() {
+    use libertum_model::{BlockId, Document, Paragraph};
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Body")]);
+    let geo = PageGeometry::a4();
+    let mut plain = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    plain.paginate_all();
+    assert!(plain.page_colour(0).is_none());
+    doc.sections[0].page_colour = Some([0xE3, 0xF4, 0xE8, 0xFF]);
+    let mut coloured = LayoutState::from_document(&doc, geo, LayoutOptions::default());
+    coloured.paginate_all();
+    assert_eq!(coloured.page_colour(0), Some([0xE3, 0xF4, 0xE8, 0xFF]));
+    assert_ne!(plain.page_content_hash(0), coloured.page_content_hash(0));
+    let whole_page = coloured
+        .page_items(0)
+        .into_iter()
+        .any(|item| item.top <= 0.0 && item.bottom >= geo.height_pt);
+    assert!(whole_page, "a page colour repaints every strip");
+}
+
+#[test]
 fn a_watermark_is_sized_to_the_page_and_centred_on_it() {
     use libertum_model::{BlockId, Document, Paragraph, Watermark};
     if !fcx_has_fonts() {

@@ -332,6 +332,10 @@ pub struct Section {
     /// Text drawn large and faint behind the body of every page of this section ("DRAFT",
     /// "CONFIDENTIAL"). The app sets it on every section at once.
     pub watermark: Option<Watermark>,
+    /// Background colour of this section's pages, straight RGBA (DOCX `w:background`, ODT
+    /// `fo:background-color` on the page layout, HTML `body` background). `None` is plain
+    /// white paper. The app sets it on every section at once, like the watermark.
+    pub page_colour: Option<[u8; 4]>,
 }
 
 /// A text watermark: drawn behind the page's content, centred, in light grey.
@@ -397,6 +401,7 @@ impl Default for Section {
             link_headers_to_previous: false,
             link_footers_to_previous: false,
             watermark: None,
+            page_colour: None,
         }
     }
 }

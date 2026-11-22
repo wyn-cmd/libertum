@@ -733,6 +733,10 @@ pub struct DocumentState {
     pub watermark_diagonal: bool,
     /// The document has a watermark.
     pub watermark_on: bool,
+    /// The document's page colour (`None` is white paper).
+    pub page_colour: Option<[u8; 4]>,
+    /// A page colour typed as hex in the Document pane (applied on Return or Apply).
+    pub page_colour_hex: String,
     // Section pane (page numbering, which applies to the whole document).
     /// The number written on the start page.
     pub numbering_start: Option<u16>,
@@ -778,6 +782,8 @@ impl Default for DocumentState {
             watermark_text: String::new(),
             watermark_diagonal: true,
             watermark_on: false,
+            page_colour: None,
+            page_colour_hex: String::new(),
             numbering_start: None,
             numbering_start_page: None,
             numbering_on: Mixed::Value(false),
@@ -1100,6 +1106,8 @@ pub struct AppState {
     pub zoom_edit: Option<String>,
     /// Booklet view: page 1 alone, then pages 2-3, 4-5... side by side.
     pub booklet: bool,
+    /// Compare mode is on (View > Compare with Posted).
+    pub compare: bool,
     /// Pageless view: one endless column instead of pages.
     pub pageless: bool,
     pub format: FormatState,
@@ -1147,6 +1155,7 @@ impl Default for AppState {
             zoom: Zoom::Percent(100),
             zoom_edit: None,
             booklet: false,
+            compare: false,
             pageless: false,
             format: FormatState::default(),
             fonts: FONT_FAMILIES
@@ -1243,6 +1252,35 @@ impl AppState {
             Some(target)
         };
     }
+}
+
+/// The page colours offered in the Document pane: soft tints that keep black text readable,
+/// with their names. White (no colour) is offered separately.
+pub const PAGE_COLOURS: [(&str, [u8; 4]); 9] = [
+    ("Cream", [0xFB, 0xF6, 0xE9, 0xFF]),
+    ("Sepia", [0xF4, 0xEC, 0xD8, 0xFF]),
+    ("Light Grey", [0xF2, 0xF2, 0xF2, 0xFF]),
+    ("Grey", [0xD9, 0xD9, 0xD9, 0xFF]),
+    ("Rose", [0xFC, 0xE4, 0xE4, 0xFF]),
+    ("Red", [0xF4, 0xB6, 0xB6, 0xFF]),
+    ("Mint", [0xE3, 0xF4, 0xE8, 0xFF]),
+    ("Sky", [0xE1, 0xEE, 0xFA, 0xFF]),
+    ("Lavender", [0xEC, 0xE6, 0xF7, 0xFF]),
+];
+
+/// Parses a page colour typed as hex: `#RRGGBB`, `RRGGBB` or the short `#RGB`.
+pub fn parse_page_colour_hex(text: &str) -> Option<[u8; 4]> {
+    let digits = text.trim().trim_start_matches('#');
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let long: String = match digits.len() {
+        3 => digits.chars().flat_map(|c| [c, c]).collect(),
+        6 => digits.to_owned(),
+        _ => return None,
+    };
+    let byte = |i: usize| u8::from_str_radix(&long[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?, 0xFF])
 }
 
 #[cfg(test)]

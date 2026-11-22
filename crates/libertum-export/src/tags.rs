@@ -11,10 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use libertum_model::Document;
 use serde::{Deserialize, Serialize};
-
-use crate::{Chapter, chapter_text};
 
 /// AO3's tag categories. They are never mixed in a ranking or a list: a rating does not
 /// compete with a character name for the same place.
@@ -90,6 +87,10 @@ impl TagCategory {
 pub struct Tag {
     pub name: String,
     pub category: TagCategory,
+    /// Extra words that also suggest this tag, besides those of its name (the starter list's
+    /// "bandage, fever ..." for Hurt/Comfort). Empty for the writer's own tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cues: Vec<String>,
 }
 
 impl Tag {
@@ -97,6 +98,7 @@ impl Tag {
         Self {
             name: name.into(),
             category,
+            cues: Vec::new(),
         }
     }
 }
@@ -164,10 +166,13 @@ pub fn stem(word: &str) -> String {
     if stem.ends_with("ies") && stem.len() > 4 {
         return format!("{}y", &stem[..stem.len() - 3]);
     }
-    let es_after = ["s", "x", "z", "ch", "sh"]
-        .iter()
-        .any(|ending| stem[..stem.len() - 2].ends_with(ending));
-    if stem.ends_with("es") && es_after {
+    // Only cut two bytes off a word that ends in "es": they are ASCII, so the cut is on a
+    // character boundary ("café" must not be cut inside the "é").
+    let es_after = stem.ends_with("es")
+        && ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|ending| stem[..stem.len() - 2].ends_with(ending));
+    if es_after {
         stem = &stem[..stem.len() - 2];
     } else if stem.ends_with('s')
         && !stem.ends_with("ss")
@@ -209,6 +214,20 @@ struct ChapterTerm {
 /// Ranks the vocabulary against one chapter. Deterministic: equal scores fall back to
 /// category order, then to the tag name, and at most `limit` suggestions are returned.
 pub fn suggest_tags(text: &str, vocabulary: &[Tag], limit: usize) -> Vec<TagSuggestion> {
+    suggest_tags_with(text, vocabulary, limit, 1, 1)
+}
+
+/// [`suggest_tags`], keeping only tags whose words the chapter uses at least `min_hits`
+/// times in all, and at least `min_terms` different words of them: the starter list and the
+/// library need firmer evidence than the writer's own vocabulary, or a single "kiss" (or the
+/// "one" in "one by one" for Only One Bed) would suggest a dozen tags.
+pub fn suggest_tags_with(
+    text: &str,
+    vocabulary: &[Tag],
+    limit: usize,
+    min_hits: usize,
+    min_terms: usize,
+) -> Vec<TagSuggestion> {
     if vocabulary.is_empty() || limit == 0 {
         return Vec::new();
     }
@@ -235,11 +254,13 @@ pub fn suggest_tags(text: &str, vocabulary: &[Tag], limit: usize) -> Vec<TagSugg
 
     // Tag names are compared by stem too, so "Dragons" and "dragon" meet; function words
     // in a tag name ("Enemies to Lovers") are dropped so only its subject can match.
+    // A tag's cue words count as part of its name.
     let names: Vec<Vec<String>> = vocabulary
         .iter()
         .map(|tag| {
             terms(&tag.name)
                 .into_iter()
+                .chain(tag.cues.iter().flat_map(|cue| terms(cue)))
                 .filter(|term| !is_stopword(term))
                 .map(|term| stem(&term))
                 .collect()
@@ -294,7 +315,8 @@ pub fn suggest_tags(text: &str, vocabulary: &[Tag], limit: usize) -> Vec<TagSugg
                 count: hit.count,
             });
         }
-        if score <= 0.0 {
+        let hits: usize = matched.iter().map(|m| m.count).sum();
+        if score <= 0.0 || hits < min_hits || matched.len() < min_terms {
             continue;
         }
         matched.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.term.cmp(&b.term)));
@@ -314,16 +336,6 @@ pub fn suggest_tags(text: &str, vocabulary: &[Tag], limit: usize) -> Vec<TagSugg
     });
     suggestions.truncate(limit);
     suggestions
-}
-
-/// The same ranking, with the chapter's own text as the query.
-pub fn suggest_for_chapter(
-    document: &Document,
-    chapter: &Chapter,
-    vocabulary: &[Tag],
-    limit: usize,
-) -> Vec<TagSuggestion> {
-    suggest_tags(&chapter_text(document, chapter), vocabulary, limit)
 }
 
 /// The ticked tags as one line for AO3's tag fields: comma separated, in category order, then
@@ -582,5 +594,32 @@ mod tests {
             "Ghost, Slow Burn",
             "AO3 takes the rating and warnings as choices, not as tags"
         );
+    }
+
+    #[test]
+    fn stemming_never_cuts_inside_an_accented_letter() {
+        for word in [
+            "café",
+            "cafés",
+            "née",
+            "naïve",
+            "protégé",
+            "fiancée",
+            "résumés",
+        ] {
+            let _ = stem(word);
+        }
+        assert_eq!(stem("cafés"), "café");
+    }
+
+    #[test]
+    fn a_generic_tag_needs_more_than_one_common_word() {
+        let mut bed = Tag::new("Only One Bed", TagCategory::Freeform);
+        bed.cues = vec!["inn".into(), "share".into()];
+        let vocabulary = [bed];
+        let text = "One by one the lights went out. One more. One.";
+        assert!(suggest_tags_with(text, &vocabulary, 5, 3, 2).is_empty());
+        let text = "The inn had one bed. They would share the bed. One bed only.";
+        assert_eq!(suggest_tags_with(text, &vocabulary, 5, 3, 2).len(), 1);
     }
 }
