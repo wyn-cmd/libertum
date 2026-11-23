@@ -1104,6 +1104,12 @@ pub fn ceil_char_boundary(text: &str, mut at: usize) -> usize {
 /// while Hangul is counted by its space-separated words like any alphabetic script. CJK
 /// punctuation and full-width forms are not words; they separate the words around them.
 pub fn count_words(text: &str) -> usize {
+    // Word counts are adjusted on every keystroke, so keep the common Latin-only paragraph on
+    // the vectorised whitespace path. ASCII punctuation is not a separator here, so this
+    // gives the same answer as the loop below.
+    if text.is_ascii() {
+        return text.split_ascii_whitespace().count();
+    }
     let mut count = 0;
     let mut in_word = false;
     for c in text.chars() {
