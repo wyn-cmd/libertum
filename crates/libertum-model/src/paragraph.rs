@@ -355,6 +355,7 @@ impl Paragraph {
         self.text.is_empty()
     }
 
+    #[inline(always)]
     pub fn word_count(&self) -> usize {
         count_words(&self.text)
     }
@@ -1103,13 +1104,21 @@ pub fn ceil_char_boundary(text: &str, mut at: usize) -> usize {
 /// Han ideograph and each kana is a word by itself (Chinese and Japanese have no spaces),
 /// while Hangul is counted by its space-separated words like any alphabetic script. CJK
 /// punctuation and full-width forms are not words; they separate the words around them.
+#[inline(always)]
 pub fn count_words(text: &str) -> usize {
-    // Word counts are adjusted on every keystroke, so keep the common Latin-only paragraph on
-    // the vectorised whitespace path. ASCII punctuation is not a separator here, so this
-    // gives the same answer as the loop below.
-    if text.is_ascii() {
-        return text.split_ascii_whitespace().count();
+    // Word counts are adjusted on every keystroke, so keep prose on the vectorised white-space
+    // path. Everything the CJK rule treats specially is U+2000 or above, so bytes below 0xE2
+    // cannot start one; Latin, Greek, Cyrillic and the rest then need only the ordinary
+    // Unicode white-space rules. The CJK loop is out of line so this hot path stays small.
+    if text.as_bytes().iter().copied().max().unwrap_or(0) < 0xE2 {
+        return text.split_whitespace().count();
     }
+    count_words_with_cjk(text)
+}
+
+#[cold]
+#[inline(never)]
+fn count_words_with_cjk(text: &str) -> usize {
     let mut count = 0;
     let mut in_word = false;
     for c in text.chars() {

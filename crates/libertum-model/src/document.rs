@@ -646,6 +646,20 @@ impl Default for Document {
     }
 }
 
+/// Text that can be typed inside an existing word without changing the paragraph's word count:
+/// no white space and no character the CJK rule treats specially. The byte check keeps this
+/// cheap, and the character check catches U+00A0 and the other non-ASCII spaces below 0xE2.
+fn plain_word_text(text: &str) -> bool {
+    text.as_bytes().iter().copied().max().unwrap_or(0) < 0xE2
+        && !text.chars().any(char::is_whitespace)
+}
+
+/// A character inside an ordinary word: not white space and not a CJK ideograph, kana or
+/// East Asian punctuation (all U+2E80 and above), which start or separate words.
+fn ordinary_word_char(c: char) -> bool {
+    !c.is_whitespace() && (c as u32) < 0x2E80
+}
+
 impl Document {
     /// A new document with one empty paragraph.
     pub fn new() -> Self {
@@ -1051,13 +1065,28 @@ impl Document {
                 if !p.text().is_char_boundary(offset) || offset > p.len() {
                     return Err(ModelError::NotCharBoundary { block, offset });
                 }
-                let before = p.word_count();
+                // Typing an ordinary character inside a word, or at either end of one, leaves
+                // the count alone. A separator in the text, a CJK neighbour, or the space
+                // beside a word needs a fresh count.
+                let plain = plain_word_text(&text);
+                let source = p.text();
+                let left = source[..offset].chars().next_back();
+                let right = source[offset..].chars().next();
+                let stays_in_word = match (left, right) {
+                    (None, Some(r)) => ordinary_word_char(r),
+                    (Some(l), None) => ordinary_word_char(l),
+                    (Some(l), Some(r)) => ordinary_word_char(l) && ordinary_word_char(r),
+                    (None, None) => false,
+                };
+                let before = (!(plain && stays_in_word)).then(|| p.word_count());
                 match &format {
                     Some(runs) => p.insert_text_formatted(offset, &text, runs),
                     None => p.insert_text(offset, &text),
                 }
-                let after = p.word_count();
-                self.word_count = self.word_count - before + after;
+                if let Some(before) = before {
+                    let after = p.word_count();
+                    self.word_count = self.word_count - before + after;
+                }
                 Ok(Operation::DeleteRange {
                     block,
                     range: offset..offset + text.len(),
@@ -1073,10 +1102,20 @@ impl Document {
                         len: p.len(),
                     });
                 }
-                let before = p.word_count();
+                // Removing an ordinary character from the middle of a word leaves the count
+                // alone. At either edge the word may disappear, so recount there.
+                let text = p.text();
+                let plain = plain_word_text(&text[range.clone()]);
+                let left = text[..range.start].chars().next_back();
+                let right = text[range.end..].chars().next();
+                let inside_word =
+                    left.is_some_and(ordinary_word_char) && right.is_some_and(ordinary_word_char);
+                let before = (!(plain && inside_word)).then(|| p.word_count());
                 let (removed, runs) = p.delete_range_with_runs(range.clone());
-                let after = p.word_count();
-                self.word_count = self.word_count - before + after;
+                if let Some(before) = before {
+                    let after = p.word_count();
+                    self.word_count = self.word_count - before + after;
+                }
                 Ok(Operation::InsertText {
                     block,
                     offset: range.start,
