@@ -12140,13 +12140,15 @@ mod tests {
         // Nothing pending: no tick, however long it waits.
         pause(300);
         assert!(ticks.try_recv().is_err(), "an idle timer sends nothing");
-        // A burst of activity is one tick after it goes quiet, not before.
-        timer.set(Duration::from_millis(150), false);
-        pause(60);
-        timer.set(Duration::from_millis(150), false);
+        // A burst of activity is one tick after it goes quiet, not before. The first deadline
+        // is long enough that a slow or descheduled test thread cannot let it fire before the
+        // second set (Rosetta on a loaded runner used to).
+        timer.set(Duration::from_millis(800), false);
         pause(100);
+        timer.set(Duration::from_millis(800), false);
+        pause(300);
         assert!(ticks.try_recv().is_err(), "still inside the quiet period");
-        pause(150);
+        pause(700);
         assert!(ticks.try_recv().is_ok(), "one tick when quiet");
         pause(300);
         assert!(ticks.try_recv().is_err(), "and no repeat tick");
