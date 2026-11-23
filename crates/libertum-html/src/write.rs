@@ -57,12 +57,33 @@ impl Writer<'_> {
             .find(|p| p.props.outline_level.is_some() && !p.text().trim().is_empty())
             .map(|p| p.text().replace('\n', " ").trim().to_owned())
             .unwrap_or_else(|| "Untitled".to_owned());
-        self.out
-            .push_str("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n");
+        // The tag came through `libertum_model::language_tag`: letters, digits and hyphens.
+        let language = self
+            .document
+            .sections
+            .first()
+            .and_then(|section| section.language.as_deref())
+            .map(|tag| format!(" lang=\"{tag}\""))
+            .unwrap_or_default();
+        self.out.push_str(&format!(
+            "<!DOCTYPE html>\n<html{language}>\n<head>\n<meta charset=\"utf-8\">\n"
+        ));
         self.out
             .push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         self.out
-            .push_str("<meta name=\"generator\" content=\"Libertum\">\n<title>");
+            .push_str("<meta name=\"generator\" content=\"Libertum\">\n");
+        // A second language, which `lang` cannot hold (the tag is letters, digits and hyphens).
+        if let Some(second) = self
+            .document
+            .sections
+            .first()
+            .and_then(|section| section.language2.as_deref())
+        {
+            self.out.push_str(&format!(
+                "<meta name=\"libertum-language-2\" content=\"{second}\">\n"
+            ));
+        }
+        self.out.push_str("<title>");
         escape_text(&title, &mut self.out);
         self.out.push_str("</title>\n");
         if self.full {
@@ -314,6 +335,10 @@ impl Writer<'_> {
         }
         cuts.extend(p.images().iter().map(|i| i.offset));
         cuts.extend(p.bookmarks().iter().map(|b| b.offset));
+        for r in p.ruby() {
+            cuts.push(r.range.start);
+            cuts.push(r.range.end);
+        }
         cuts.extend(p.notes().iter().map(|n| n.offset));
         cuts.retain(|&c| c <= text.len() && text.is_char_boundary(c));
         cuts.sort_unstable();
@@ -346,7 +371,17 @@ impl Writer<'_> {
                 .find(|r| r.range.start <= at && at < r.range.end)
                 .map(|r| style_char.apply(&r.format))
                 .unwrap_or_else(|| style_char.clone());
+            // A reading goes in `ruby` around its base; `rp` holds the brackets a browser
+            // without ruby support shows.
+            for _ in p.ruby().iter().filter(|r| r.range.start == at) {
+                self.out.push_str("<ruby>");
+            }
             self.text(&text[at..next], &from, &format);
+            for r in p.ruby().iter().filter(|r| r.range.end == next) {
+                self.out.push_str("<rp>(</rp><rt>");
+                escape_text(&r.text, &mut self.out);
+                self.out.push_str("</rt><rp>)</rp></ruby>");
+            }
         }
     }
 

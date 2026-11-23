@@ -69,6 +69,13 @@ pub(crate) fn build(
     if !package.contains("meta.xml") {
         package.set_text("meta.xml", meta_xml());
     }
+    set_language2(
+        &mut package,
+        document
+            .sections
+            .first()
+            .and_then(|section| section.language2.as_deref()),
+    );
     if !package.contains("settings.xml") {
         package.set_text("settings.xml", settings_xml());
     }
@@ -193,6 +200,30 @@ fn media_type(name: &str) -> &'static str {
     } else {
         "application/octet-stream"
     }
+}
+
+/// The name of the user-defined property that holds a document's second language.
+pub(crate) const LANGUAGE2_PROPERTY: &str = "LibertumLanguage2";
+
+/// Writes (or, with `None`, removes) the second language as a user-defined property in
+/// `meta.xml`: ODF's three language slots are Western, Asian and Complex, which cannot hold
+/// two languages of one script.
+fn set_language2(package: &mut Package, tag: Option<&str>) {
+    let Some(mut text) = package.text("meta.xml") else {
+        return;
+    };
+    let open = format!("<meta:user-defined meta:name=\"{LANGUAGE2_PROPERTY}\">");
+    if let Some(at) = text.find(&open)
+        && let Some(end) = text[at..].find("</meta:user-defined>")
+    {
+        text.replace_range(at..at + end + "</meta:user-defined>".len(), "");
+    }
+    if let Some(tag) = tag
+        && let Some(close) = text.find("</office:meta>")
+    {
+        text.insert_str(close, &format!("{open}{tag}</meta:user-defined>"));
+    }
+    package.set_text("meta.xml", text);
 }
 
 fn meta_xml() -> String {
@@ -569,8 +600,19 @@ impl<'a> Writer<'a> {
             })
             .filter(|(range, _)| range.start < range.end)
             .collect();
-        // Every offset where the text has to be cut: an anchor, or either end of a reference.
+        let rubies: Vec<(Range<usize>, &libertum_model::Ruby)> = paragraph
+            .ruby()
+            .iter()
+            .map(|ruby| (clamp(ruby.range.start)..clamp(ruby.range.end), ruby))
+            .filter(|(range, _)| range.start < range.end)
+            .collect();
+        // Every offset where the text has to be cut: an anchor, or either end of a reference
+        // or of a ruby's base.
         let mut cuts: Vec<usize> = anchors.iter().map(|(offset, _)| *offset).collect();
+        for (range, _) in &rubies {
+            cuts.push(range.start);
+            cuts.push(range.end);
+        }
         for (range, _) in &refs {
             cuts.push(range.start);
             cuts.push(range.end);
@@ -605,11 +647,11 @@ impl<'a> Writer<'a> {
                 .copied()
                 .take_while(|cut| *cut < end)
             {
-                write_segment(out, text, at, cut, style.as_deref(), &refs);
+                write_ruby_segment(out, text, at, cut, style.as_deref(), &refs, &rubies);
                 self.emit_anchors(out, &anchors, &mut next_anchor, cut);
                 at = cut;
             }
-            write_segment(out, text, at, end, style.as_deref(), &refs);
+            write_ruby_segment(out, text, at, end, style.as_deref(), &refs, &rubies);
         }
         self.emit_anchors(out, &anchors, &mut next_anchor, text.len());
     }
@@ -1165,7 +1207,13 @@ impl<'a> Writer<'a> {
             tab_stops: defaults.tab_stops,
         };
         let para = paragraph_properties(&para, false);
-        let char = text_props_xml(&char);
+        let mut char = text_props_xml(&char);
+        char.push_str(&language_attrs(
+            document
+                .sections
+                .first()
+                .and_then(|section| section.language.as_deref()),
+        ));
         let char = if char.is_empty() {
             String::new()
         } else {
@@ -1247,6 +1295,9 @@ impl<'a> Writer<'a> {
         }
         if let Some(colour) = section.page_colour {
             props.push_str(&format!(" fo:background-color=\"{}\"", colour::hex(colour)));
+        }
+        if section.vertical {
+            props.push_str(" style:writing-mode=\"tb-rl\"");
         }
         out.push_str(&format!("<style:page-layout-properties{props}>"));
         if section.columns > 1 {
@@ -1811,6 +1862,36 @@ enum Anchor<'a> {
     Image(&'a InlineImage),
 }
 
+/// [`write_segment`] inside the `text:ruby` whose base starts or ends there: the reading comes
+/// after the base text, in `text:ruby-text`.
+fn write_ruby_segment(
+    out: &mut String,
+    text: &str,
+    start: usize,
+    end: usize,
+    style: Option<&str>,
+    refs: &[(Range<usize>, &CrossRef)],
+    rubies: &[(Range<usize>, &libertum_model::Ruby)],
+) {
+    if start >= end {
+        return;
+    }
+    for (range, _) in rubies {
+        if range.start == start {
+            out.push_str("<text:ruby><text:ruby-base>");
+        }
+    }
+    write_segment(out, text, start, end, style, refs);
+    for (range, ruby) in rubies {
+        if range.end == end {
+            out.push_str(&format!(
+                "</text:ruby-base><text:ruby-text>{}</text:ruby-text></text:ruby>",
+                escape_text(&ruby.text)
+            ));
+        }
+    }
+}
+
 /// Writes `text[start..end]`, inside a `text:bookmark-ref` when a cross-reference covers it.
 /// The span for direct formatting stays outside the reference, which is how LibreOffice
 /// styles one; the reader joins the pieces of a split reference back together.
@@ -2010,6 +2091,28 @@ fn borders_xml(borders: Borders) -> String {
 }
 
 /// Attribute list for `style:text-properties`.
+/// The attributes that name a document's language on the default text properties:
+/// `fo:language`, `fo:country` for a plain language-region tag (as LibreOffice writes it), and
+/// `style:rfc-language-tag` as well when the tag says more. The tag came through
+/// `libertum_model::language_tag`, so it holds only letters, digits and hyphens.
+fn language_attrs(tag: Option<&str>) -> String {
+    let Some(tag) = tag else {
+        return String::new();
+    };
+    let mut parts = tag.split('-');
+    let language = parts.next().unwrap_or_default();
+    let rest: Vec<&str> = parts.collect();
+    let mut out = format!(" fo:language=\"{language}\"");
+    match rest.as_slice() {
+        [] => {}
+        [region] if region.len() == 2 || region.chars().all(|c| c.is_ascii_digit()) => {
+            out.push_str(&format!(" fo:country=\"{region}\""));
+        }
+        _ => out.push_str(&format!(" style:rfc-language-tag=\"{tag}\"")),
+    }
+    out
+}
+
 fn text_props_xml(format: &CharFormat) -> String {
     let mut out = String::new();
     if let Some(family) = &format.family {

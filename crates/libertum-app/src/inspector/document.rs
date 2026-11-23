@@ -42,8 +42,13 @@ pub fn header<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
 
 pub fn body<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     if state.markdown {
-        // A Markdown file has no page setup, headers, footers or sections to edit.
-        return crate::inspector::format::note(t, s::MARKDOWN_DOCUMENT_NOTE);
+        // A Markdown file has no page setup, headers, footers or sections to edit, but its
+        // spelling language is still the writer's to choose.
+        return column![
+            section(t, s::SECTION_LANGUAGE, language(state, t)),
+            crate::inspector::format::note(t, s::MARKDOWN_DOCUMENT_NOTE),
+        ]
+        .into();
     }
     match state.document_pane {
         DocumentPane::Document => document_pane(state, t),
@@ -97,21 +102,38 @@ fn document_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
         column![caption(t, s::FOOTNOTE_NONE)].spacing(6)
     };
 
-    column![
-        section(t, s::SECTION_PAPER, paper),
-        section(t, s::SECTION_PAGE_COLOUR, page_colour(state, t)),
-        section(t, s::SECTION_HEADER_FOOTER, header_footer(state, t)),
-        section(t, s::SECTION_WATERMARK, watermark(state, t)),
-        section(
+    // Page colour and watermark only appear for formats that keep them.
+    let mut sections = column![section(t, s::SECTION_PAPER, paper)];
+    if state.keeps_page_colour {
+        sections = sections.push(section(t, s::SECTION_PAGE_COLOUR, page_colour(state, t)));
+    }
+    // Vertical text needs pages, and a format that can keep it.
+    if state.keeps_vertical && !state.pageless {
+        sections = sections.push(section(
+            t,
+            s::SECTION_TEXT_DIRECTION,
+            text_direction(state, t),
+        ));
+    }
+    sections = sections.push(section(
+        t,
+        s::SECTION_HEADER_FOOTER,
+        header_footer(state, t),
+    ));
+    if state.keeps_watermark {
+        sections = sections.push(section(t, s::SECTION_WATERMARK, watermark(state, t)));
+    }
+    sections
+        .push(section(
             t,
             s::SECTION_MARGINS,
             column![
                 row![margin(MarginSide::Top), margin(MarginSide::Bottom)].spacing(8),
                 row![margin(MarginSide::Left), margin(MarginSide::Right)].spacing(8),
             ]
-            .spacing(8)
-        ),
-        section(
+            .spacing(8),
+        ))
+        .push(section(
             t,
             s::SECTION_TYPOGRAPHY,
             column![
@@ -123,11 +145,59 @@ fn document_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
                 ),
                 check(t, s::DOC_LIGATURES, d.ligatures, DocumentMsg::Ligatures),
             ]
-            .spacing(9)
-        ),
-        section(t, s::SECTION_FOOTNOTE, footnote),
-    ]
-    .into()
+            .spacing(9),
+        ))
+        .push(section(t, s::SECTION_LANGUAGE, language(state, t)))
+        .push(section(t, s::SECTION_FOOTNOTE, footnote))
+        .into()
+}
+
+/// Horizontal or vertical text. Vertical text runs down the page in columns from the right, as
+/// in Chinese, Japanese and Korean books.
+fn text_direction<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
+    use crate::state::TextDirection;
+    segmented::select(
+        t,
+        Look::Raised,
+        &[
+            (
+                TextDirection::Horizontal,
+                Content::Label(s::TEXT_HORIZONTAL),
+            ),
+            (TextDirection::Vertical, Content::Label(s::TEXT_VERTICAL)),
+        ],
+        Some(if state.document.vertical {
+            TextDirection::Vertical
+        } else {
+            TextDirection::Horizontal
+        }),
+        |direction| Message::Document(DocumentMsg::Vertical(direction == TextDirection::Vertical)),
+    )
+}
+
+/// The language the document is written in: spelling follows it, and the file (or, for RTF
+/// and Markdown, the app) remembers it.
+fn language<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
+    use crate::language::SecondLanguage;
+    let first: Element<'a, Message> = popup(
+        t,
+        crate::language::DocLanguage::ALL,
+        Some(state.document.language),
+        s::MIXED,
+        |language| Message::Document(DocumentMsg::Language(language)),
+    )
+    .into();
+    let second: Element<'a, Message> = popup(
+        t,
+        SecondLanguage::ALL,
+        Some(SecondLanguage(state.document.language2)),
+        s::MIXED,
+        |choice: SecondLanguage| Message::Document(DocumentMsg::Language2(choice.0)),
+    )
+    .into();
+    column![first, caption(t, s::SECOND_LANGUAGE), second]
+        .spacing(6)
+        .into()
 }
 
 /// Header & Footer: the switches, their distances and the text of each variant the section
@@ -263,7 +333,6 @@ fn watermark<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
         ]
         .spacing(6)
         .align_y(Center),
-        caption(t, s::WATERMARK_HINT),
     ]
     .spacing(8)
     .into()
@@ -277,7 +346,8 @@ fn page_colour<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
             iced::Color::from_rgb8(r, g, b)
         });
         let selected = d.page_colour == colour;
-        iced::widget::tooltip(
+        crate::inspector::format::tip(
+            t,
             iced::widget::button(
                 container(space::horizontal().width(Length::Fixed(16.0)))
                     .width(Length::Fixed(18.0))
@@ -308,8 +378,7 @@ fn page_colour<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
                 ..iced::widget::button::Style::default()
             })
             .on_press(Message::Document(DocumentMsg::PageColour(colour))),
-            container(iced::widget::text(name).size(12)).padding(4),
-            iced::widget::tooltip::Position::Bottom,
+            name,
         )
     };
     // White and the tints, five to a row so they fit the pane.
@@ -353,7 +422,7 @@ fn page_colour<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
     if typed.is_none() && !d.page_colour_hex.trim().is_empty() {
         body = body.push(caption(t, s::PAGE_COLOUR_BAD_HEX));
     }
-    body.push(caption(t, s::PAGE_COLOUR_HINT)).into()
+    body.into()
 }
 
 /// A one-line text input styled like the other inspector controls.
@@ -534,8 +603,8 @@ fn section_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
             s::SECTION_POSITION,
             column![
                 row![
-                    container(vertical).width(Length::FillPortion(2)),
-                    container(horizontal).width(Length::FillPortion(3)),
+                    container(vertical).width(Length::FillPortion(3)),
+                    container(horizontal).width(Length::FillPortion(5)),
                 ]
                 .spacing(8)
                 .align_y(Center),

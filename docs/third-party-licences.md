@@ -9,12 +9,21 @@ The `hypher` crate (MIT OR Apache-2.0, by the Typst authors) embeds TeX hyphenat
 | Language | Feature | Pattern file | Licence | Checked |
 |---|---|---|---|---|
 | English (US) | `english` | `hyph-en-us.tex` | FSF all-permissive (notice below) | 2026-11-09 |
+| Ukrainian | `ukrainian` | `hyph-uk.tex` | MIT, chosen from "MIT or LPPL" (notice below) | 2026-11-23 |
 
 Notice that must be preserved (from `hyph-en-us.tex`, part of the hyph-utf8 package):
 
 > Copyright (C) 1990, 2004, 2005 Gerard D.C. Kuiken
 >
 > Copying and distribution of this file, with or without modification, are permitted in any medium without royalty provided the copyright notice and this notice are preserved.
+
+Ukrainian (`hyph-uk.tex`, hyph-utf8 package) is offered under either the MIT licence or the LPPL; Libertum uses it under the MIT licence:
+
+> Copyright (C) 1998-2001 Maksym Polyakov
+>
+> Licensed under the MIT licence, <https://opensource.org/licenses/MIT>: the standard text, with the copyright line above, applies to these patterns.
+
+Russian hyphenation patterns (`hyph-ru.tex`) are LPPL, which Libertum's permissive-only rule does not take, so Russian text is not hyphenated (its spelling dictionary is separate, below).
 
 When packaging (Phase 9), ship this notice with the application (for example in an "Acknowledgements" file or the About box).
 
@@ -45,10 +54,16 @@ described in `docs/decisions.md`: `winit` 0.30.13 (Apache-2.0 OR MIT, licence in
 `vendor/iced_core/LICENSE` and `vendor/iced_winit/LICENSE`). The patches do not change the licence
 terms.
 
-## Spellchecking (2026-11-15)
+## Spellchecking (2026-11-15, engine and languages changed 2026-11-23)
 
-`zspell` 0.5.5 is Apache-2.0 (its Apache licence text and copyright notice must ship with the
-application). Its transitive crates are permissive.
+**`spellbook` 0.4.2 is MPL-2.0**, the one dependency here that is not MIT, Apache-2.0, ISC, BSD or
+Zlib. The maintainer approved it on 2026-11-23 (docs/decisions.md). MPL-2.0 is a file-level copyleft:
+the crate is used unmodified, so Libertum's own code stays MIT; if a `spellbook` file were ever
+modified, that file's changes would have to be published under the MPL, and the MPL text and a
+pointer to the crate's source must ship with the application. Its text is the `LICENSE` file in
+the crate (<https://github.com/helix-editor/spellbook>). Its dependencies are `hashbrown`
+(MIT OR Apache-2.0) and `foldhash` (Zlib). It replaced `zspell` (Apache-2.0), which is no longer
+used.
 
 The bundled dictionaries:
 
@@ -56,8 +71,22 @@ The bundled dictionaries:
 |---|---|---|---|
 | English (British) | `wooorm/dictionaries` `en-GB` | MIT AND BSD | `crates/libertum-app/assets/dictionaries/en_GB.{aff,dic}`, `LICENSE_en_GB.txt` |
 | English (American) | SCOWL `en_US` via LibreOffice dictionaries | SCOWL permission (with BSD, WordNet and UKACD notices) | `crates/libertum-app/assets/dictionaries/en_US.{aff,dic}`, `LICENSE_en_US.txt` |
+| Ukrainian | `uk_UA` in LibreOffice dictionaries, from the `dict_uk` project (Andriy Rysin) | **MPL 1.1** | `crates/libertum-app/assets/dictionaries/uk_UA.{aff,dic}`, `LICENSE_uk_UA.txt` (README and full MPL 1.1 text) |
+| Russian | `ru_RU` in LibreOffice dictionaries (Alexander I. Lebedev) | BSD-style: keep the notice, modified versions must be marked, no endorsement | `crates/libertum-app/assets/dictionaries/ru_RU.{aff,dic}`, `LICENSE_ru_RU.txt` |
 
-Both licence files are kept beside the dictionaries and must be included in packaged notices.
+The licence files are kept beside the dictionaries and must be included in packaged notices. The
+dictionaries are embedded unmodified (the MPL 1.1 covers the Ukrainian files themselves, and
+they are shipped in source form, as the dictionary source is the data). They add about 12 MB to
+the binary.
+
+## Word dictionary for Chinese and Japanese (2026-11-23)
+
+Double-click, Ctrl+Arrow and word delete find Chinese and Japanese words with ICU4X's `cjdict`
+dictionary, through `icu_segmenter` 2.4 with its compiled data. The crate was already in the tree
+(parley depends on it); it is now also a direct dependency of `libertum-editor`. Licence:
+**Unicode-3.0** (the ICU4X data and code), which is permissive: keep the copyright and permission
+notice with the application. It is not on the list above by name; `unicode-ident` already carries
+the same licence in this tree.
 
 ## HTML import and comparison (release 0.5.0, 2026-11-22)
 

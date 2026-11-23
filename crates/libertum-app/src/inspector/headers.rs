@@ -111,16 +111,7 @@ pub fn body<'a>(
             hidden_under = Some(level);
         }
     }
-    column![
-        container(text(s::HEADERS_HINT).size(11.0).color(t.text_secondary)).padding(Padding {
-            top: 10.0,
-            bottom: 6.0,
-            left: 14.0,
-            right: 14.0,
-        }),
-        list,
-    ]
-    .into()
+    column![list,].into()
 }
 
 /// Sidebar headings have one line; a long chapter title gets an ellipsis before the page

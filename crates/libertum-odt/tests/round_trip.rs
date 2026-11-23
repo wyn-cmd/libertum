@@ -1492,3 +1492,185 @@ fn the_page_colour_round_trips_on_the_page_layout() {
             .all(|s| s.page_colour.is_none())
     );
 }
+
+fn language_document(tag: Option<&str>) -> Document {
+    let mut document = Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "Colour"))]);
+    for section in &mut document.sections {
+        section.language = tag.map(str::to_owned);
+    }
+    document
+}
+
+#[test]
+fn the_language_round_trips_through_the_default_style() {
+    for (tag, expected_in_file) in [
+        ("en-GB", "fo:language=\"en\" fo:country=\"GB\""),
+        ("en", "fo:language=\"en\""),
+        ("zh-Hant-TW", "style:rfc-language-tag=\"zh-Hant-TW\""),
+    ] {
+        let bytes = Odt::new(language_document(Some(tag)))
+            .to_bytes()
+            .expect("save");
+        let styles = zip_text(&bytes, "styles.xml").expect("styles.xml");
+        assert!(styles.contains(expected_in_file), "{tag}: {styles}");
+        let back = Odt::parse(&bytes).expect("reopen");
+        assert!(
+            back.document()
+                .sections
+                .iter()
+                .all(|section| section.language.as_deref() == Some(tag)),
+            "{tag}"
+        );
+    }
+}
+
+#[test]
+fn a_document_without_a_language_writes_none() {
+    let bytes = Odt::new(language_document(None)).to_bytes().expect("save");
+    let styles = zip_text(&bytes, "styles.xml").expect("styles.xml");
+    assert!(!styles.contains("fo:language"), "{styles}");
+    let back = Odt::parse(&bytes).expect("reopen");
+    assert_eq!(back.document().sections[0].language, None);
+}
+
+/// A minimal package with a `styles.xml` whose default style carries `text_properties`.
+fn package_with_default_text_properties(text_properties: &str) -> Vec<u8> {
+    use std::io::Write;
+    let content = r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text><text:p>Hi</text:p></office:text></office:body></office:document-content>"#;
+    let styles = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"><office:styles><style:default-style style:family="paragraph"><style:text-properties {text_properties}/></style:default-style></office:styles></office:document-styles>"#
+    );
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("mimetype", stored).expect("mimetype");
+        writer.write_all(MIME_TEXT.as_bytes()).expect("mimetype");
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("content.xml", deflated).expect("content");
+        writer.write_all(content.as_bytes()).expect("content");
+        writer.start_file("styles.xml", deflated).expect("styles");
+        writer.write_all(styles.as_bytes()).expect("styles");
+        writer
+            .start_file("META-INF/manifest.xml", deflated)
+            .expect("manifest");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="application/vnd.oasis.opendocument.text"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/></manifest:manifest>"#,
+            )
+            .expect("manifest");
+        writer.finish().expect("finish");
+    }
+    buffer.into_inner()
+}
+
+#[test]
+fn reads_the_language_libreoffice_writes_and_ignores_no_language_markers() {
+    for (properties, expected) in [
+        (r#"fo:language="en" fo:country="AU""#, Some("en-AU")),
+        (r#"fo:language="en" fo:country="none""#, Some("en")),
+        (
+            r#"fo:language="en" fo:country="US" style:rfc-language-tag="en-US""#,
+            Some("en-US"),
+        ),
+        (r#"fo:language="zxx" fo:country="none""#, None),
+        (r#"fo:language="en&quot;/&gt;&lt;x""#, None),
+        (r#"fo:font-size="12pt""#, None),
+    ] {
+        let bytes = package_with_default_text_properties(properties);
+        let parsed = Odt::parse(&bytes).expect("parse");
+        assert_eq!(
+            parsed.document().sections[0].language.as_deref(),
+            expected,
+            "{properties}"
+        );
+    }
+}
+
+#[test]
+fn vertical_text_round_trips_as_a_writing_mode() {
+    for on in [true, false] {
+        let mut document = Document::new();
+        let id = document.alloc_id();
+        document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "縦書き"))]);
+        for section in &mut document.sections {
+            section.vertical = on;
+        }
+        let bytes = Odt::new(document).to_bytes().expect("save");
+        let styles = zip_text(&bytes, "styles.xml").expect("styles.xml");
+        assert_eq!(
+            styles.contains("style:writing-mode=\"tb-rl\""),
+            on,
+            "{styles}"
+        );
+        assert_eq!(
+            Odt::parse(&bytes).expect("reopen").document().sections[0].vertical,
+            on
+        );
+    }
+}
+
+#[test]
+fn ruby_round_trips_as_text_ruby() {
+    let mut original = body("漢字を読む漢字");
+    let ruby = vec![
+        libertum_model::Ruby::new(0..6, "かんじ"),
+        libertum_model::Ruby::new(15..21, "かんじ"),
+    ];
+    original.set_ruby(ruby.clone());
+    let bytes = Odt::new(Document::from_paragraphs(vec![original.clone()]))
+        .to_bytes()
+        .expect("write");
+    let content = zip_text(&bytes, "content.xml").expect("content");
+    assert!(
+        content.contains(
+            "<text:ruby><text:ruby-base>漢字</text:ruby-base><text:ruby-text>かんじ</text:ruby-text></text:ruby>"
+        ),
+        "{content}"
+    );
+    let back = single_paragraph(&bytes);
+    assert_eq!(back.text(), original.text());
+    assert_eq!(back.ruby(), ruby.as_slice());
+}
+
+#[test]
+fn a_second_language_round_trips_through_the_meta_part() {
+    let mut document = language_document(Some("en-GB"));
+    for section in &mut document.sections {
+        section.language2 = Some("uk-UA".to_owned());
+    }
+    let bytes = Odt::new(document).to_bytes().expect("write");
+    let meta = zip_text(&bytes, "meta.xml").expect("meta.xml");
+    assert!(meta.contains("LibertumLanguage2"), "{meta}");
+    let back = Odt::parse(&bytes).expect("read");
+    let section = &back.document().sections[0];
+    assert_eq!(section.language.as_deref(), Some("en-GB"));
+    assert_eq!(section.language2.as_deref(), Some("uk-UA"));
+    // Saved again with another, there is still one property; with none, there is none.
+    let mut again = back.document().clone();
+    for section in &mut again.sections {
+        section.language2 = Some("ja".to_owned());
+    }
+    let mut back = back;
+    back.set_document(again);
+    let bytes = back.to_bytes().expect("write");
+    let meta = zip_text(&bytes, "meta.xml").expect("meta.xml");
+    assert_eq!(meta.matches("LibertumLanguage2").count(), 1, "{meta}");
+    let back = Odt::parse(&bytes).expect("read");
+    assert_eq!(back.document().sections[0].language2.as_deref(), Some("ja"));
+    let mut none = back.document().clone();
+    for section in &mut none.sections {
+        section.language2 = None;
+    }
+    let mut back = back;
+    back.set_document(none);
+    let bytes = back.to_bytes().expect("write");
+    assert_eq!(
+        Odt::parse(&bytes).expect("read").document().sections[0].language2,
+        None
+    );
+}

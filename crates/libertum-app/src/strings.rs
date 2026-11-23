@@ -141,6 +141,7 @@ pub const VIEW_WORD_COUNT: &str = "Show Word Count";
 pub const VIEW_THUMBNAILS: &str = "Page Thumbnails";
 pub const VIEW_BOOKLET: &str = "Booklet View";
 pub const VIEW_PAGELESS: &str = "Pageless";
+pub const VIEW_NEW: &str = "New Document…";
 pub const VIEW_HOME: &str = "Go to Home Screen";
 pub const VIEW_STITCH: &str = "Stitch Documents…";
 pub const HOME_STITCH: &str = "Stitch…";
@@ -168,6 +169,23 @@ pub const INSERT_ENDNOTE: &str = "Endnote";
 pub const INSERT_TOC: &str = "Table of Contents";
 pub const INSERT_PAGE_NUMBER: &str = "Page Number";
 pub const INSERT_DATE_TIME: &str = "Date & Time…";
+pub const INSERT_LINKED_MEDIA: &str = "Linked Image or Video…";
+pub const LINKED_TITLE: &str = "Linked Image or Video";
+pub const LINKED_URL_PLACEHOLDER: &str = "Web address, e.g. https://example.com/picture.png";
+pub const LINKED_ALT_PLACEHOLDER: &str = "Description (optional)";
+pub const LINKED_KIND_IMAGE: &str = "Image";
+pub const LINKED_KIND_VIDEO: &str = "Video";
+pub const LINKED_PREVIEW: &str = "Download a preview now";
+pub const LINKED_HINT: &str = "The chapter's AO3 HTML points at this address. A preview is a copy of the picture kept in your document so you can see it here; Libertum connects to the address once to get it, and only when you ask.";
+pub const LINKED_INSERT: &str = "Insert";
+pub const LINKED_DOWNLOADING: &str = "Downloading the preview…";
+pub const LINKED_BAD_URL: &str = "Enter a web address that starts with https:// or http://.";
+pub const LINKED_FETCH_PREVIEW: &str = "Fetch Preview";
+pub const LINKED_PREVIEW_FAILED: &str = "The preview could not be downloaded:";
+pub const LINKED_NO_PREVIEW: &str =
+    "This video's address gives no picture to download, so it keeps its placeholder.";
+pub const LINKED_VIDEO_NOTE: &str = "Video link";
+pub const LINKED_IMAGE_NOTE: &str = "Image link";
 
 // Date & Time chooser
 pub const DATE_TIME_TITLE: &str = "Date & Time";
@@ -199,7 +217,6 @@ pub const PANE_SECTION: &str = "Section";
 pub const PANE_HEADERS: &str = "Headers";
 pub const HEADERS_EMPTY: &str =
     "No headings yet. Apply a Heading style to a paragraph and it appears here.";
-pub const HEADERS_HINT: &str = "Click a heading to jump to it.";
 pub const MIXED: &str = "Mixed";
 pub const MIXED_SUFFIX: &str = " (mixed)";
 pub const UPDATE: &str = "Update";
@@ -314,6 +331,11 @@ pub const MARGIN_BOTTOM: &str = "Bottom";
 pub const MARGIN_LEFT: &str = "Left";
 pub const MARGIN_RIGHT: &str = "Right";
 pub const SECTION_TYPOGRAPHY: &str = "Hyphenation & Ligatures";
+pub const SECTION_LANGUAGE: &str = "Language";
+pub const SECOND_LANGUAGE: &str = "Second language (optional)";
+pub const SECTION_TEXT_DIRECTION: &str = "Text Direction";
+pub const TEXT_HORIZONTAL: &str = "Horizontal";
+pub const TEXT_VERTICAL: &str = "Vertical";
 pub const DOC_HYPHENATION: &str = "Hyphenation";
 pub const DOC_LIGATURES: &str = "Ligatures";
 pub const PAGE_SIZE_A4: &str = "A4";
@@ -429,6 +451,8 @@ pub fn zoom_percent(percent: u16) -> String {
 pub const SECTION_IMAGE: &str = "Image";
 pub const IMAGE_ALT: &str = "Description (alt text)";
 pub const IMAGE_REMOVE: &str = "Remove Image";
+pub const SECTION_RUBY: &str = "Ruby";
+pub const RUBY_READING: &str = "Reading (furigana, pinyin)";
 pub const IMAGE_SMALLER: &str = "Smaller";
 pub const IMAGE_LARGER: &str = "Larger";
 pub const IMAGE_PICK_TITLE: &str = "Insert Image";
@@ -534,8 +558,8 @@ pub const BENCH_NOTE: &str = "Typing is the time to apply a keystroke and update
 pub const SETTINGS_UPDATES: &str = "Check for updates automatically";
 pub const SETTINGS_SPELLING: &str = "Spelling";
 pub const SETTINGS_SPELLCHECK: &str = "Check spelling as you type";
-pub const SETTINGS_SPELL_LANGUAGE: &str = "Dictionary";
-pub const SETTINGS_SPELL_HINT: &str = "Underlines are checked on this machine. Right-click a word for suggestions, to add it to your dictionary, or to ignore it.";
+pub const SETTINGS_SPELL_LANGUAGE: &str = "Default language";
+pub const SETTINGS_SPELL_HINT: &str = "Underlines are checked on this machine. Right-click a word for suggestions, to add it to your dictionary, or to ignore it. New documents start in the default language; each document then keeps its own, which you set in the Document pane.";
 pub const SETTINGS_UPDATES_HINT: &str = "Ask GitHub once a day whether a newer release exists. When you choose Update now, Libertum downloads the new version, checks it and installs it by itself; for a Linux package the system's own password prompt appears, and nothing is installed without you. No document or account information is sent.";
 pub const SETTINGS_CHECK_NOW: &str = "Check now";
 pub const SETTINGS_DEVELOPER: &str = "Developer";
@@ -769,14 +793,12 @@ pub const WATERMARK_PLACEHOLDER: &str = "Text, for example DRAFT";
 pub const WATERMARK_DIAGONAL: &str = "Diagonal";
 pub const WATERMARK_APPLY: &str = "Apply";
 pub const WATERMARK_REMOVE: &str = "Remove";
-pub const WATERMARK_HINT: &str = "Shown faintly behind the text of every page, and kept in Libertum (.lbtd), Word (.docx) and OpenDocument (.odt) files and in PDF exports. RTF and Markdown files do not keep it.";
 
 // Page colour (Document pane).
 pub const SECTION_PAGE_COLOUR: &str = "Page Colour";
 pub const PAGE_COLOUR_NONE: &str = "White";
-pub const PAGE_COLOUR_HEX_PLACEHOLDER: &str = "Other colour, for example #F5EBDC";
+pub const PAGE_COLOUR_HEX_PLACEHOLDER: &str = "e.g. #F5EBDC";
 pub const PAGE_COLOUR_APPLY: &str = "Apply";
-pub const PAGE_COLOUR_HINT: &str = "The colour of every page. Kept in Libertum (.lbtd), Word (.docx), OpenDocument (.odt) and HTML files and in PDF exports. RTF and Markdown files do not keep it.";
 pub const PAGE_COLOUR_BAD_HEX: &str = "Type six hex digits, such as #F5EBDC.";
 
 // Library, version history and sync conflicts

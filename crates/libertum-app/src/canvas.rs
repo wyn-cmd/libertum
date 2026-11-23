@@ -594,6 +594,12 @@ pub struct CanvasProps {
     pub ime_enabled: bool,
     /// Where the IME candidate window should sit: the caret, unaffected by blinking.
     pub ime_caret: Option<CaretRect>,
+    /// The text runs vertically: a misspelling is underlined down the side of its column, not
+    /// along the bottom of a line, and the caret is a bar across the column.
+    pub vertical_text: bool,
+    /// The caret is in vertical text (not in an upright table cell): an input method's
+    /// composition then runs down the column.
+    pub composition_vertical: bool,
     /// Shared cache for the page-strip metrics, so a draw or a pointer event does not
     /// rebuild the document's page-sized vectors.
     pub metrics_cache: Arc<MetricsCache>,
@@ -1389,12 +1395,19 @@ where
                     &m, viewport, bounds, sx, sy, s.page, s.x, s.y, s.width, s.height,
                 ) && rect.intersects(&bounds)
                 {
+                    // Along the baseline side of the text: the bottom of a horizontal line, and
+                    // the left of a column (the layout's bottom, turned a quarter turn).
+                    let line = if self.props.vertical_text {
+                        Rectangle::new(Point::new(rect.x, rect.y), Size::new(1.5, rect.height))
+                    } else {
+                        Rectangle::new(
+                            Point::new(rect.x, rect.y + rect.height - 1.5),
+                            Size::new(rect.width, 1.5),
+                        )
+                    };
                     renderer.fill_quad(
                         Quad {
-                            bounds: Rectangle::new(
-                                Point::new(rect.x, rect.y + rect.height - 1.5),
-                                Size::new(rect.width, 1.5),
-                            ),
+                            bounds: line,
                             ..Quad::default()
                         },
                         SPELL_COLOUR,
@@ -1428,7 +1441,69 @@ where
                 );
             }
 
+            // Vertical text: the composition runs down the column from the caret, a character to
+            // a cell, upright, with its underline down the left side like a misspelling's.
+            if self.props.composition_vertical
+                && let Some(pre) = &self.props.preedit
+                && let Some(rect) = page_point_rect(
+                    &m,
+                    viewport,
+                    bounds,
+                    sx,
+                    sy,
+                    pre.page,
+                    pre.x_pt,
+                    pre.y_pt,
+                    pre.height_pt,
+                    // Not zero: `Rectangle::intersects` requires a positive overlap.
+                    1.0,
+                )
+                && rect.intersects(&bounds)
+            {
+                let cell = rect.width.max(6.0);
+                let colour = palette.primary.strong.color;
+                let font = renderer.default_font();
+                let paper = self
+                    .props
+                    .paper
+                    .map_or(Color::WHITE, |[r, g, b, _]| Color::from_rgb8(r, g, b));
+                let length = cell * pre.text.chars().count() as f32;
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(rect.position(), Size::new(cell, length)),
+                        ..Quad::default()
+                    },
+                    paper,
+                );
+                for (index, character) in pre.text.chars().enumerate() {
+                    renderer.fill_text(
+                        Text {
+                            content: character.to_string(),
+                            bounds: Size::new(cell, cell * 1.4),
+                            size: Pixels(cell * 0.8),
+                            line_height: text::LineHeight::Relative(1.0),
+                            font,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Advanced,
+                            wrapping: text::Wrapping::None,
+                        },
+                        // A full-width character is 0.8 of the cell wide: centre it.
+                        Point::new(rect.x + cell * 0.1, rect.y + cell * index as f32),
+                        colour,
+                        bounds,
+                    );
+                }
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(rect.position(), Size::new(1.5, length)),
+                        ..Quad::default()
+                    },
+                    colour,
+                );
+            }
             if let Some(pre) = &self.props.preedit
+                && !self.props.composition_vertical
                 && let Some(rect) = page_point_rect(
                     &m,
                     viewport,
@@ -1446,27 +1521,48 @@ where
             {
                 let size = (pre.height_pt * m.scale / m.sf).max(6.0);
                 let colour = palette.primary.strong.color;
-                renderer.fill_text(
-                    Text {
-                        content: pre.text.clone(),
-                        bounds: Size::new(bounds.width, size * 1.4),
-                        size: Pixels(size),
-                        line_height: text::LineHeight::Relative(1.0),
-                        font: renderer.default_font(),
-                        align_x: text::Alignment::Left,
-                        align_y: iced::alignment::Vertical::Top,
-                        shaping: text::Shaping::Advanced,
-                        wrapping: text::Wrapping::None,
+                let font = renderer.default_font();
+                let shape = |content: &str| Text {
+                    content: content.to_owned(),
+                    bounds: Size::new(bounds.width, size * 1.4),
+                    size: Pixels(size),
+                    line_height: text::LineHeight::Relative(1.0),
+                    font,
+                    align_x: text::Alignment::Left,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: text::Shaping::Advanced,
+                    wrapping: text::Wrapping::None,
+                };
+                // How wide the composition is, so its background and underline cover all of
+                // it (the text is not part of the page layout, which has no room for it).
+                let measured = {
+                    use text::Paragraph as _;
+                    <Renderer as text::Renderer>::Paragraph::with_text(shape(&pre.text).as_ref())
+                        .min_width()
+                };
+                let width = measured.max(2.0);
+                // Typing in the middle of a line draws the composition over the text to its
+                // right, so it gets the paper colour behind it to stay readable.
+                let paper = self
+                    .props
+                    .paper
+                    .map_or(Color::WHITE, |[r, g, b, _]| Color::from_rgb8(r, g, b));
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(
+                            rect.position(),
+                            Size::new(width + 2.0, rect.height),
+                        ),
+                        ..Quad::default()
                     },
-                    rect.position(),
-                    colour,
-                    bounds,
+                    paper,
                 );
+                renderer.fill_text(shape(&pre.text), rect.position(), colour, bounds);
                 renderer.fill_quad(
                     Quad {
                         bounds: Rectangle::new(
                             Point::new(rect.x, rect.y + rect.height),
-                            Size::new(rect.width.max(2.0), 1.0),
+                            Size::new(width, 1.0),
                         ),
                         ..Quad::default()
                     },
@@ -1668,6 +1764,8 @@ mod tests {
             used_heights: Vec::new().into(),
             ime_enabled,
             ime_caret: caret,
+            vertical_text: false,
+            composition_vertical: false,
             metrics_cache: Arc::new(MetricsCache::default()),
         };
         let bounds = Rectangle::new(Point::new(0.0, 52.0), Size::new(900.0, 700.0));

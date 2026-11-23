@@ -11,8 +11,8 @@ use parley::style::{
     FontFamily, FontFamilyName, FontFeatures, FontStyle, FontWeight, GenericFamily, OverflowWrap,
 };
 use parley::{
-    Alignment, AlignmentOptions, FontContext, IndentOptions, InlineBox, InlineBoxKind, Layout,
-    LayoutContext, LineBreakContext, LineHeight, PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, IndentOptions, InlineBox, InlineBoxKind, Language,
+    Layout, LayoutContext, LineBreakContext, LineHeight, PositionedLayoutItem, StyleProperty,
 };
 
 use libertum_model::{
@@ -56,23 +56,42 @@ const SINGLE_LINE_EM: f32 = 1.2;
 
 /// Shortest word that is hyphenated, in characters (Word's default zone is similar).
 const MIN_HYPHENATED_WORD: usize = 5;
+
+/// Where the centre line of a vertical column lies above the baseline, in ems: half the
+/// ascent less the descent of an ideographic em box (0.88 and 0.12 in the CJK fonts that matter).
+const COLUMN_CENTRE_EM: f32 = 0.38;
+/// Ruby text is this fraction of its base's size.
+const RUBY_SIZE_RATIO: f32 = 0.5;
+/// How far above its baseline a line's text reaches, in ems, which the room made for ruby
+/// above it is added to.
+const RUBY_BASE_ASCENT_EM: f32 = 0.9;
+/// Space between ruby and its base text, as a fraction of the base's size.
+const RUBY_GAP_EM: f32 = 0.05;
 /// Room kept at the end of each line of a hyphenated paragraph for the hyphen, as a
 /// fraction of the font size (a hyphen is about a third of an em in most text faces).
 const HYPHEN_RESERVE_EM: f32 = 0.35;
 
 /// Hyphenation points of `text`: the character indices a line may break before, inside
-/// words, at their syllables (English patterns; the model has no language yet).
-fn hyphenation_points(text: &str) -> Vec<usize> {
+/// words, at their syllables. Latin words use the English patterns and Cyrillic words the
+/// Ukrainian ones (see [`crate::script::cyrillic_word_language`]); Chinese,
+/// Japanese, Korean, Greek and other scripts are never broken at syllables.
+fn hyphenation_points(text: &str, cyrillic: Option<crate::script::Cyrillic>) -> Vec<usize> {
+    use crate::script::{Cyrillic, is_cyrillic_letter, is_latin_letter};
     let mut points = Vec::new();
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut i = 0;
     while i < chars.len() {
-        if !chars[i].1.is_alphabetic() {
+        let latin = is_latin_letter(chars[i].1);
+        let letter: fn(char) -> bool = if latin {
+            is_latin_letter
+        } else if is_cyrillic_letter(chars[i].1) {
+            is_cyrillic_letter
+        } else {
             i += 1;
             continue;
-        }
+        };
         let start = i;
-        while i < chars.len() && chars[i].1.is_alphabetic() {
+        while i < chars.len() && letter(chars[i].1) {
             i += 1;
         }
         if i - start < MIN_HYPHENATED_WORD {
@@ -80,9 +99,17 @@ fn hyphenation_points(text: &str) -> Vec<usize> {
         }
         let from = chars[start].0;
         let to = chars.get(i).map_or(text.len(), |c| c.0);
+        let word = &text[from..to];
+        let lang = if latin {
+            hypher::Lang::English
+        } else {
+            match crate::script::cyrillic_word_language(word, cyrillic) {
+                Some(Cyrillic::Ukrainian) => hypher::Lang::Ukrainian,
+                None => continue,
+            }
+        };
         let mut at = start;
-        let syllables: Vec<&str> =
-            hypher::hyphenate(&text[from..to], hypher::Lang::English).collect();
+        let syllables: Vec<&str> = hypher::hyphenate(word, lang).collect();
         for s in syllables.iter().take(syllables.len().saturating_sub(1)) {
             at += s.chars().count();
             points.push(at);
@@ -334,6 +361,28 @@ pub struct PlacedImage {
     pub media: Arc<libertum_model::Media>,
 }
 
+/// Ruby text placed over its base: the reading's own layout, and where it goes in the
+/// paragraph's coordinates (its left edge and top, so the app only adds the paragraph's origin).
+#[derive(Clone)]
+pub struct PlacedRuby {
+    /// Index into the snapshot's `ruby`.
+    pub index: usize,
+    /// Line of the paragraph the base starts on.
+    pub line: usize,
+    pub x: f32,
+    pub y: f32,
+    pub layout: Arc<ParagraphLayout>,
+}
+
+/// What a ruby needs while the paragraph is laid out: its base range, extra spacing to give
+/// the base so it is as wide as the reading, and the height of the room above the line.
+#[derive(Clone)]
+struct RubySpec {
+    range: std::ops::Range<usize>,
+    spacing: f32,
+    box_height: f32,
+}
+
 /// The size an image is drawn at: its own, scaled down in proportion to fit the line width
 /// and the height cap.
 fn fitted_image_size(width: f32, height: f32, max_width: f32, max_height: f32) -> (f32, f32) {
@@ -386,6 +435,8 @@ pub struct ParagraphLayout {
     pub hyphen_lines: Vec<usize>,
     /// Inline images and where they landed.
     pub images: Vec<PlacedImage>,
+    /// Ruby over its base text.
+    pub ruby: Vec<PlacedRuby>,
     /// One entry per line; never empty (an empty paragraph has one synthetic line).
     pub lines: Vec<LineBox>,
     pub height: f32,
@@ -525,6 +576,7 @@ impl Engine {
         width: f32,
         tabs: &[usize],
         tab_widths: &[f32],
+        ruby: &[RubySpec],
     ) -> (Layout<Brush>, HashSet<usize>) {
         self.layouts_built += 1;
         let text = para.text.as_str();
@@ -558,8 +610,10 @@ impl Engine {
         // Hyphenation: extra break opportunities at syllables. parley's override is called
         // once per adjacent character pair, in order (there are no mandatory breaks inside a
         // paragraph), so a counter maps each call to the character after the pair.
-        let points: HashSet<usize> = if para.hyphenate {
-            hyphenation_points(text).into_iter().collect()
+        let points: HashSet<usize> = if para.hyphenate && !para.upright {
+            hyphenation_points(text, para.cyrillic)
+                .into_iter()
+                .collect()
         } else {
             HashSet::new()
         };
@@ -593,6 +647,37 @@ impl Engine {
         b.push_default(StyleProperty::Brush(base_brush));
         // Break over-long unbreakable words (URLs, pasted junk) instead of overflowing the margin.
         b.push_default(StyleProperty::OverflowWrap(OverflowWrap::Anywhere));
+        // Chinese, Japanese and Korean text needs its language for the right regional glyphs
+        // (the same Han character is drawn differently in each) and punctuation.
+        for (range, locale) in crate::script::cjk_locale_ranges(text, para.locale) {
+            if let Ok(language) = Language::parse(locale) {
+                b.push(StyleProperty::Locale(Some(language)), range.clone());
+            }
+            // Vertical text: the font's vertical forms of punctuation, small kana and the like.
+            if para.vertical && !para.upright {
+                b.push(
+                    StyleProperty::FontFeatures(FontFeatures::from("\"vert\" 1")),
+                    range,
+                );
+            }
+        }
+        // Numbers stand upright in vertical text, one digit to a cell down the column. A digit
+        // is taller than it is wide, so each is given room to make its cell about an em.
+        if para.vertical && !para.upright {
+            for range in crate::script::upright_number_ranges(text) {
+                // By the size of the text the number is in: its own span's, else the base.
+                let size_pt = para
+                    .spans
+                    .iter()
+                    .rev()
+                    .find(|(span, _)| span.start <= range.start && range.start < span.end)
+                    .map_or(base, |(_, style)| style.font_size);
+                b.push(
+                    StyleProperty::LetterSpacing(crate::script::NUMBER_CELL_SPACING_EM * size_pt),
+                    range,
+                );
+            }
+        }
         for (range, style) in &para.spans {
             let valid = range.start < range.end
                 && range.end <= text.len()
@@ -683,7 +768,31 @@ impl Engine {
                 index,
                 width: w,
                 height: h,
-                baseline: None,
+                // On a vertical page the picture is centred on the column's centre line, which
+                // is about 0.38 em above the baseline (half the CJK em box's ascent less its
+                // descent), instead of standing on the baseline, which is the column's left.
+                baseline: (para.vertical && !para.upright)
+                    .then_some(h * 0.5 + COLUMN_CENTRE_EM * base),
+                vertical_align: parley::VerticalAlign::BASELINE,
+            });
+        }
+        // Ruby: extra spacing on a base shorter than its reading, and a box above the line at
+        // the start of the base that makes the line tall enough to hold the reading. Their ids
+        // follow the images'.
+        for (i, spec) in ruby.iter().enumerate() {
+            if spec.spacing > 0.0 {
+                b.push(
+                    StyleProperty::LetterSpacing(spec.spacing),
+                    spec.range.clone(),
+                );
+            }
+            b.push_inline_box(InlineBox {
+                id: (tabs.len() + para.images.len() + i) as u64,
+                kind: InlineBoxKind::InFlow,
+                index: spec.range.start,
+                width: 0.0,
+                height: spec.box_height,
+                baseline: Some(spec.box_height),
                 vertical_align: parley::VerticalAlign::BASELINE,
             });
         }
@@ -745,6 +854,205 @@ impl Engine {
         (layout, points)
     }
 
+    /// Lays the paragraph out, repeating until its tab widths settle (see [`build`](Self::build)).
+    fn settle(
+        &mut self,
+        para: &SpikeParagraph,
+        width: f32,
+        tabs: &[usize],
+        widths: &mut Vec<f32>,
+        ruby: &[RubySpec],
+    ) -> (Layout<Brush>, HashSet<usize>) {
+        let default_style = SpanStyle::new(self.opts.base_size_pt);
+        let base = para.base.as_ref().unwrap_or(&default_style).font_size;
+        let (left, _right, break_width) = frame(para, base, width);
+        let (mut layout, points) = self.layout_once(para, width, tabs, widths, ruby);
+        for _ in 0..MAX_TAB_PASSES {
+            if tabs.is_empty() {
+                break;
+            }
+            let next = solve_tab_widths(para, &layout, tabs, widths, break_width, left);
+            let settled = next
+                .iter()
+                .zip(widths.iter())
+                .all(|(a, b)| (a - b).abs() < TAB_EPSILON_PT);
+            if settled {
+                break;
+            }
+            *widths = next;
+            let (l, p) = self.layout_once(para, width, tabs, widths, ruby);
+            layout = l;
+            debug_assert_eq!(p, points);
+        }
+        (layout, points)
+    }
+
+    /// The style of the text at byte `at`: its span's, else the paragraph's.
+    fn style_at(para: &SpikeParagraph, at: usize, fallback: &SpanStyle) -> SpanStyle {
+        para.spans
+            .iter()
+            .find(|(range, _)| range.start <= at && at < range.end)
+            .map_or_else(
+                || para.base.clone().unwrap_or_else(|| fallback.clone()),
+                |(_, s)| s.clone(),
+            )
+    }
+
+    /// The layout of a reading, at its own small size and in its base's colour.
+    fn ruby_layout(
+        &mut self,
+        para: &SpikeParagraph,
+        at: usize,
+        text: &str,
+    ) -> Arc<ParagraphLayout> {
+        let fallback = SpanStyle::new(self.opts.base_size_pt);
+        let style = Self::style_at(para, at, &fallback);
+        let mut reading = SpikeParagraph::new(0, text);
+        reading.base = Some(SpanStyle {
+            font_size: style.font_size * RUBY_SIZE_RATIO,
+            underline: false,
+            strikethrough: false,
+            highlight: None,
+            vertical: VerticalAlign::Baseline,
+            letter_spacing: 0.0,
+            ..style
+        });
+        reading.line_spacing = Some(LineSpacing::Multiple(1.0));
+        reading.locale = para.locale;
+        reading.vertical = para.vertical && !para.upright;
+        Arc::new(self.build(&reading, f32::MAX / 4.0))
+    }
+
+    /// The valid ruby of a paragraph, with the room each needs above its line.
+    fn ruby_specs(&mut self, para: &SpikeParagraph) -> Vec<RubySpec> {
+        let mut out = Vec::new();
+        let text = para.text.as_str();
+        for (range, reading) in &para.ruby {
+            let valid = range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+                && !reading.is_empty();
+            if !valid {
+                continue;
+            }
+            let fallback = SpanStyle::new(self.opts.base_size_pt);
+            let size = Self::style_at(para, range.start, &fallback).font_size;
+            let layout = self.ruby_layout(para, range.start, reading);
+            let line = layout
+                .lines
+                .first()
+                .map_or(size * RUBY_SIZE_RATIO, |l| l.height);
+            out.push(RubySpec {
+                range: range.clone(),
+                spacing: 0.0,
+                box_height: size * (RUBY_BASE_ASCENT_EM + RUBY_GAP_EM) + line,
+            });
+        }
+        out
+    }
+
+    /// The reading of `spec`, in the order `ruby_specs` made them, to match against `para.ruby`.
+    fn readings<'a>(para: &'a SpikeParagraph, specs: &[RubySpec]) -> Vec<(&'a str, usize)> {
+        specs
+            .iter()
+            .filter_map(|spec| {
+                para.ruby
+                    .iter()
+                    .find(|(range, _)| *range == spec.range)
+                    .map(|(range, text)| (text.as_str(), range.start))
+            })
+            .collect()
+    }
+
+    /// For each ruby, the extra letter spacing that makes its base as wide as its reading
+    /// (0 when it is), and the height of the room above its line: the font's ascent there,
+    /// the gap and the reading.
+    fn ruby_adjustments(
+        &mut self,
+        para: &SpikeParagraph,
+        layout: &Layout<Brush>,
+        specs: &[RubySpec],
+    ) -> Vec<(f32, f32)> {
+        let mut out = Vec::with_capacity(specs.len());
+        for ((reading, start), spec) in Self::readings(para, specs).into_iter().zip(specs) {
+            let reading_layout = self.ruby_layout(para, start, reading);
+            let selection = parley::editing::Selection::new(
+                Cursor::from_byte_index(layout, spec.range.start, Affinity::Downstream),
+                Cursor::from_byte_index(layout, spec.range.end, Affinity::Downstream),
+            );
+            let fragments = selection.geometry(layout);
+            let base_width: f32 = fragments
+                .iter()
+                .map(|(rect, _)| (rect.x1 - rect.x0) as f32)
+                .sum();
+            let chars = para.text[spec.range.clone()].chars().count().max(1) as f32;
+            let spacing = ((reading_layout.layout.width() - base_width) / chars).max(0.0);
+            let fallback = SpanStyle::new(self.opts.base_size_pt);
+            let size = Self::style_at(para, start, &fallback).font_size;
+            let ascent = fragments
+                .first()
+                .and_then(|(_, line)| layout.get(*line))
+                .map_or(size * RUBY_BASE_ASCENT_EM, Self::glyph_ascent);
+            let reading_height = reading_layout.lines.first().map_or(0.0, |l| l.height);
+            out.push((spacing, ascent + size * RUBY_GAP_EM + reading_height));
+        }
+        out
+    }
+
+    /// The tallest glyph run ascent on a line.
+    fn glyph_ascent(line: parley::layout::Line<'_, Brush>) -> f32 {
+        line.items()
+            .filter_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => Some(run.run().font_metrics().ascent),
+                _ => None,
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Where each reading goes: centred over the start of its base, its bottom just above the
+    /// tallest glyphs on that line.
+    fn place_ruby(
+        &mut self,
+        para: &SpikeParagraph,
+        layout: &Layout<Brush>,
+        specs: &[RubySpec],
+    ) -> Vec<PlacedRuby> {
+        let mut out = Vec::new();
+        for (i, ((reading, start), spec)) in Self::readings(para, specs)
+            .into_iter()
+            .zip(specs)
+            .enumerate()
+        {
+            let reading_layout = self.ruby_layout(para, start, reading);
+            let selection = parley::editing::Selection::new(
+                Cursor::from_byte_index(layout, spec.range.start, Affinity::Downstream),
+                Cursor::from_byte_index(layout, spec.range.end, Affinity::Downstream),
+            );
+            let Some((rect, line)) = selection.geometry(layout).into_iter().next() else {
+                continue;
+            };
+            let Some(line_ref) = layout.get(line) else {
+                continue;
+            };
+            let metrics = line_ref.metrics();
+            let ascent = Self::glyph_ascent(line_ref);
+            let fallback = SpanStyle::new(self.opts.base_size_pt);
+            let size = Self::style_at(para, start, &fallback).font_size;
+            let gap = size * RUBY_GAP_EM;
+            let reading_height = reading_layout.lines.first().map_or(0.0, |l| l.height);
+            let centre = (rect.x0 + rect.x1) as f32 * 0.5;
+            out.push(PlacedRuby {
+                index: i,
+                line,
+                x: centre - reading_layout.layout.width() * 0.5,
+                y: metrics.baseline - ascent - gap - reading_height,
+                layout: reading_layout,
+            });
+        }
+        out
+    }
+
     /// Lays out a paragraph, solving tab widths first when it contains `\t`. Each pass lays the
     /// paragraph out with the current widths, reads every tab box's x and computes the width
     /// that reaches the next stop; it stops when no width changes by more than 0.01 pt.
@@ -762,26 +1070,27 @@ impl Engine {
         let default_style = SpanStyle::new(self.opts.base_size_pt);
         let base = para.base.as_ref().unwrap_or(&default_style).font_size;
         let tabs = tab_positions(text);
-        let (left, _right, break_width) = frame(para, base, width);
+        let (left, _right, _break_width) = frame(para, base, width);
         let mut widths = vec![0.0f32; tabs.len()];
-        let (mut layout, points) = self.layout_once(para, width, &tabs, &widths);
-        for _ in 0..MAX_TAB_PASSES {
-            if tabs.is_empty() {
-                break;
+        let mut ruby_specs = self.ruby_specs(para);
+        let (mut layout, mut points) = self.settle(para, width, &tabs, &mut widths, &ruby_specs);
+        if !ruby_specs.is_empty() {
+            // A reading wider than its base spreads the base's letters to match, so
+            // neighbouring readings never overlap, and the room above each line is what the
+            // font's real ascent leaves. One more pass with those.
+            let wanted = self.ruby_adjustments(para, &layout, &ruby_specs);
+            let mut changed = false;
+            for (spec, (spacing, box_height)) in ruby_specs.iter_mut().zip(wanted) {
+                changed |= (spec.spacing - spacing).abs() > 0.01
+                    || (spec.box_height - box_height).abs() > 0.05;
+                spec.spacing = spacing;
+                spec.box_height = box_height;
             }
-            let next = solve_tab_widths(para, &layout, &tabs, &widths, break_width, left);
-            let settled = next
-                .iter()
-                .zip(&widths)
-                .all(|(a, b)| (a - b).abs() < TAB_EPSILON_PT);
-            if settled {
-                break;
+            if changed {
+                (layout, points) = self.settle(para, width, &tabs, &mut widths, &ruby_specs);
             }
-            widths = next;
-            let (l, p) = self.layout_once(para, width, &tabs, &widths);
-            layout = l;
-            debug_assert_eq!(p, points);
         }
+        let placed_ruby = self.place_ruby(para, &layout, &ruby_specs);
         let mut lines: Vec<LineBox> = layout
             .lines()
             .map(|l| {
@@ -852,6 +1161,7 @@ impl Engine {
             text: text.to_owned(),
             hyphen_lines,
             images,
+            ruby: placed_ruby,
             x_offset: left,
             lines,
             height,
@@ -1064,5 +1374,24 @@ impl Engine {
         let (_, nth, _) = ticks.select_nth_unstable(drop_n - 1);
         let cutoff = *nth;
         self.full.retain(|_, e| e.tick > cutoff);
+    }
+}
+
+#[cfg(test)]
+mod hyphenation_tests {
+    use super::hyphenation_points;
+    use crate::script::Cyrillic;
+
+    #[test]
+    fn cyrillic_words_are_hyphenated_by_their_language() {
+        // Ukrainian letters decide without a hint; ambiguous words follow the hint.
+        let uk = hyphenation_points("інформаційний", None);
+        assert!(!uk.is_empty());
+        // Russian has no patterns: its words are left whole whatever the hint.
+        assert!(hyphenation_points("объявление", Some(Cyrillic::Ukrainian)).is_empty());
+        assert!(hyphenation_points("слово", None).is_empty());
+        // Mixed scripts in one text keep their own patterns.
+        let mixed = hyphenation_points("extraordinarily інформаційний", None);
+        assert!(mixed.iter().any(|p| *p < 13) && mixed.iter().any(|p| *p > 13));
     }
 }

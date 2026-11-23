@@ -183,6 +183,21 @@ The full list is in `CONTRIBUTING.md`.
 - Third-party versions are pinned together on purpose (iced 0.14, wgpu 27, vello 0.7). Read
   `PLAN.md` §4.5 before bumping any of them.
 
+## Acknowledgements
+
+Libertum embeds data and libraries that carry their own licences and notices. The full list,
+with the licence texts, is in `docs/third-party-licences.md`. The main ones:
+
+- **Hyphenation patterns**, from the hyph-utf8 package through the `hypher` crate (MIT or
+  Apache-2.0, by the Typst authors): English (US) by Gerard D.C. Kuiken (all-permissive
+  notice) and Ukrainian by Maksym Polyakov (MIT, 1998-2001). The patterns are used unmodified.
+- **Spelling**: the `spellbook` crate (MPL-2.0) with the bundled Hunspell dictionaries for
+  British and American English, Ukrainian (MPL 1.1) and Russian (BSD-style). Each
+  dictionary's licence is in `crates/libertum-app/assets/dictionaries/`.
+- **East Asian word boundaries**: ICU4X `icu_segmenter` and its dictionary data
+  (Unicode-3.0).
+- **Icons**: Lucide (ISC).
+
 ## Licence
 
 No licence has been chosen yet. The source is public, but that is not a grant to reuse it.

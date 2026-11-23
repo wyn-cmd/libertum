@@ -2265,6 +2265,32 @@ fn a_watermark_goes_on_every_section_and_undoes_in_one_step() {
 }
 
 #[test]
+fn a_language_goes_on_every_section_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let mut d = ed.document().clone();
+    d.sections.push(libertum_model::Section::default());
+    ed.replace_document(d);
+    assert_eq!(ed.language(), None);
+    ed.set_language(Some("en_gb")).expect("set");
+    assert_eq!(ed.language(), Some("en-GB"), "the tag is normalised");
+    assert!(
+        ed.document()
+            .sections
+            .iter()
+            .all(|s| s.language.as_deref() == Some("en-GB"))
+    );
+    // The same again is not an undo step.
+    let steps = ed.history().undo_len();
+    assert!(ed.set_language(Some("en-GB")).expect("same").is_empty());
+    assert_eq!(ed.history().undo_len(), steps);
+    // A tag that is not one clears the language.
+    ed.set_language(Some("not a tag!")).expect("clear");
+    assert_eq!(ed.language(), None);
+    ed.undo().expect("undo");
+    assert_eq!(ed.language(), Some("en-GB"));
+}
+
+#[test]
 fn a_page_colour_goes_on_every_section_opaque_and_undoes_in_one_step() {
     let mut ed = editor(&["One", "Two"]);
     let mut d = ed.document().clone();
@@ -2814,4 +2840,143 @@ fn separate_insert_is_its_own_undo_step_and_is_not_made_bold_by_pending_format()
             .all(|r| !whole[r.range.clone()].contains('Z')),
         "the inserted text is not bold"
     );
+}
+
+/// The segments a run of word movements visits, from the start of `text`.
+fn words_of(text: &str) -> Vec<&str> {
+    let mut at = 0;
+    let mut parts = Vec::new();
+    while at < text.len() {
+        let next = next_word_boundary(text, at);
+        parts.push(&text[at..next]);
+        at = next;
+    }
+    parts
+}
+
+#[test]
+fn chinese_and_japanese_are_split_into_words_by_a_dictionary() {
+    // By the plain Unicode rules each of these would be one word per character.
+    assert_eq!(words_of("北京欢迎你"), ["北京", "欢迎", "你"]);
+    assert_eq!(
+        words_of("我喜欢北京天安门"),
+        ["我", "喜欢", "北京", "天安门"]
+    );
+    assert_eq!(
+        words_of("私は東京大学に行きます"),
+        ["私", "は", "東京", "大学", "に", "行き", "ます"]
+    );
+    assert_eq!(
+        words_of("今天天气很好，我们去公园玩。"),
+        [
+            "今天", "天气", "很好", "，", "我们", "去", "公园", "玩", "。"
+        ]
+    );
+    // Latin text around East Asian text keeps its words and spaces.
+    assert_eq!(
+        words_of("Hello 世界 foo"),
+        ["Hello", " ", "世界", " ", "foo"]
+    );
+    // Korean has spaces, Latin and Cyrillic are unchanged.
+    assert_eq!(words_of("동해물과 백두산이"), ["동해물과", " ", "백두산이"]);
+    assert_eq!(words_of("Доброго ранку"), ["Доброго", " ", "ранку"]);
+}
+
+#[test]
+fn word_boundaries_agree_going_backwards_and_forwards_in_cjk_text() {
+    let text = "我喜欢北京天安门";
+    let ends = [3, 9, 15, 24];
+    assert_eq!(next_word_boundary(text, 0), ends[0]);
+    assert_eq!(next_word_boundary(text, ends[0]), ends[1]);
+    // Mid-word, forward goes to the end of the word and backward to its start.
+    assert_eq!(next_word_boundary(text, 4), ends[1]);
+    assert_eq!(prev_word_boundary(text, 7), ends[0]);
+    assert_eq!(prev_word_boundary(text, ends[1]), ends[0]);
+    assert_eq!(prev_word_boundary(text, 0), 0);
+    assert_eq!(next_word_boundary(text, text.len()), text.len());
+    // Always on a character boundary, even when asked from inside a character.
+    for offset in 0..=text.len() {
+        assert!(text.is_char_boundary(next_word_boundary(text, offset)));
+        assert!(text.is_char_boundary(prev_word_boundary(text, offset)));
+    }
+}
+
+#[test]
+fn word_movement_and_deleting_a_word_work_on_chinese_words() {
+    let mut ed = editor(&["北京欢迎你"]);
+    ed.move_doc_start(false);
+    ed.move_word_right(false);
+    assert_eq!(ed.caret().offset, "北京".len());
+    ed.move_word_right(true);
+    assert_eq!(ed.selected_text().as_deref(), Some("欢迎"));
+    ed.move_doc_end(false);
+    ed.delete_word_backward().expect("delete");
+    assert_eq!(ed.document().paragraph_at(0).expect("p").text(), "北京欢迎");
+}
+
+#[test]
+fn vertical_text_goes_on_every_section_relays_out_and_undoes_in_one_step() {
+    let mut ed = editor(&["One", "Two"]);
+    let mut d = ed.document().clone();
+    d.sections.push(libertum_model::Section::default());
+    ed.replace_document(d);
+    assert!(!ed.vertical_text());
+    let change = ed.set_vertical_text(true).expect("set");
+    assert!(change.all_styles, "every paragraph is laid out again");
+    assert!(ed.vertical_text());
+    assert!(ed.document().sections.iter().all(|s| s.vertical));
+    // The same again is not an undo step.
+    let steps = ed.history().undo_len();
+    assert!(ed.set_vertical_text(true).expect("same").is_empty());
+    assert_eq!(ed.history().undo_len(), steps);
+    ed.undo().expect("undo");
+    assert!(!ed.vertical_text());
+    assert!(ed.document().sections.iter().all(|s| !s.vertical));
+}
+
+#[test]
+fn ruby_is_set_over_the_selection_and_undone() {
+    let mut ed = editor(&["漢字を読む"]);
+    // Nothing selected, no ruby under the caret: nothing to set.
+    assert!(ed.ruby_target().is_none());
+    ed.set_selection(pos(&ed, 0, 0), pos(&ed, 0, 6));
+    let (_, range, current) = ed.ruby_target().expect("target");
+    assert_eq!(range, 0..6);
+    assert_eq!(current, "");
+    ed.set_ruby("かんじ").expect("set");
+    assert_eq!(
+        ed.document().paragraph_at(0).unwrap().ruby()[0].text,
+        "かんじ"
+    );
+    // The caret inside it finds the same ruby.
+    ed.set_caret(pos(&ed, 0, 3), false);
+    let (_, range, current) = ed.ruby_target().expect("target at the caret");
+    assert_eq!((range, current.as_str()), (0..6, "かんじ"));
+    // An empty reading removes it, and undo brings it back.
+    ed.set_ruby("").expect("clear");
+    assert!(ed.document().paragraph_at(0).unwrap().ruby().is_empty());
+    ed.undo().expect("undo");
+    assert_eq!(ed.document().paragraph_at(0).unwrap().ruby().len(), 1);
+}
+
+#[test]
+fn two_languages_are_set_together_and_the_second_never_equals_the_first() {
+    let mut ed = editor(&["Hello"]);
+    ed.set_languages(Some("en-GB"), Some("uk")).expect("set");
+    assert_eq!((ed.language(), ed.language2()), (Some("en-GB"), Some("uk")));
+    // Changing the first keeps the second.
+    ed.set_language(Some("en-US")).expect("set");
+    assert_eq!((ed.language(), ed.language2()), (Some("en-US"), Some("uk")));
+    // A second that equals the first is dropped; one undo brings the pair back.
+    ed.set_languages(Some("uk"), Some("uk-UA")).expect("set");
+    assert_eq!(ed.language(), Some("uk"));
+    assert_eq!(
+        ed.language2(),
+        Some("uk-UA"),
+        "regional forms differ as tags"
+    );
+    ed.set_languages(Some("uk"), Some("uk")).expect("set");
+    assert_eq!(ed.language2(), None);
+    ed.undo().expect("undo");
+    assert_eq!(ed.language2(), Some("uk-UA"));
 }

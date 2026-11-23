@@ -194,7 +194,56 @@ pub struct InlineImage {
     pub name: String,
 }
 
+/// What a linked picture or video is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+/// An online picture or video an inline image stands for: the address AO3's HTML will point
+/// at. Libertum never fetches it by itself; the image shown is a preview the writer chose to
+/// download (kept in the document) or a placeholder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaLink {
+    pub url: String,
+    pub kind: MediaKind,
+}
+
+/// A video link is stored in the image's `name` as this prefix and the address.
+const VIDEO_PREFIX: &str = "video:";
+
+impl MediaLink {
+    /// The text kept in [`InlineImage::name`]: the address itself for a picture, or the
+    /// address after `video:`.
+    pub fn name(&self) -> String {
+        match self.kind {
+            MediaKind::Image => self.url.clone(),
+            MediaKind::Video => format!("{VIDEO_PREFIX}{}", self.url),
+        }
+    }
+
+    /// Reads a link back out of an image name (`None` for an ordinary file name).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let (kind, url) = match name.strip_prefix(VIDEO_PREFIX) {
+            Some(rest) => (MediaKind::Video, rest),
+            None => (MediaKind::Image, name),
+        };
+        let lower = url.to_ascii_lowercase();
+        (lower.starts_with("https://") || lower.starts_with("http://")).then(|| Self {
+            url: url.to_owned(),
+            kind,
+        })
+    }
+}
+
 impl InlineImage {
+    /// The online picture or video this image stands for, if it is a link. The link lives in
+    /// `name`, which every format already keeps, so no file format needed a new field.
+    pub fn link(&self) -> Option<MediaLink> {
+        MediaLink::from_name(&self.name)
+    }
+
     /// An image at its natural size, scaled down to fit `max_width_pt` if it is wider.
     pub fn fitted(offset: usize, media: Arc<Media>, max_width_pt: f32) -> Self {
         let (mut width, mut height) = media.natural_size_pt();

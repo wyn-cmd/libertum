@@ -97,6 +97,11 @@ pub enum Operation {
         block: BlockId,
         date_fields: Vec<crate::DateTimeField>,
     },
+    /// Replaces all ruby in a paragraph (set, clear, undo).
+    SetRuby {
+        block: BlockId,
+        ruby: Vec<crate::Ruby>,
+    },
     /// Replaces section `index` (page setup, headers and footers).
     SetSection {
         index: usize,
@@ -139,7 +144,8 @@ impl Operation {
             | Operation::SetBookmarks { block, .. }
             | Operation::SetImages { block, .. }
             | Operation::SetCrossRefs { block, .. }
-            | Operation::SetDateTimeFields { block, .. } => *block,
+            | Operation::SetDateTimeFields { block, .. }
+            | Operation::SetRuby { block, .. } => *block,
             Operation::InsertBlock { block, .. } => block.id(),
             Operation::InsertTable { table, .. } => table.id,
             Operation::RemoveTable { table } | Operation::ReplaceTable { table, .. } => *table,

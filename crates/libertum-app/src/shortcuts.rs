@@ -39,6 +39,10 @@ pub enum Shortcut {
     Settings,
     /// Cmd/Ctrl+W: back to the home screen (closing the document).
     CloseDocument,
+    /// Cmd/Ctrl+Alt+1 to 4: Heading 1 to 4 on the selected paragraphs; Cmd/Ctrl+Alt+0: body text.
+    Heading(u8),
+    /// Cmd/Ctrl+N: the home screen, to pick a template for a new document.
+    NewDocument,
     /// F11 (Windows and Linux) or Ctrl+Cmd+F (macOS): full screen on or off.
     FullScreen,
 }
@@ -84,6 +88,13 @@ pub fn lookup(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
     {
         return Some(Shortcut::FullScreen);
     }
+    if modifiers.command()
+        && modifiers.alt()
+        && !modifiers.shift()
+        && let Some(level @ 0..=4) = c.parse::<u8>().ok().filter(|_| c.len() == 1)
+    {
+        return Some(Shortcut::Heading(level));
+    }
     if modifiers.command() && modifiers.alt() && !modifiers.shift() && c.eq_ignore_ascii_case("i") {
         return Some(Shortcut::ToggleSidebar);
     }
@@ -106,6 +117,9 @@ pub fn lookup(key: &Key, modifiers: Modifiers) -> Option<Shortcut> {
         }
         if c.eq_ignore_ascii_case("w") && !modifiers.shift() {
             return Some(Shortcut::CloseDocument);
+        }
+        if c.eq_ignore_ascii_case("n") && !modifiers.shift() {
+            return Some(Shortcut::NewDocument);
         }
         if c.eq_ignore_ascii_case("g") {
             return Some(if modifiers.shift() {
@@ -171,12 +185,79 @@ pub fn from_event(event: &keyboard::Event) -> Option<Shortcut> {
     match event {
         keyboard::Event::KeyPressed {
             key,
+            physical_key,
             modifiers,
             repeat: false,
             ..
-        } => lookup(key, *modifiers),
+        } => lookup(&latin_key(key, physical_key, *modifiers), *modifiers),
         _ => None,
     }
+}
+
+/// The key a shortcut should see. With a Cyrillic, Greek, Arabic, Hebrew or other non-Latin
+/// layout active, Ctrl+S reports the layout's own letter for that key (`і` on Ukrainian), so
+/// every shortcut would stop working. While Ctrl (Cmd on macOS) is held, a character key whose
+/// letter is not Latin is read by where it sits on the keyboard, as it would on a US layout.
+/// Without Ctrl the key is left alone, because then it is text. Latin layouts (AZERTY,
+/// Dvorak) are untouched: their letters are what the writer sees on the keys.
+pub fn latin_key(key: &Key, physical: &keyboard::key::Physical, modifiers: Modifiers) -> Key {
+    use keyboard::key::{Code, Physical};
+    let Key::Character(text) = key else {
+        return key.clone();
+    };
+    if !modifiers.command() || text.is_ascii() {
+        return key.clone();
+    }
+    let Physical::Code(code) = physical else {
+        return key.clone();
+    };
+    let latin = match code {
+        Code::KeyA => "a",
+        Code::KeyB => "b",
+        Code::KeyC => "c",
+        Code::KeyD => "d",
+        Code::KeyE => "e",
+        Code::KeyF => "f",
+        Code::KeyG => "g",
+        Code::KeyH => "h",
+        Code::KeyI => "i",
+        Code::KeyJ => "j",
+        Code::KeyK => "k",
+        Code::KeyL => "l",
+        Code::KeyM => "m",
+        Code::KeyN => "n",
+        Code::KeyO => "o",
+        Code::KeyP => "p",
+        Code::KeyQ => "q",
+        Code::KeyR => "r",
+        Code::KeyS => "s",
+        Code::KeyT => "t",
+        Code::KeyU => "u",
+        Code::KeyV => "v",
+        Code::KeyW => "w",
+        Code::KeyX => "x",
+        Code::KeyY => "y",
+        Code::KeyZ => "z",
+        Code::Digit0 => "0",
+        Code::Digit1 => "1",
+        Code::Digit2 => "2",
+        Code::Digit3 => "3",
+        Code::Digit4 => "4",
+        Code::Digit5 => "5",
+        Code::Digit6 => "6",
+        Code::Digit7 => "7",
+        Code::Digit8 => "8",
+        Code::Digit9 => "9",
+        Code::Comma => ",",
+        Code::Period => ".",
+        Code::Equal => "=",
+        Code::Minus => "-",
+        Code::BracketLeft => "[",
+        Code::BracketRight => "]",
+        Code::Backslash => "\\",
+        _ => return key.clone(),
+    };
+    Key::Character(latin.into())
 }
 
 /// Human-readable binding for tooltips and menus.
@@ -203,6 +284,49 @@ pub fn label(shortcut: Shortcut) -> &'static str {
                 "Cmd+W"
             } else {
                 "Ctrl+W"
+            }
+        }
+        Shortcut::Heading(0) => {
+            if cfg!(target_os = "macos") {
+                "Cmd+Alt+0"
+            } else {
+                "Ctrl+Alt+0"
+            }
+        }
+        Shortcut::Heading(1) => {
+            if cfg!(target_os = "macos") {
+                "Cmd+Alt+1"
+            } else {
+                "Ctrl+Alt+1"
+            }
+        }
+        Shortcut::Heading(2) => {
+            if cfg!(target_os = "macos") {
+                "Cmd+Alt+2"
+            } else {
+                "Ctrl+Alt+2"
+            }
+        }
+        Shortcut::Heading(3) => {
+            if cfg!(target_os = "macos") {
+                "Cmd+Alt+3"
+            } else {
+                "Ctrl+Alt+3"
+            }
+        }
+        Shortcut::Heading(4) => {
+            if cfg!(target_os = "macos") {
+                "Cmd+Alt+4"
+            } else {
+                "Ctrl+Alt+4"
+            }
+        }
+        Shortcut::Heading(_) => "",
+        Shortcut::NewDocument => {
+            if cfg!(target_os = "macos") {
+                "Cmd+N"
+            } else {
+                "Ctrl+N"
             }
         }
         Shortcut::Settings => {
@@ -390,6 +514,100 @@ mod tests {
             assert_eq!(lookup(&key("j"), command()), Some(Shortcut::AlignJustify));
             assert_eq!(lookup(&key("e"), Modifiers::NONE), None);
         }
+    }
+
+    #[test]
+    fn command_n_opens_the_template_picker() {
+        let n = Key::Character("n".into());
+        assert_eq!(lookup(&n, command()), Some(Shortcut::NewDocument));
+        assert_eq!(
+            lookup(&Key::Character("N".into()), command()),
+            Some(Shortcut::NewDocument)
+        );
+        assert_eq!(lookup(&n, Modifiers::NONE), None);
+        assert_eq!(lookup(&n, command() | Modifiers::SHIFT), None);
+        assert_eq!(lookup(&n, command() | Modifiers::ALT), None);
+    }
+
+    #[test]
+    fn command_alt_digits_pick_heading_styles() {
+        let ca = command_alt();
+        for n in 0..=4u8 {
+            assert_eq!(
+                lookup(&Key::Character(n.to_string().as_str().into()), ca),
+                Some(Shortcut::Heading(n))
+            );
+        }
+        let five = Key::Character("5".into());
+        assert_eq!(lookup(&five, ca), None);
+        let one = Key::Character("1".into());
+        assert_eq!(lookup(&one, command()), None);
+        assert_eq!(lookup(&one, Modifiers::ALT), None);
+        assert_eq!(lookup(&one, ca | Modifiers::SHIFT), None);
+    }
+
+    fn on_key(code: keyboard::key::Code) -> keyboard::key::Physical {
+        keyboard::key::Physical::Code(code)
+    }
+
+    #[test]
+    fn shortcuts_work_by_position_on_a_cyrillic_layout() {
+        use keyboard::key::Code;
+        // Ukrainian and Russian layouts: the letter on the S, F, N, B, I and O keys.
+        for (letter, code, expected) in [
+            ("і", Code::KeyS, Shortcut::Save),
+            ("ы", Code::KeyS, Shortcut::Save),
+            ("а", Code::KeyF, Shortcut::Find),
+            ("т", Code::KeyN, Shortcut::NewDocument),
+            ("и", Code::KeyB, Shortcut::Bold),
+            ("ш", Code::KeyI, Shortcut::Italic),
+            ("щ", Code::KeyO, Shortcut::Open),
+            ("ц", Code::KeyW, Shortcut::CloseDocument),
+        ] {
+            let event = keyboard::Event::KeyPressed {
+                key: Key::Character(letter.into()),
+                modified_key: Key::Character(letter.into()),
+                physical_key: on_key(code),
+                location: keyboard::Location::Standard,
+                modifiers: command(),
+                text: None,
+                repeat: false,
+            };
+            assert_eq!(from_event(&event), Some(expected), "{letter}");
+        }
+        // Without Ctrl it is text, whatever key it is on.
+        let typed = keyboard::Event::KeyPressed {
+            key: Key::Character("і".into()),
+            modified_key: Key::Character("і".into()),
+            physical_key: on_key(Code::KeyS),
+            location: keyboard::Location::Standard,
+            modifiers: Modifiers::NONE,
+            text: Some("і".into()),
+            repeat: false,
+        };
+        assert_eq!(from_event(&typed), None);
+    }
+
+    #[test]
+    fn latin_layouts_keep_their_own_letters() {
+        use keyboard::key::Code;
+        // AZERTY: the A key types "q", and Ctrl+Q there is "q", not Ctrl+A.
+        let azerty = latin_key(&Key::Character("q".into()), &on_key(Code::KeyA), command());
+        assert_eq!(azerty, Key::Character("q".into()));
+        // A key with no known position, or a named key, is left alone.
+        let unknown =
+            keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+        assert_eq!(
+            latin_key(&Key::Character("і".into()), &unknown, command()),
+            Key::Character("і".into())
+        );
+        let enter = Key::Named(keyboard::key::Named::Enter);
+        assert_eq!(latin_key(&enter, &on_key(Code::KeyA), command()), enter);
+        // Digits and punctuation on the Cyrillic layout's own keys.
+        assert_eq!(
+            latin_key(&Key::Character("б".into()), &on_key(Code::Comma), command()),
+            Key::Character(",".into())
+        );
     }
 
     #[test]

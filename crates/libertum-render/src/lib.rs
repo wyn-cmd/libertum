@@ -7,6 +7,7 @@ pub mod images;
 mod page_cache;
 pub mod pdf;
 mod renderer;
+mod vertical;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

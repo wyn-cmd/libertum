@@ -330,6 +330,75 @@ pub(crate) fn plan(
     edits
 }
 
+/// The document variable that holds a document's second language. Word has no setting for a
+/// second proofing language of this kind, and a document variable is how a file carries a
+/// value of its own without Word reading it as anything else.
+const LANGUAGE2_VAR: &str = "LibertumLanguage2";
+
+/// The second language written by [`set_language2`], from `settings.xml`.
+pub(crate) fn read_language2(package: &Package) -> Option<String> {
+    let name = package
+        .related_part("settings", "word/settings.xml")
+        .unwrap_or_else(|| "word/settings.xml".to_owned());
+    let text = package.text(&name)?;
+    let at = text.find(&format!("w:name=\"{LANGUAGE2_VAR}\""))?;
+    let rest = &text[at..];
+    let end = rest.find("/>")?;
+    let value = rest[..end].split("w:val=\"").nth(1)?.split('"').next()?;
+    libertum_model::language_tag(value)
+}
+
+/// Writes (or, with `None`, removes) the second language as a document variable in
+/// `settings.xml`, creating the part when there is none.
+pub(crate) fn set_language2(package: &mut Package, tag: Option<&str>) {
+    const NAME: &str = "word/settings.xml";
+    let name = package
+        .related_part("settings", NAME)
+        .unwrap_or_else(|| NAME.to_owned());
+    let var = tag.map(|tag| format!("<w:docVar w:name=\"{LANGUAGE2_VAR}\" w:val=\"{tag}\"/>"));
+    let Some(mut text) = package.text(&name) else {
+        let Some(var) = var else {
+            return;
+        };
+        package.set_text(
+            NAME,
+            format!(
+                "{XML_DECL}<w:settings xmlns:w=\"{W_NS}\"><w:docVars>{var}</w:docVars></w:settings>"
+            ),
+        );
+        ensure_content_type(package, NAME, CT_SETTINGS);
+        crate::write::ensure_relationship(package, "settings.xml", "settings");
+        return;
+    };
+    // The one an earlier save left goes first.
+    if let Some(at) = text.find(&format!("<w:docVar w:name=\"{LANGUAGE2_VAR}\""))
+        && let Some(end) = text[at..].find("/>")
+    {
+        text.replace_range(at..at + end + 2, "");
+    }
+    if let Some(var) = var {
+        if let Some(close) = text.find("</w:docVars>") {
+            text.insert_str(close, &var);
+        } else {
+            let at = [
+                "<w:rsids",
+                "<m:mathPr",
+                "<w:themeFontLang",
+                "<w:clrSchemeMapping",
+                "<w:decimalSymbol",
+                "<w:listSeparator",
+                "</w:settings>",
+            ]
+            .iter()
+            .filter_map(|marker| text.find(marker))
+            .min()
+            .unwrap_or(text.len());
+            text.insert_str(at, &format!("<w:docVars>{var}</w:docVars>"));
+        }
+    }
+    package.set_text(&name, text);
+}
+
 /// Puts `<w:evenAndOddHeaders/>` into `settings.xml`, creating the part when there is none.
 pub(crate) fn turn_on_even_and_odd(package: &mut Package) {
     // The element sits before these in the schema's order; the first one found marks the

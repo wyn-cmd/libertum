@@ -1934,3 +1934,176 @@ fn the_page_colour_round_trips_and_word_is_told_to_show_it() {
             .all(|s| s.page_colour.is_none())
     );
 }
+
+fn with_language(tag: Option<&str>) -> Document {
+    let mut document = Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "Colour"))]);
+    for section in &mut document.sections {
+        section.language = tag.map(str::to_owned);
+    }
+    document
+}
+
+#[test]
+fn the_language_round_trips_through_the_document_defaults() {
+    let bytes = Docx::new(with_language(Some("en-GB")))
+        .to_bytes()
+        .expect("save");
+    let styles = zip_text(&bytes, "word/styles.xml").expect("styles.xml");
+    assert!(styles.contains("<w:lang w:val=\"en-GB\"/>"), "{styles}");
+    let back = Docx::parse(&bytes).expect("reopen");
+    assert!(
+        back.document()
+            .sections
+            .iter()
+            .all(|section| section.language.as_deref() == Some("en-GB"))
+    );
+    // Saving the reopened file again keeps it.
+    let again = Docx::parse(&back.to_bytes().expect("save again")).expect("reopen again");
+    assert_eq!(
+        again.document().sections[0].language.as_deref(),
+        Some("en-GB")
+    );
+}
+
+#[test]
+fn a_document_without_a_language_writes_no_lang_element() {
+    let bytes = Docx::new(with_language(None)).to_bytes().expect("save");
+    let styles = zip_text(&bytes, "word/styles.xml").expect("styles.xml");
+    assert!(!styles.contains("<w:lang"), "{styles}");
+    let back = Docx::parse(&bytes).expect("reopen");
+    assert_eq!(back.document().sections[0].language, None);
+}
+
+#[test]
+fn reads_the_language_word_writes_and_ignores_one_it_cannot_trust() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>"#;
+    let styles = |lang: &str| {
+        format!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri"/>{lang}</w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        )
+    };
+    // Word's own form: more attributes than the one Libertum reads.
+    let word = styles(r#"<w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA"/>"#);
+    let bytes = zip_package(&[("word/document.xml", document), ("word/styles.xml", &word)]);
+    let parsed = Docx::parse(&bytes).expect("parse");
+    assert_eq!(
+        parsed.document().sections[0].language.as_deref(),
+        Some("en-US")
+    );
+    // A value that is not a language tag is dropped, not copied into the next save.
+    let odd = styles(r#"<w:lang w:val="en-GB&quot;/&gt;&lt;x"/>"#);
+    let bytes = zip_package(&[("word/document.xml", document), ("word/styles.xml", &odd)]);
+    let parsed = Docx::parse(&bytes).expect("parse");
+    assert_eq!(parsed.document().sections[0].language, None);
+}
+
+fn vertical_document(on: bool) -> Document {
+    let mut document = Document::new();
+    let id = document.alloc_id();
+    document.append_blocks(vec![Block::Paragraph(Paragraph::new(id, "縦書き"))]);
+    for section in &mut document.sections {
+        section.vertical = on;
+    }
+    document
+}
+
+#[test]
+fn vertical_text_round_trips_as_a_text_direction_and_horizontal_writes_none() {
+    let bytes = Docx::new(vertical_document(true)).to_bytes().expect("save");
+    let xml = zip_text(&bytes, "word/document.xml").expect("document.xml");
+    assert!(xml.contains("<w:textDirection w:val=\"tbRl\"/>"), "{xml}");
+    // It sits after titlePg and before docGrid in the section properties, or Word repairs it.
+    let sect = &xml[xml.find("<w:sectPr").expect("sectPr")..];
+    assert!(
+        sect.find("<w:cols")
+            .is_none_or(|c| c < sect.find("<w:textDirection").unwrap())
+    );
+    assert!(Docx::parse(&bytes).expect("reopen").document().sections[0].vertical);
+
+    let plain = Docx::new(vertical_document(false))
+        .to_bytes()
+        .expect("save");
+    let xml = zip_text(&plain, "word/document.xml").expect("document.xml");
+    assert!(!xml.contains("textDirection"), "{xml}");
+    assert!(!Docx::parse(&plain).expect("reopen").document().sections[0].vertical);
+}
+
+#[test]
+fn reads_the_text_directions_word_writes() {
+    let with = |direction: &str| {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>{direction}</w:sectPr></w:body></w:document>"#
+        );
+        let bytes = zip_package(&[("word/document.xml", &document)]);
+        Docx::parse(&bytes).expect("parse").document().sections[0].vertical
+    };
+    assert!(with(r#"<w:textDirection w:val="tbRl"/>"#));
+    assert!(with(r#"<w:textDirection w:val="tbRlV"/>"#));
+    // Left to right, and the turns that are not modelled, are not vertical text.
+    assert!(!with(r#"<w:textDirection w:val="lrTb"/>"#));
+    assert!(!with(r#"<w:textDirection w:val="btLr"/>"#));
+    assert!(!with(""));
+}
+
+#[test]
+fn ruby_round_trips_as_a_word_ruby_element() {
+    let mut paragraph = Paragraph::new(BlockId(1), "漢字を読む漢字");
+    paragraph.set_ruby(vec![
+        libertum_model::Ruby::new(0..6, "かんじ"),
+        libertum_model::Ruby::new(15..21, "かんじ"),
+    ]);
+    let bytes = Docx::new(Document::from_paragraphs(vec![paragraph.clone()]))
+        .to_bytes()
+        .expect("write");
+    let xml = zip_text(&bytes, "word/document.xml").expect("document.xml");
+    assert_eq!(xml.matches("<w:ruby>").count(), 2, "{xml}");
+    assert!(xml.contains("<w:rt>"), "{xml}");
+    assert!(xml.contains("<w:rubyBase>"), "{xml}");
+    let back = Docx::parse(&bytes).expect("read");
+    let read = back.document().paragraph_at(0).expect("paragraph");
+    assert_eq!(read.text(), "漢字を読む漢字");
+    assert_eq!(read.ruby(), paragraph.ruby());
+}
+
+#[test]
+fn a_second_language_round_trips_and_a_resave_replaces_it() {
+    let mut document = with_language(Some("en-GB"));
+    for section in &mut document.sections {
+        section.language2 = Some("uk-UA".to_owned());
+    }
+    let bytes = Docx::new(document).to_bytes().expect("write");
+    let settings = zip_text(&bytes, "word/settings.xml").expect("settings.xml");
+    assert!(settings.contains("LibertumLanguage2"), "{settings}");
+    let back = Docx::parse(&bytes).expect("read");
+    let first = back.document().sections.first().expect("section");
+    assert_eq!(first.language.as_deref(), Some("en-GB"));
+    assert_eq!(first.language2.as_deref(), Some("uk-UA"));
+    // Changing it and saving the opened file again leaves one variable, with the new tag.
+    let mut again = back.document().clone();
+    for section in &mut again.sections {
+        section.language2 = Some("ja".to_owned());
+    }
+    let mut back = back;
+    back.set_document(again);
+    let bytes = back.to_bytes().expect("write");
+    let settings = zip_text(&bytes, "word/settings.xml").expect("settings.xml");
+    assert_eq!(
+        settings.matches("LibertumLanguage2").count(),
+        1,
+        "{settings}"
+    );
+    let back = Docx::parse(&bytes).expect("read");
+    assert_eq!(back.document().sections[0].language2.as_deref(), Some("ja"));
+    // Clearing it removes the variable.
+    let mut none = back.document().clone();
+    for section in &mut none.sections {
+        section.language2 = None;
+    }
+    let mut back = back;
+    back.set_document(none);
+    let bytes = back.to_bytes().expect("write");
+    let back = Docx::parse(&bytes).expect("read");
+    assert_eq!(back.document().sections[0].language2, None);
+}

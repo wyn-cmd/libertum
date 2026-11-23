@@ -866,3 +866,77 @@ fn bold_constant_is_what_strong_gives() {
     let p = doc.paragraphs().next().expect("p");
     assert_eq!(p.format_of(0).weight, Some(BOLD));
 }
+
+// ---- language ----------------------------------------------------------------------------
+
+#[test]
+fn the_language_comes_from_the_html_lang_attribute_and_goes_back_into_it() {
+    for (source, expected) in [
+        (
+            "<html lang=\"en-GB\"><body><p>Hi</p></body></html>",
+            Some("en-GB"),
+        ),
+        (
+            "<html xml:lang=\"en_us\"><body><p>Hi</p></body></html>",
+            Some("en-US"),
+        ),
+        (
+            "<html><body lang=\"fr\"><p>Hi</p></body></html>",
+            Some("fr"),
+        ),
+        ("<html><body><p>Hi</p></body></html>", None),
+        // Not a tag: dropped, so it can never be written back out.
+        (
+            "<html lang=\"en&quot;&gt;&lt;b\"><body><p>Hi</p></body></html>",
+            None,
+        ),
+    ] {
+        let doc = Html::parse(source, None).into_document();
+        assert_eq!(doc.sections[0].language.as_deref(), expected, "{source}");
+    }
+    let mut doc = Document::new();
+    doc.sections[0].language = Some("en-GB".into());
+    let bytes = Html::new(doc).to_bytes();
+    let text = String::from_utf8(bytes.clone()).expect("utf-8");
+    assert!(text.contains("<html lang=\"en-GB\">"), "{text}");
+    let back = Html::parse_bytes(&bytes, None).into_document();
+    assert_eq!(back.sections[0].language.as_deref(), Some("en-GB"));
+    // No language, no attribute.
+    let plain = String::from_utf8(Html::new(Document::new()).to_bytes()).expect("utf-8");
+    assert!(plain.contains("<html>"), "{plain}");
+}
+
+#[test]
+fn ruby_round_trips_as_html_ruby() {
+    let mut paragraph = Paragraph::new(libertum_model::BlockId(1), "漢字を読む");
+    paragraph.set_ruby(vec![libertum_model::Ruby::new(0..6, "かんじ")]);
+    let doc = Document::from_paragraphs(vec![paragraph.clone()]);
+    let text = String::from_utf8(Html::new(doc).to_bytes()).expect("utf-8");
+    assert!(
+        text.contains("<ruby>漢字<rp>(</rp><rt>かんじ</rt><rp>)</rp></ruby>を読む"),
+        "{text}"
+    );
+    let back = Html::parse(&text, None);
+    let read = back.document().paragraph_at(0).expect("paragraph");
+    assert_eq!(read.text(), "漢字を読む");
+    assert_eq!(read.ruby(), paragraph.ruby());
+}
+
+#[test]
+fn a_second_language_goes_into_a_meta_tag_and_comes_back() {
+    let mut doc = Document::from_paragraphs(vec![Paragraph::new(libertum_model::BlockId(1), "Hi")]);
+    for section in &mut doc.sections {
+        section.language = Some("en-GB".to_owned());
+        section.language2 = Some("uk-UA".to_owned());
+    }
+    let text = String::from_utf8(Html::new(doc).to_bytes()).expect("utf-8");
+    assert!(text.contains("<html lang=\"en-GB\">"), "{text}");
+    assert!(
+        text.contains("<meta name=\"libertum-language-2\" content=\"uk-UA\">"),
+        "{text}"
+    );
+    let back = Html::parse(&text, None);
+    let section = &back.document().sections[0];
+    assert_eq!(section.language.as_deref(), Some("en-GB"));
+    assert_eq!(section.language2.as_deref(), Some("uk-UA"));
+}

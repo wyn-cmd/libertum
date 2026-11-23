@@ -136,6 +136,8 @@ pub(crate) struct PageLayout {
     pub footer_distance_pt: f32,
     /// `fo:background-color` of the page (the page colour).
     pub background: Option<[u8; 4]>,
+    /// `style:writing-mode` is `tb-rl`: vertical text, right to left.
+    pub vertical: bool,
 }
 
 impl Default for PageLayout {
@@ -148,6 +150,7 @@ impl Default for PageLayout {
             header_distance_pt: libertum_model::DEFAULT_HEADER_FOOTER_DISTANCE_PT,
             footer_distance_pt: libertum_model::DEFAULT_HEADER_FOOTER_DISTANCE_PT,
             background: None,
+            vertical: false,
         }
     }
 }
@@ -274,7 +277,39 @@ pub(crate) struct Styles {
     pub masters: HashMap<String, MasterPage>,
     pub fonts: HashMap<String, Arc<str>>,
     default_para: libertum_model::ParaFormat,
+    /// The document's language, from the default style's text properties, as a normalised
+    /// tag (`fo:language` and `fo:country`, or `style:rfc-language-tag` when present).
+    pub language: Option<String>,
     prepared: bool,
+}
+
+/// The language a `style:text-properties` element names: the full RFC tag when it has one,
+/// else `fo:language` with `fo:country` (and `fo:script`), as LibreOffice writes it. ODF uses
+/// `zxx` ("no language") and `none` for text that is not language text; neither is a tag.
+fn language_of(props: &XmlNode) -> Option<String> {
+    if let Some(tag) = props
+        .attr("rfc-language-tag")
+        .and_then(libertum_model::language_tag)
+    {
+        return Some(tag);
+    }
+    let language = props.attr("language")?;
+    if language.eq_ignore_ascii_case("zxx") || language.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let mut tag = language.to_owned();
+    if let Some(script) = props.attr("script") {
+        tag.push('-');
+        tag.push_str(script);
+    }
+    if let Some(country) = props
+        .attr("country")
+        .filter(|c| !c.eq_ignore_ascii_case("none"))
+    {
+        tag.push('-');
+        tag.push_str(country);
+    }
+    libertum_model::language_tag(&tag)
 }
 
 /// True for the three paragraph styles Libertum writes for header, footer and page-number
@@ -355,6 +390,9 @@ impl Styles {
                     let family = child.attr("family").unwrap_or("paragraph");
                     if family == "paragraph" || family == "text" {
                         if let Some(props) = child.child("text-properties") {
+                            if self.language.is_none() {
+                                self.language = language_of(props);
+                            }
                             let raw = self.parse_char(props);
                             let base = self.sheet.defaults.clone();
                             let part = raw.format(&base);
@@ -622,6 +660,9 @@ impl Styles {
                     .then(|| props.attr("fill-color").and_then(colour::parse))
                     .flatten()
             });
+        // `tb-rl` (and its short form `tb`) is vertical text from the right; `tb-lr` is the
+        // left-to-right variant and is not modelled.
+        layout.vertical = matches!(props.attr("writing-mode"), Some("tb-rl" | "tb"));
         if let Some(columns) = props.child("columns") {
             if let Some(count) = columns.attr_u32("column-count") {
                 layout.columns = (count as u8).clamp(1, libertum_model::MAX_COLUMNS);
@@ -874,6 +915,7 @@ impl Styles {
             section.set_columns(layout.columns);
             section.set_column_gutter(layout.column_gutter_pt);
             section.page_colour = layout.background;
+            section.vertical = layout.vertical;
             section.header_distance_pt = layout.header_distance_pt;
             section.footer_distance_pt = layout.footer_distance_pt;
         }
@@ -1322,6 +1364,8 @@ pub(crate) struct InlineText {
     pub frames: Vec<FrameRef>,
     /// Cross-references to bookmarks, as byte ranges of the text read so far.
     pub cross_refs: Vec<libertum_model::CrossRef>,
+    /// Ruby (`text:ruby`): the base's byte range and its reading.
+    pub ruby: Vec<libertum_model::Ruby>,
 }
 
 /// A `draw:frame` anchored as a character that holds a picture. The reader resolves it to an
@@ -1571,6 +1615,20 @@ pub(crate) fn read_inline(
                     read_inline(child, styles, base, resolved, out, warnings, part)?;
                     warnings.push("a hyperlink was flattened to its text".to_owned());
                 }
+                "ruby" => {
+                    let start = out.text.len();
+                    if let Some(base_node) = child.child("ruby-base") {
+                        read_inline(base_node, styles, base, resolved, out, warnings, part)?;
+                    }
+                    let reading = child
+                        .child("ruby-text")
+                        .map(|node| node.text().trim().to_owned())
+                        .unwrap_or_default();
+                    if out.text.len() > start && !reading.is_empty() {
+                        out.ruby
+                            .push(libertum_model::Ruby::new(start..out.text.len(), reading));
+                    }
+                }
                 "bookmark-ref" => {
                     let kind = match child.attr("reference-format") {
                         Some("text") => Some(libertum_model::CrossRefKind::Text),
@@ -1634,9 +1692,6 @@ pub(crate) fn read_inline(
                         part: part.to_owned(),
                         what: "a field".to_owned(),
                     });
-                }
-                "ruby" | "ruby-text" => {
-                    read_inline(child, styles, base, resolved, out, warnings, part)?;
                 }
                 _ => {
                     // Unknown inline markup: keep its text rather than losing it.

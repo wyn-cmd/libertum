@@ -104,6 +104,21 @@ pub struct ParagraphSnapshot {
     pub widow_control: bool,
     /// Break words at line ends at their syllables, with a hyphen (English patterns).
     pub hyphenate: bool,
+    /// The locale to give the font selector for Han ideographs and CJK punctuation with
+    /// nothing in the paragraph to say which language they are (from the document language;
+    /// see [`crate::script::locale_for_tag`]).
+    pub locale: Option<&'static str>,
+    /// Which Cyrillic hyphenation patterns to use for words that do not show their own
+    /// language by their letters (from the document language).
+    pub cyrillic: Option<crate::script::Cyrillic>,
+    /// The document is set vertically: East Asian punctuation and kana take their vertical
+    /// forms (the OpenType `vert` feature), as they are drawn upright in columns.
+    pub vertical: bool,
+    /// The paragraph is in a table cell that stays upright on a vertical page: laid out as
+    /// ordinary horizontal text whatever `vertical` says (set by the layout state).
+    pub upright: bool,
+    /// Ruby: the readings set beside ranges of the text (byte ranges, reading).
+    pub ruby: Vec<(std::ops::Range<usize>, String)>,
     /// Border box drawn around the text (DOCX `w:pBdr`), if any.
     pub borders: Option<libertum_model::Borders>,
     /// Explicit tab stops; `None` uses the default stops every half inch.
@@ -148,6 +163,31 @@ pub struct NoteSnapshot {
 pub type SpikeParagraph = ParagraphSnapshot;
 
 impl ParagraphSnapshot {
+    /// Sets the paragraph in vertical text (or back). The paragraph is laid out on the page
+    /// turned a quarter turn, so a picture's box must be as wide along the line as the picture
+    /// is tall: its width and height swap, and turned back onto the sheet the box has the
+    /// picture's own shape, so it can be drawn upright. Does nothing when already so.
+    /// Takes what a document's second language adds: the regional font for East Asian text
+    /// and the Cyrillic hyphenation hint, when the first language gave none.
+    pub fn add_language(&mut self, tag: Option<&str>) {
+        if self.locale.is_none() {
+            self.locale = tag.and_then(crate::script::locale_for_tag);
+        }
+        if self.cyrillic.is_none() {
+            self.cyrillic = tag.and_then(crate::script::cyrillic_for_tag);
+        }
+    }
+
+    pub fn set_vertical(&mut self, on: bool) {
+        if self.vertical == on {
+            return;
+        }
+        self.vertical = on;
+        for image in &mut self.images {
+            std::mem::swap(&mut image.width_pt, &mut image.height_pt);
+        }
+    }
+
     pub fn new(id: u64, text: impl Into<String>) -> Self {
         Self {
             id,
@@ -166,6 +206,11 @@ impl ParagraphSnapshot {
             keep_together: false,
             widow_control: false,
             hyphenate: false,
+            locale: None,
+            cyrillic: None,
+            vertical: false,
+            upright: false,
+            ruby: Vec::new(),
             borders: None,
             tab_stops: None,
             page_break_before: false,
@@ -185,7 +230,7 @@ impl ParagraphSnapshot {
 
     /// Converts a model paragraph into the layout-facing snapshot, resolving its formatting
     /// (document defaults, then the paragraph style, then each run's direct formatting).
-    pub fn from_model(p: &Paragraph, styles: &StyleSheet) -> Self {
+    pub fn from_model(p: &Paragraph, styles: &StyleSheet, language: Option<&str>) -> Self {
         let base = styles.resolve_char(p.props.style);
         let para = styles.resolve_props(&p.props);
         Self {
@@ -209,6 +254,15 @@ impl ParagraphSnapshot {
             keep_together: para.keep_together,
             widow_control: para.widow_control,
             hyphenate: para.hyphenate,
+            locale: language.and_then(crate::script::locale_for_tag),
+            cyrillic: language.and_then(crate::script::cyrillic_for_tag),
+            vertical: false,
+            upright: false,
+            ruby: p
+                .ruby()
+                .iter()
+                .map(|r| (r.range.clone(), r.text.clone()))
+                .collect(),
             borders: para.borders,
             tab_stops: para.tab_stops,
             page_break_before: p.props.page_break_before,

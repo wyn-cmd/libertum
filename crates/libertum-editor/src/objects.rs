@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use libertum_model::{
     BlockId, ChangeSet, CrossRef, CrossRefKind, DateTimeField, DateTimeFormat, DateTimeSource,
-    EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media, Operation, Paragraph, Run, Table,
-    TableCell, TableStyle,
+    EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media, MediaLink, Operation, Paragraph,
+    Ruby, Run, Table, TableCell, TableStyle,
 };
 
 use super::{DocPosition, EditBuilder, Editor, EditorError, Selection};
@@ -20,6 +20,62 @@ use super::{DocPosition, EditBuilder, Editor, EditorError, Selection};
 pub const UNKNOWN_PAGE: &str = "?";
 
 impl Editor {
+    // ------------------------------------------------------------ ruby
+
+    /// The text the Ruby field applies to: the selection when it lies in one paragraph, else
+    /// the ruby the caret is in. Returns the paragraph, the byte range and the reading now set
+    /// over it (empty when there is none).
+    pub fn ruby_target(&self) -> Option<(BlockId, std::ops::Range<usize>, String)> {
+        let (start, end) = self.ordered_selection()?;
+        let paragraph = self.doc.paragraph(start.block)?;
+        if start.block == end.block && start.offset < end.offset {
+            let range = start.offset.min(paragraph.len())..end.offset.min(paragraph.len());
+            if range.start >= range.end {
+                return None;
+            }
+            // The reading already over exactly this text, if any.
+            let current = paragraph
+                .ruby()
+                .iter()
+                .find(|r| r.range == range)
+                .map(|r| r.text.clone())
+                .unwrap_or_default();
+            return Some((start.block, range, current));
+        }
+        if start == end {
+            let r = paragraph.ruby_at(start.offset)?;
+            return Some((start.block, r.range.clone(), r.text.clone()));
+        }
+        None
+    }
+
+    /// Sets the reading over the Ruby field's target (see [`ruby_target`](Self::ruby_target)),
+    /// replacing any ruby that overlaps it; an empty reading removes it. One undo step.
+    pub fn set_ruby(&mut self, reading: &str) -> Result<ChangeSet, EditorError> {
+        let Some((block, range, _)) = self.ruby_target() else {
+            return Ok(ChangeSet::default());
+        };
+        let Some(paragraph) = self.doc.paragraph(block) else {
+            return Ok(ChangeSet::default());
+        };
+        if paragraph.props.toc_target.is_some() {
+            return Err(EditorError::ReadOnly);
+        }
+        let mut ruby: Vec<Ruby> = paragraph
+            .ruby()
+            .iter()
+            .filter(|r| r.range.end <= range.start || r.range.start >= range.end)
+            .cloned()
+            .collect();
+        if !reading.is_empty() {
+            ruby.push(Ruby::new(range, reading));
+        }
+        let mut b = EditBuilder::default();
+        b.apply(&mut self.doc, Operation::SetRuby { block, ruby })?;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
     // ------------------------------------------------------------ images
 
     /// Inserts `media` as an inline image at the caret, at its natural size scaled down to
@@ -30,6 +86,46 @@ impl Editor {
         max_width_pt: f32,
         name: &str,
     ) -> Result<ChangeSet, EditorError> {
+        self.insert_image_with(media, max_width_pt, name, "")
+    }
+
+    /// Inserts a picture that stands for an online picture or video: `media` is its preview
+    /// (or a placeholder), `link` the address AO3's HTML will use, `alt` its description.
+    pub fn insert_linked_media(
+        &mut self,
+        media: Arc<Media>,
+        max_width_pt: f32,
+        link: &MediaLink,
+        alt: &str,
+    ) -> Result<ChangeSet, EditorError> {
+        self.insert_image_with(media, max_width_pt, &link.name(), alt)
+    }
+
+    /// Swaps the picture of image `index` in `block` for `media` (a preview that has now been
+    /// downloaded), keeping its width and the new picture's proportions.
+    pub fn replace_image_media(
+        &mut self,
+        block: BlockId,
+        index: usize,
+        media: Arc<Media>,
+    ) -> Result<ChangeSet, EditorError> {
+        self.edit_image(block, index, |image| {
+            let (w, h) = (
+                media.width_px().max(1) as f32,
+                media.height_px().max(1) as f32,
+            );
+            image.height_pt = image.width_pt * h / w;
+            image.media = media;
+        })
+    }
+
+    fn insert_image_with(
+        &mut self,
+        media: Arc<Media>,
+        max_width_pt: f32,
+        name: &str,
+        alt: &str,
+    ) -> Result<ChangeSet, EditorError> {
         let caret = self.clamp(self.selection.head);
         let Some(paragraph) = self.doc.paragraph(caret.block) else {
             return Ok(ChangeSet::default());
@@ -39,6 +135,7 @@ impl Editor {
         }
         let mut image = InlineImage::fitted(caret.offset, media, max_width_pt);
         image.name = name.to_owned();
+        image.alt = alt.to_owned();
         let mut images = paragraph.images().to_vec();
         // After any image already at this offset, so repeated inserts keep their order.
         let at = images.partition_point(|i| i.offset <= caret.offset);

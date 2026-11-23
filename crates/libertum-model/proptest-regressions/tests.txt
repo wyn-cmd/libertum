@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 09b795bcb42107d496e49ec7505b80b85d9a5d29256e5b334f61525ce7b23ec4 # shrinks to ops = [0], seed = 1
 cc d13656353d809df322ef746a575465d182650eefe10e9ee2d9b0474125dbe15b # shrinks to ops = [5, 2, 7, 0, 5, 7, 1], seed = 6060
+cc 24653d77dabc73c2deb33c9208b54a5644049b95cb97da58c01641ad802629f8 # shrinks to ops = [7, 4, 7, 14, 7, 5, 7, 5, 7, 0, 14, 14, 5, 7, 5, 1, 5, 0, 5, 3, 1], seed = 2249
