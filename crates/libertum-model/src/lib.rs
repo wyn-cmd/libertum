@@ -15,13 +15,14 @@ mod note;
 mod ops;
 mod page;
 mod paragraph;
+mod ruby;
 mod table;
 
 pub use bookmark::Bookmark;
 pub use document::{
     BlockList, ChangeSet, DEFAULT_COLUMN_GUTTER_PT, DEFAULT_HEADER_FOOTER_DISTANCE_PT, Document,
     MAX_COLUMNS, ModelError, PageNumberHorizontal, PageNumberPos, PageNumberVertical,
-    PageNumbering, ParaLocation, Section, TableCellLocation, Watermark,
+    PageNumbering, ParaLocation, Section, TableCellLocation, Watermark, language_tag,
 };
 pub use field::{DateTimeContent, DateTimeField, DateTimeFormat, DateTimeSource};
 pub use format::{
@@ -36,14 +37,16 @@ pub use lists::{
 };
 pub use media::{
     CrossRef, CrossRefKind, ImageFormat, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media,
-    MediaError, test_png_header,
+    MediaError, MediaKind, MediaLink, test_png_header,
 };
 pub use note::{Note, NoteKind};
 pub use ops::Operation;
 pub use page::{Margins, Orientation, PageSetup, PaperSize};
 pub use paragraph::{
-    Align, Block, BlockId, ParaProps, Paragraph, Run, ceil_char_boundary, floor_char_boundary,
+    Align, Block, BlockId, ParaProps, Paragraph, Run, ceil_char_boundary, count_words,
+    floor_char_boundary, is_ideograph_or_kana,
 };
+pub use ruby::Ruby;
 pub use table::{
     DEFAULT_CELL_MARGIN_PT, MIN_TABLE_COLUMN_PT, Table, TableBorders, TableCell, TableRow,
     TableStyle,

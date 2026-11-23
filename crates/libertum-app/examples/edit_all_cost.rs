@@ -42,7 +42,7 @@ fn main() {
         .filter_map(|id| {
             let index = doc.index_of(*id)?;
             let p = doc.paragraph(*id)?;
-            Some((index, ParagraphSnapshot::from_model(p, &doc.styles)))
+            Some((index, ParagraphSnapshot::from_model(p, &doc.styles, None)))
         })
         .collect();
     let snapshots = ms(started);
@@ -119,5 +119,5 @@ fn doc_first_snapshot(editor: &Editor) -> ParagraphSnapshot {
         .paragraphs()
         .next()
         .expect("generated document has paragraphs");
-    ParagraphSnapshot::from_model(p, &doc.styles)
+    ParagraphSnapshot::from_model(p, &doc.styles, None)
 }

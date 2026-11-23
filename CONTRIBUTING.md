@@ -154,6 +154,7 @@ A document path given as the first command-line argument (what Windows passes wh
 | `LIBERTUM_AO3_TICK=1` | With `LIBERTUM_AO3_PICK`, also tick every suggested tag (for screenshots of the per-category Copy buttons) |
 | `LIBERTUM_TAGS=1\|rating\|warning` | Open the AO3 tag vocabulary window at start (for screenshots); `rating` or `warning` opens it on that category |
 | `LIBERTUM_SETTINGS=1` | Open the Settings window at start (for screenshots) |
+| `LIBERTUM_PREEDIT=<text>` | Show that text as an input-method composition at the caret (for screenshots; independent of the platform input method) |
 | `LIBERTUM_MCP_RUNNER=1` | Open the MCP tool runner at start (for screenshots; needs `dev_mode` and `mcp_enabled` in the settings file) |
 | `LIBERTUM_MACROS=<folder>` | Read recipe macros from that folder instead of `macros/` in the data folder (for screenshots and tests) |
 | `LIBERTUM_UPDATE=<version>` | Show the update prompt for that version at start (for screenshots; no network call) |

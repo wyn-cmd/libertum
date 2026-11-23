@@ -127,6 +127,9 @@ impl PageRenderer {
         y0: u32,
         rows: u32,
     ) -> Option<Pixmap> {
+        if state.is_vertical() {
+            return self.render_band_vertical(state, page_index, scale, y0, rows);
+        }
         let page = state.pages().get(page_index)?;
         let geo = state.page_geometry(page_index);
         let (w, h) = page_pixel_size(state, page_index, scale);
@@ -139,80 +142,20 @@ impl PageRenderer {
 
         // The watermark lies under everything else.
         if let Some(watermark) = state.page_watermark(page_index) {
-            self.draw_watermark(&mut pm, &watermark, shift, scale);
+            self.draw_watermark(&mut pm, &watermark, shift, scale, None);
         }
 
         // Table cell fills and borders sit under the text.
-        for table in &page.tables {
-            let top = geo.margins.top + table.y - shift;
-            if top + table.height < 0.0 || top > band_end {
-                continue;
-            }
-            for cell in &table.cells {
-                if let Some(fill) = cell.fill {
-                    fill_rect(
-                        &mut pm,
-                        geo.margins.left + cell.x,
-                        top,
-                        cell.width,
-                        table.height,
-                        fill,
-                        scale,
-                    );
-                }
-            }
-            if table.borders.is_visible() {
-                let colour = table.borders.colour;
-                let line = table.borders.width_pt.max(0.5);
-                let x = geo.margins.left + table.x;
-                // The top line, cell by cell: a cell that continues the one above has none.
-                for cell in table.cells.iter().filter(|cell| cell.top) {
-                    fill_rect(
-                        &mut pm,
-                        geo.margins.left + cell.x,
-                        top,
-                        cell.width,
-                        line,
-                        colour,
-                        scale,
-                    );
-                }
-                if table.bottom {
-                    fill_rect(
-                        &mut pm,
-                        x,
-                        top + table.height - line,
-                        table.width,
-                        line,
-                        colour,
-                        scale,
-                    );
-                }
-                if table.sides {
-                    fill_rect(&mut pm, x, top, line, table.height, colour, scale);
-                    fill_rect(
-                        &mut pm,
-                        x + table.width - line,
-                        top,
-                        line,
-                        table.height,
-                        colour,
-                        scale,
-                    );
-                }
-                for cell in table.cells.iter().filter(|cell| cell.left) {
-                    fill_rect(
-                        &mut pm,
-                        geo.margins.left + cell.x,
-                        top,
-                        line,
-                        table.height,
-                        colour,
-                        scale,
-                    );
-                }
-            }
-        }
+        draw_tables(
+            page,
+            &geo,
+            shift,
+            Some(band_end),
+            false,
+            &mut |x, y, w, h, colour| {
+                fill_rect(&mut pm, x, y, w, h, colour, scale);
+            },
+        );
         for slice in &page.slices {
             let Some(pl) = state.paragraph_layout(slice.para) else {
                 continue;
@@ -298,6 +241,7 @@ impl PageRenderer {
         watermark: &libertum_layout::WatermarkDraw,
         shift: f32,
         scale: f32,
+        turn: Option<Turn>,
     ) {
         use std::hash::{Hash, Hasher};
         use tiny_skia::{FilterQuality, PixmapPaint};
@@ -349,18 +293,23 @@ impl PageRenderer {
             }
         };
         // Bitmap pixels to band pixels: centre on the origin, enlarge to the page scale,
-        // turn, then move to the page's centre in this band.
+        // turn, then move to the page's centre in this band. On a vertical page the whole
+        // watermark is turned a further quarter turn, with the page.
+        let centre = match turn {
+            Some(turn) => (
+                turn.wp - watermark.centre_y,
+                watermark.centre_x - turn.shift,
+            ),
+            None => (watermark.centre_x, watermark.centre_y - shift),
+        };
         let enlarge = scale / bitmap_scale;
         let transform = Transform::from_translate(
             -(bitmap.width() as f32) * 0.5,
             -(bitmap.height() as f32) * 0.5,
         )
         .post_scale(enlarge, enlarge)
-        .post_rotate(watermark.angle_deg)
-        .post_translate(
-            watermark.centre_x * scale,
-            (watermark.centre_y - shift) * scale,
-        );
+        .post_rotate(watermark.angle_deg + if turn.is_some() { 90.0 } else { 0.0 })
+        .post_translate(centre.0 * scale, centre.1 * scale);
         let paint = PixmapPaint {
             quality: if self.antialias {
                 FilterQuality::Bilinear
@@ -370,6 +319,291 @@ impl PageRenderer {
             ..PixmapPaint::default()
         };
         pm.draw_pixmap(0, 0, bitmap.as_ref().as_ref(), &paint, transform, None);
+    }
+
+    /// Rasterises rows `y0..y0 + rows` of a vertical page's sheet at `scale`.
+    ///
+    /// The text was laid out on the page turned a quarter turn (`PageGeometry::transposed`):
+    /// a point (x, y) of that layout page is the point (width - y, x) of the sheet. Lines are
+    /// therefore columns running down and stacking from the right. Latin, Cyrillic and digits
+    /// turn with the page, a quarter turn clockwise; ideographs, kana, Hangul and East Asian
+    /// punctuation are drawn upright in their cells.
+    fn render_band_vertical(
+        &mut self,
+        state: &LayoutState,
+        page_index: usize,
+        scale: f32,
+        y0: u32,
+        rows: u32,
+    ) -> Option<Pixmap> {
+        let page = state.pages().get(page_index)?;
+        let geo = state.page_geometry(page_index);
+        let sheet = state.physical_page_geometry(page_index);
+        let (w, h) = page_pixel_size(state, page_index, scale);
+        let rows = rows.min(h.saturating_sub(y0));
+        let mut pm = Pixmap::new(w, rows)?;
+        let paper = page_fill(state.page_colour(page_index));
+        pm.fill(paper);
+        let turn = Turn {
+            wp: sheet.width_pt,
+            shift: y0 as f32 / scale,
+            y0: y0 as i32,
+        };
+        if let Some(watermark) = state.page_watermark(page_index) {
+            self.draw_watermark(&mut pm, &watermark, turn.shift, scale, Some(turn));
+        }
+        draw_tables(page, &geo, 0.0, None, false, &mut |x, y, w, h, colour| {
+            fill_turned(&mut pm, turn, x, y, w, h, colour, scale);
+        });
+        // Upright tables are on the sheet itself, drawn as on any horizontal page.
+        draw_tables(
+            page,
+            &sheet,
+            turn.shift,
+            None,
+            true,
+            &mut |x, y, w, h, colour| {
+                fill_rect(&mut pm, x, y, w, h, colour, scale);
+            },
+        );
+        for slice in &page.slices {
+            let Some(pl) = state.paragraph_layout(slice.para) else {
+                continue;
+            };
+            let Some(first) = pl.lines.get(slice.line_start) else {
+                continue;
+            };
+            if slice.upright {
+                let dy = sheet.margins.top + slice.y - first.top - turn.shift;
+                let dx = sheet.margins.left + slice.x + pl.x_offset;
+                self.draw_lines(
+                    &mut pm,
+                    &pl,
+                    slice.line_start..slice.line_end,
+                    dx,
+                    dy,
+                    scale,
+                );
+                continue;
+            }
+            let dy = geo.margins.top + slice.y - first.top;
+            let dx = geo.margins.left + slice.x + pl.x_offset;
+            self.draw_lines_vertical(
+                &mut pm,
+                &pl,
+                slice.line_start..slice.line_end,
+                dx,
+                dy,
+                turn,
+                scale,
+            );
+        }
+        for decoration in state.page_decorations(page_index) {
+            match decoration {
+                // Headers, footers and page numbers: on the sheet itself, upright and
+                // horizontal at its top or bottom, not turned with the columns.
+                Decoration::Text {
+                    layout,
+                    x,
+                    y,
+                    sheet: true,
+                    ..
+                } => {
+                    let lines = 0..layout.lines.len();
+                    self.draw_lines(&mut pm, &layout, lines, x, y - turn.shift, scale);
+                }
+                Decoration::Text { layout, x, y, .. } => {
+                    let lines = 0..layout.lines.len();
+                    self.draw_lines_vertical(&mut pm, &layout, lines, x, y, turn, scale);
+                }
+                Decoration::Leader { x0, x1, baseline } => {
+                    let mut x = x1 - LEADER_DOT_PT;
+                    while x >= x0 {
+                        fill_turned(
+                            &mut pm,
+                            turn,
+                            x,
+                            baseline - LEADER_DOT_PT,
+                            LEADER_DOT_PT,
+                            LEADER_DOT_PT,
+                            [0, 0, 0, 255],
+                            scale,
+                        );
+                        x -= LEADER_PITCH_PT;
+                    }
+                }
+                Decoration::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    colour,
+                } => fill_turned(&mut pm, turn, x, y, width, height, colour, scale),
+                Decoration::Image {
+                    media,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    // The layout box of a picture on a vertical page has its width and height
+                    // swapped (`ParagraphSnapshot::set_vertical`), so turned back onto the sheet
+                    // it is the picture's own shape and the picture is drawn upright in it.
+                    let (bx, by, bw, bh) = turn.rect(x, y, width, height);
+                    if by + bh < turn.shift || by > turn.shift + rows as f32 / scale {
+                        continue;
+                    }
+                    let left = (bx * scale).round() as i32;
+                    let top = (by * scale).round() as i32 - turn.y0;
+                    let w_px = (bw * scale).round().max(1.0) as u32;
+                    let h_px = (bh * scale).round().max(1.0) as u32;
+                    if !self.images.draw(&mut pm, &media, left, top, w_px, h_px) {
+                        fill_turned(&mut pm, turn, x, y, width, height, IMAGE_PLACEHOLDER, scale);
+                    }
+                }
+            }
+        }
+        Some(pm)
+    }
+
+    /// Draws lines `lines` of `pl` on a vertical page's sheet, the layout's origin at
+    /// (`dx`, `dy`) layout-page points. See [`render_band_vertical`](Self::render_band_vertical).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines_vertical(
+        &mut self,
+        pm: &mut Pixmap,
+        pl: &ParagraphLayout,
+        lines: std::ops::Range<usize>,
+        dx: f32,
+        dy: f32,
+        turn: Turn,
+        scale: f32,
+    ) {
+        // The band's extent down the sheet, points: glyphs outside it are not drawn.
+        let band_end = turn.shift + pm.height() as f32 / scale;
+        for li in lines {
+            let Some(line) = pl.layout.get(li) else {
+                continue;
+            };
+            if let Some(lb) = pl.lines.get(li) {
+                for item in line.items() {
+                    if let PositionedLayoutItem::GlyphRun(run) = item
+                        && let Some(hl) = run.style().brush.highlight
+                    {
+                        fill_turned(
+                            pm,
+                            turn,
+                            dx + run.offset(),
+                            dy + lb.top,
+                            run.advance(),
+                            lb.height,
+                            hl,
+                            scale,
+                        );
+                    }
+                }
+            }
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let brush = run.style().brush;
+                let color = brush.color;
+                let rise = brush.rise_pt();
+                let r = run.run();
+                let font = r.font();
+                let size_pt = r.font_size();
+                let size_px = size_pt * scale;
+                let synth = r.synthesis();
+                let coords: Vec<i16> = r.normalized_coords().iter().map(|c| c.to_bits()).collect();
+                let metrics = r.font_metrics();
+                // Which glyphs stand upright, in the order the glyphs come in.
+                let upright = crate::vertical::upright_glyphs(&pl.text, r);
+                let positions: Vec<_> = run.positioned_glyphs().collect();
+                for (index, g) in positions.iter().enumerate() {
+                    let stand = upright
+                        .get(index)
+                        .copied()
+                        .unwrap_or(crate::vertical::Stand::Sideways);
+                    let standing = stand.upright();
+                    let (x_layout, y_layout) = (dx + g.x, dy + g.y - rise);
+                    // The glyph's origin on the sheet, and the box it is drawn in.
+                    let (origin_x, origin_y) = if standing {
+                        let cell = crate::vertical::upright_cell(stand, &positions, index, size_pt);
+                        let (along, across) = crate::vertical::upright_origin(
+                            dx + cell.start,
+                            y_layout,
+                            &cell,
+                            metrics.ascent,
+                            metrics.descent,
+                            turn.wp,
+                        );
+                        (across, along)
+                    } else {
+                        (turn.wp - y_layout, x_layout)
+                    };
+                    // Skip a glyph that cannot reach the band. `origin_y` is down the sheet.
+                    let reach = size_pt * 2.0;
+                    if origin_y + reach < turn.shift || origin_y - reach > band_end {
+                        continue;
+                    }
+                    let req = GlyphRequest {
+                        font_data: font.data.data(),
+                        font_id: font.data.id(),
+                        font_index: font.index,
+                        glyph: g.id,
+                        size_px,
+                        subpx: 0,
+                        coords: &coords,
+                        embolden: synth.embolden(),
+                        skew_degrees: if standing { synth.skew() } else { None },
+                        rotated: !standing,
+                        smooth: self.antialias,
+                    };
+                    if let Some(bm) = self.glyphs.get(&req) {
+                        blit_alpha(
+                            pm,
+                            (origin_x * scale).round() as i32 + bm.left,
+                            (origin_y * scale).round() as i32 - turn.y0 - bm.top,
+                            bm.width,
+                            bm.height,
+                            &bm.alpha,
+                            color,
+                        );
+                    }
+                }
+                // Underline and strikethrough, along the column.
+                let style = run.style();
+                for (decoration, offset, size) in [
+                    (
+                        &style.underline,
+                        metrics.underline_offset,
+                        metrics.underline_size,
+                    ),
+                    (
+                        &style.strikethrough,
+                        metrics.strikethrough_offset,
+                        metrics.strikethrough_size,
+                    ),
+                ] {
+                    if let Some(d) = decoration {
+                        let offset = d.offset.unwrap_or(offset);
+                        let size = d.size.unwrap_or(size).max(0.5);
+                        let top = dy + run.baseline() - rise - offset - size * 0.5;
+                        fill_turned(
+                            pm,
+                            turn,
+                            dx + run.offset(),
+                            top,
+                            run.advance(),
+                            size,
+                            d.brush.color,
+                            scale,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Draws lines `lines` of `pl` with the layout's origin at (`dx`, `dy`) page points.
@@ -435,6 +669,7 @@ impl PageRenderer {
                         coords: &coords,
                         embolden: synth.embolden(),
                         skew_degrees: synth.skew(),
+                        rotated: false,
                         smooth: self.antialias,
                     };
                     if let Some(bm) = self.glyphs.get(&req) {
@@ -485,6 +720,106 @@ impl PageRenderer {
     }
 }
 
+/// The quarter turn between a vertical page's layout and its sheet: the layout point (x, y)
+/// is at (`wp` - y, x) on the sheet, `shift` points further up the band than the sheet's top.
+#[derive(Clone, Copy)]
+struct Turn {
+    /// The sheet's width in points (the layout page's height).
+    wp: f32,
+    /// How far down the sheet the band starts, points.
+    shift: f32,
+    /// The same in device pixels. Positions are rounded on the whole sheet and this whole
+    /// number of pixels is taken off afterwards, so a band is exactly the same rows of the
+    /// page as the whole page would have: rounding after subtracting could tip a tie the other
+    /// way.
+    y0: i32,
+}
+
+impl Turn {
+    /// The layout rectangle on the sheet in points: x, y, width, height.
+    fn rect(self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        (self.wp - y - h, x, h, w)
+    }
+}
+
+/// Fills a layout-page rectangle on a vertical page's sheet. At least a device pixel each
+/// way, so a thin line along a column never vanishes.
+#[allow(clippy::too_many_arguments)]
+fn fill_turned(
+    pm: &mut Pixmap,
+    turn: Turn,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [u8; 4],
+    scale: f32,
+) {
+    let (x, y, w, h) = turn.rect(x, y, w, h);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color[0], color[1], color[2], color[3]);
+    paint.anti_alias = false;
+    if let Some(rect) = Rect::from_xywh(
+        x * scale,
+        y * scale,
+        (w * scale).max(1.0),
+        (h * scale).max(1.0),
+    ) {
+        // Up the band by a whole number of pixels, which cannot change how the edges round.
+        let into_band = Transform::from_translate(0.0, -(turn.y0 as f32));
+        pm.fill_rect(rect, &paint, into_band, None);
+    }
+}
+
+/// Table cell fills and borders of a page, as calls to `fill(x, y, width, height, colour)` in
+/// layout-page points with `y` already less `shift`. Tables wholly outside the band, which
+/// ends `band_end` points down, are skipped when it is given.
+fn draw_tables(
+    page: &libertum_layout::PageLayout,
+    geo: &libertum_layout::PageGeometry,
+    shift: f32,
+    band_end: Option<f32>,
+    upright: bool,
+    fill: &mut dyn FnMut(f32, f32, f32, f32, [u8; 4]),
+) {
+    for table in page.tables.iter().filter(|t| t.upright == upright) {
+        let top = geo.margins.top + table.y - shift;
+        if band_end.is_some_and(|end| top + table.height < 0.0 || top > end) {
+            continue;
+        }
+        for cell in &table.cells {
+            if let Some(colour) = cell.fill {
+                fill(
+                    geo.margins.left + cell.x,
+                    top,
+                    cell.width,
+                    table.height,
+                    colour,
+                );
+            }
+        }
+        if table.borders.is_visible() {
+            let colour = table.borders.colour;
+            let line = table.borders.width_pt.max(0.5);
+            let x = geo.margins.left + table.x;
+            // The top line, cell by cell: a cell that continues the one above has none.
+            for cell in table.cells.iter().filter(|cell| cell.top) {
+                fill(geo.margins.left + cell.x, top, cell.width, line, colour);
+            }
+            if table.bottom {
+                fill(x, top + table.height - line, table.width, line, colour);
+            }
+            if table.sides {
+                fill(x, top, line, table.height, colour);
+                fill(x + table.width - line, top, line, table.height, colour);
+            }
+            for cell in table.cells.iter().filter(|cell| cell.left) {
+                fill(geo.margins.left + cell.x, top, line, table.height, colour);
+            }
+        }
+    }
+}
+
 /// Fills a rectangle given in points (opaque or translucent colour, straight alpha).
 fn fill_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: [u8; 4], scale: f32) {
     let mut paint = Paint::default();
@@ -529,7 +864,8 @@ fn draw_leader(pm: &mut Pixmap, x0: f32, x1: f32, baseline: f32, scale: f32, smo
 
 /// Pixel size of a page bitmap at `scale` (what [`PageRenderer::render_page`] returns).
 pub fn page_pixel_size(state: &LayoutState, page: usize, scale: f32) -> (u32, u32) {
-    let geo = state.page_geometry(page);
+    // The sheet, which for vertical text is the layout page turned back.
+    let geo = state.physical_page_geometry(page);
     (
         (geo.width_pt * scale).ceil().max(1.0) as u32,
         (geo.height_pt * scale).ceil().max(1.0) as u32,

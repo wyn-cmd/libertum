@@ -85,7 +85,7 @@ pub fn body<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
         };
     }
     match state.format_pane {
-        FormatPane::Style => with_images(state, t, style_pane(state, t)),
+        FormatPane::Style => with_ruby(state, t, with_images(state, t, style_pane(state, t))),
         FormatPane::Layout => layout_pane(state, t),
         FormatPane::More => more_pane(state, t),
     }
@@ -149,6 +149,25 @@ fn markdown_style_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Messag
     column![with_images(state, t, pane), note(t, s::MARKDOWN_STYLE_NOTE)].into()
 }
 
+/// `pane` with the Ruby group on top when the selection (or the caret's ruby) can take a
+/// reading and the file's format can keep it.
+fn with_ruby<'a>(
+    state: &'a AppState,
+    t: Tokens,
+    pane: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let Some(reading) = state.ruby.as_ref().filter(|_| state.keeps_ruby) else {
+        return pane;
+    };
+    let field: Element<'a, Message> = iced::widget::text_input(s::RUBY_READING, reading)
+        .on_input(Message::RubyEdit)
+        .size(12)
+        .padding(6)
+        .width(Length::Fill)
+        .into();
+    column![section(t, s::SECTION_RUBY, field), pane].into()
+}
+
 /// `pane` with the Image group on top when the caret's paragraph holds images.
 fn with_images<'a>(
     state: &'a AppState,
@@ -159,6 +178,32 @@ fn with_images<'a>(
         return pane;
     }
     column![section(t, s::SECTION_IMAGE, image_section(state, t)), pane].into()
+}
+
+/// For a linked picture or video: what it is, its address, and Fetch Preview.
+fn linked_row<'a>(image: &'a crate::state::ImageEntry, t: Tokens) -> Element<'a, Message> {
+    let Some(link) = &image.link else {
+        return space().height(0).into();
+    };
+    let kind = match link.kind {
+        libertum_model::MediaKind::Image => s::LINKED_IMAGE_NOTE,
+        libertum_model::MediaKind::Video => s::LINKED_VIDEO_NOTE,
+    };
+    let (block, index) = (image.block, image.index);
+    column![
+        text(kind).size(12).color(t.text),
+        text(link.url.as_str()).size(11).color(t.text_secondary),
+        button(text(s::LINKED_FETCH_PREVIEW).size(12).color(t.accent))
+            .padding(0)
+            .style(button::text)
+            .on_press_maybe(
+                image
+                    .previewable
+                    .then_some(Message::FetchPreview(block, index))
+            ),
+    ]
+    .spacing(3)
+    .into()
 }
 
 /// One block per image: its width with Smaller/Larger buttons, its alternative text and a
@@ -186,6 +231,7 @@ fn image_section<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
                 ]
                 .spacing(6)
                 .align_y(Center),
+                linked_row(image, t),
                 iced::widget::text_input(s::IMAGE_ALT, &image.alt)
                     .on_input(move |value| Message::ImageAlt(block, index, value))
                     .size(12)
@@ -223,7 +269,7 @@ fn style_pane<'a>(state: &'a AppState, t: Tokens) -> Element<'a, Message> {
 }
 
 /// A tooltip in the app's pill style.
-fn tip<'a>(
+pub(crate) fn tip<'a>(
     t: Tokens,
     content: impl Into<Element<'a, Message>>,
     label: &'a str,

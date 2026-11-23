@@ -172,6 +172,17 @@ fn date_time_fields_and_the_save_time_survive_a_round_trip() {
 }
 
 #[test]
+fn ruby_survives_a_round_trip() {
+    let mut paragraph = Paragraph::new(BlockId(1), "漢字を読む");
+    paragraph.set_ruby(vec![libertum_model::Ruby::new(0..6, "かんじ")]);
+    let document = Document::from_paragraphs(vec![paragraph.clone()]);
+    let bytes = Native::new(document).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    let back = read.document().paragraph_at(0).expect("the paragraph");
+    assert_eq!(back.ruby(), paragraph.ruby());
+}
+
+#[test]
 fn an_image_is_stored_once_however_often_it_is_used() {
     let media = image(32, 16);
     let first = {
@@ -361,4 +372,44 @@ fn the_page_colour_survives_a_round_trip() {
         read.document().sections[0].page_colour,
         Some([0xD9, 0xD9, 0xD9, 0xFF])
     );
+}
+
+#[test]
+fn the_language_survives_a_round_trip_and_an_unset_one_stays_unset() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Colour")]);
+    let bytes = Native::new(document.clone()).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    assert_eq!(read.document().sections[0].language, None);
+
+    document.sections[0].language = Some("en-GB".into());
+    let bytes = Native::new(document).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    assert_eq!(
+        read.document().sections[0].language.as_deref(),
+        Some("en-GB")
+    );
+}
+
+#[test]
+fn vertical_text_survives_a_round_trip_and_horizontal_is_left_out() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "縦書き")]);
+    let bytes = Native::new(document.clone()).to_bytes().expect("save");
+    assert!(!Native::parse(&bytes).expect("read").document().sections[0].vertical);
+    document.sections[0].vertical = true;
+    let bytes = Native::new(document).to_bytes().expect("save");
+    assert!(Native::parse(&bytes).expect("read").document().sections[0].vertical);
+}
+
+#[test]
+fn a_second_language_survives_a_round_trip() {
+    let mut document = Document::from_paragraphs(vec![Paragraph::new(BlockId(1), "Hi")]);
+    for section in &mut document.sections {
+        section.language = Some("en-GB".to_owned());
+        section.language2 = Some("ja".to_owned());
+    }
+    let bytes = Native::new(document).to_bytes().expect("save");
+    let read = Native::parse(&bytes).expect("read");
+    let section = &read.document().sections[0];
+    assert_eq!(section.language.as_deref(), Some("en-GB"));
+    assert_eq!(section.language2.as_deref(), Some("ja"));
 }

@@ -37,6 +37,10 @@ pub struct ParaSlice {
     pub col: u16,
     /// Left edge of that column, points from the left margin.
     pub x: f32,
+    /// The slice is in a table cell kept upright on a vertical page. `x` and `y` are then
+    /// on the sheet itself (points from its left and top margins), and the lines run along
+    /// the sheet's top edge like any horizontal text.
+    pub upright: bool,
 }
 
 /// One table in the flow. Cell `paragraphs` are indices into the layout's paragraph list.
@@ -90,6 +94,9 @@ pub struct TableDraw {
     pub bottom: bool,
     /// The left and right outer lines are drawn.
     pub sides: bool,
+    /// The row is part of a table kept upright on a vertical page: all its coordinates are
+    /// on the sheet itself (points from its margins), not on the turned layout page.
+    pub upright: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,11 +148,16 @@ pub struct PageLayout {
 #[derive(Clone)]
 pub enum Decoration {
     /// A one-line text layout of `text` whose top-left corner is at (`x`, `y`).
+    ///
+    /// On a vertical page, `sheet` text (headers, footers and page numbers) is positioned on
+    /// the real sheet and drawn upright and horizontal at the top or bottom of it, not turned
+    /// with the columns like the rest of the page: `x` and `y` are then sheet coordinates.
     Text {
         layout: Arc<ParagraphLayout>,
         text: String,
         x: f32,
         y: f32,
+        sheet: bool,
     },
     /// A dot leader from `x0` to `x1` sitting on `baseline`.
     Leader { x0: f32, x1: f32, baseline: f32 },
@@ -335,6 +347,8 @@ pub struct LayoutState {
     cell_at: HashMap<usize, (usize, usize, usize)>,
     /// Cell paragraph index -> first paragraph index of its row (the row's flow position).
     row_first_of: HashMap<usize, usize>,
+    /// Per table: kept upright on this vertical layout (see [`Self::refresh_upright`]).
+    upright_tables: Vec<bool>,
     pages: Vec<PageLayout>,
     /// Where the next page starts if pagination is not complete.
     resume: Option<FlowPos>,
@@ -390,6 +404,7 @@ impl LayoutState {
             row_at: HashMap::new(),
             cell_at: HashMap::new(),
             row_first_of: HashMap::new(),
+            upright_tables: Vec::new(),
             pages: Vec::new(),
             resume: Some(FlowPos::default()),
             complete,
@@ -407,6 +422,31 @@ impl LayoutState {
 
     pub fn geometry(&self) -> &PageGeometry {
         &self.geometry
+    }
+
+    /// Whether the document is set vertically (from the right, lines running down). The page
+    /// is then laid out turned a quarter turn ([`PageGeometry::transposed`]): every geometry,
+    /// coordinate and rectangle in this state is in that turned layout page, and the renderer,
+    /// the PDF writer and the canvas turn them back with [`physical_page_geometry`]
+    /// (Self::physical_page_geometry). Not for the pageless reading view.
+    pub fn is_vertical(&self) -> bool {
+        !self.pageless
+            && !self.ignore_section_margins
+            && self
+                .sections
+                .first()
+                .is_some_and(|section| section.vertical)
+    }
+
+    /// The real page of laid-out page `page`: its layout geometry, turned back when the text
+    /// is vertical. This is the size of the sheet the renderer paints and the canvas shows.
+    pub fn physical_page_geometry(&self, page: usize) -> PageGeometry {
+        let geometry = self.page_geometry(page);
+        if self.is_vertical() {
+            geometry.untransposed()
+        } else {
+            geometry
+        }
     }
 
     /// The page setup geometry for a section, with header/footer insets applied.
@@ -507,6 +547,7 @@ impl LayoutState {
             }
         }
         self.invalidate_pages();
+        self.refresh_upright();
     }
 
     pub fn tables(&self) -> &[TableSnapshot] {
@@ -549,10 +590,20 @@ impl LayoutState {
             .pages
             .get(self.page_of_para(index))
             .map_or(0, |page| page.section);
-        let column = self.column_width(section);
+        let mut column = self.column_width(section);
         if let Some((table_index, col, span)) = self.cell_at.get(&index)
             && let Some(table) = self.tables.get(*table_index)
         {
+            if self
+                .upright_tables
+                .get(*table_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                // An upright table spreads along the sheet's width, which is the layout
+                // page's height.
+                column = self.geometry_for_section(section).content_height();
+            }
             let total: f32 = table.widths_pt.iter().sum();
             let scale = if total > column && total > 0.0 {
                 column / total
@@ -632,10 +683,15 @@ impl LayoutState {
     /// Builds a layout state from a model document (PLAN §4.1 → §4.2).
     pub fn from_document(doc: &Document, geometry: PageGeometry, options: LayoutOptions) -> Self {
         let mut labels = doc.list_labels().into_iter();
+        let language = doc.sections.first().and_then(|s| s.language.as_deref());
+        let language2 = doc.sections.first().and_then(|s| s.language2.as_deref());
+        let vertical = doc.sections.first().is_some_and(|s| s.vertical);
         let paragraphs = doc
             .paragraphs()
             .map(|p| {
-                let mut s = ParagraphSnapshot::from_model(p, &doc.styles);
+                let mut s = ParagraphSnapshot::from_model(p, &doc.styles, language);
+                s.add_language(language2);
+                s.set_vertical(vertical);
                 s.list_label = labels.next().flatten();
                 s
             })
@@ -823,8 +879,54 @@ impl LayoutState {
     /// bottom margin pushes it up, as Word does. Returns `true` when the margins changed.
     /// Recomputes each section's body geometry (paper, margins and header/footer insets).
     /// Returns true when any page's geometry changed.
+    /// Decides which tables stay upright: on a vertical page, a table whose cells hold plain
+    /// text keeps its rows top to bottom and its text horizontal (Word and InDesign turn
+    /// tables back the same way). Cells with pictures, list items, borders or contents
+    /// entries turn with the page instead, as their extras are only drawn turned. Cell
+    /// paragraphs of an upright table are laid out as horizontal text.
+    fn refresh_upright(&mut self) {
+        let vertical = self.is_vertical();
+        let flags: Vec<bool> = self
+            .tables
+            .iter()
+            .map(|table| {
+                vertical
+                    && table.rows.iter().all(|row| {
+                        row.cells.iter().all(|cell| {
+                            cell.paragraphs.iter().all(|&i| {
+                                self.paragraphs.get(i).is_none_or(|p| {
+                                    p.images.is_empty()
+                                        && p.list.is_none()
+                                        && p.borders.is_none()
+                                        && p.toc_target.is_none()
+                                })
+                            })
+                        })
+                    })
+            })
+            .collect();
+        for (table, upright) in self.tables.iter().zip(&flags) {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for &i in &cell.paragraphs {
+                        if let Some(p) = self.paragraphs.get_mut(i)
+                            && p.upright != *upright
+                        {
+                            p.upright = *upright;
+                            // The cached layout was made the other way up.
+                            p.version = p.version.wrapping_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        self.upright_tables = flags;
+    }
+
     fn refresh_furniture_geometry(&mut self) -> bool {
+        self.refresh_upright();
         let sections = self.sections.clone();
+        let vertical = self.is_vertical();
         let mut geometries = Vec::with_capacity(sections.len());
         for (index, section) in sections.iter().enumerate() {
             let base = if self.ignore_section_margins {
@@ -832,6 +934,8 @@ impl LayoutState {
             } else {
                 PageGeometry::from_setup(&section.page)
             };
+            // Everything here is worked out on the sheet, headers and footers included: a
+            // header sits at the sheet's top whichever way the text runs.
             let width = base.content_width();
             let mut top = base.margins.top;
             let mut bottom = base.margins.bottom;
@@ -865,14 +969,17 @@ impl LayoutState {
             let min_body = (base.content_height() * 0.25).max(36.0);
             top = top.min((base.height_pt - bottom - min_body).max(base.margins.top));
             bottom = bottom.min((base.height_pt - top - min_body).max(base.margins.bottom));
-            geometries.push(PageGeometry {
+            let sheet = PageGeometry {
                 margins: Margins {
                     top,
                     bottom,
                     ..base.margins
                 },
                 ..base
-            });
+            };
+            // Vertical text is laid out on the page turned a quarter turn, so the sheet's top
+            // and bottom insets become the layout's left and right margins.
+            geometries.push(if vertical { sheet.transposed() } else { sheet });
         }
         let changed = geometries != self.geometries;
         if let Some(first) = geometries.first().copied() {
@@ -970,6 +1077,8 @@ impl LayoutState {
         snapshot: ParagraphSnapshot,
     ) -> Option<PaginationStats> {
         let p = self.paragraphs.get_mut(index)?;
+        let mut snapshot = snapshot;
+        snapshot.upright = p.upright;
         let old_notes = p.notes.clone();
         let flow_changed = p.forces_new_page() != snapshot.forces_new_page()
             || p.space_before_pt != snapshot.space_before_pt
@@ -1022,7 +1131,9 @@ impl LayoutState {
         let mut first: Option<usize> = None;
         for (index, snapshot) in items {
             if let Some(p) = self.paragraphs.get_mut(index) {
+                let upright = p.upright;
                 *p = snapshot;
+                p.upright = upright;
                 first = Some(first.map_or(index, |f| f.min(index)));
             }
         }
@@ -1280,6 +1391,7 @@ impl LayoutState {
                 let (mut page, next) = build_page(
                     &self.paragraphs,
                     &self.tables,
+                    &self.upright_tables,
                     &self.row_at,
                     &mut eng,
                     &geo,
@@ -1625,14 +1737,18 @@ impl LayoutState {
             return Vec::new();
         };
         let geo = pg.geometry;
-        let right = geo.margins.left + geo.content_width();
+        // Headers, footers and page numbers are drawn on the sheet itself, upright, even when
+        // the text is vertical: worked out in the sheet's own geometry.
+        let on_sheet = self.is_vertical();
+        let sheet = if on_sheet { geo.untransposed() } else { geo };
+        let sheet_right = sheet.margins.left + sheet.content_width();
         let mut out = Vec::new();
         // Hyphens at the end of lines broken inside a word.
         for s in &pg.slices {
             let Some(p) = self.paragraphs.get(s.para) else {
                 continue;
             };
-            if !p.hyphenate {
+            if !p.hyphenate || p.upright {
                 continue;
             }
             let Some(pl) = self.paragraph_layout(s.para) else {
@@ -1666,6 +1782,7 @@ impl LayoutState {
                     x: geo.margins.left + s.x + pl.x_offset + line_ink_end(&line),
                     y: baseline - hyphen_baseline,
                     layout: hyphen,
+                    sheet: false,
                 });
             }
         }
@@ -1698,6 +1815,36 @@ impl LayoutState {
                 });
             }
         }
+        // Ruby: each reading over the start of its base, on the line the base is on. The
+        // readings of an upright table cell are on the sheet, like its text.
+        for s in &pg.slices {
+            let Some(p) = self.paragraphs.get(s.para) else {
+                continue;
+            };
+            if p.ruby.is_empty() {
+                continue;
+            }
+            let Some(pl) = self.paragraph_layout(s.para) else {
+                continue;
+            };
+            let Some(first) = pl.lines.get(s.line_start) else {
+                continue;
+            };
+            let frame = if s.upright { geo.untransposed() } else { geo };
+            for r in pl
+                .ruby
+                .iter()
+                .filter(|r| s.line_start <= r.line && r.line < s.line_end)
+            {
+                out.push(Decoration::Text {
+                    text: r.layout.text.clone(),
+                    x: frame.margins.left + s.x + pl.x_offset + r.x,
+                    y: frame.margins.top + s.y + (r.y - first.top),
+                    layout: r.layout.clone(),
+                    sheet: s.upright,
+                });
+            }
+        }
         // List markers: in the hanging indent, on the item's first line.
         for s in pg.slices.iter().filter(|s| s.line_start == 0) {
             let Some(p) = self.paragraphs.get(s.para) else {
@@ -1722,6 +1869,7 @@ impl LayoutState {
                 x: geo.margins.left + s.x + x,
                 y: baseline - marker_baseline,
                 layout: marker,
+                sheet: false,
             });
         }
         for s in &pg.slices {
@@ -1759,6 +1907,7 @@ impl LayoutState {
                 text: number.to_string(),
                 x,
                 y: baseline - label_baseline,
+                sheet: false,
             });
         }
         // Paragraph borders: a line on each chosen side, `space_pt` outside the text. A
@@ -1859,9 +2008,9 @@ impl LayoutState {
                     pos.horizontal
                 };
                 let x = match horizontal {
-                    PageNumberHorizontal::Left => geo.margins.left,
-                    PageNumberHorizontal::Centre => (geo.width_pt - w) * 0.5,
-                    PageNumberHorizontal::Right => right - w,
+                    PageNumberHorizontal::Left => sheet.margins.left,
+                    PageNumberHorizontal::Centre => (sheet.width_pt - w) * 0.5,
+                    PageNumberHorizontal::Right => sheet_right - w,
                 };
                 // Centred in the page setup's margin, not the insets a taller header or
                 // footer may add, so the number keeps its place when header text grows.
@@ -1877,6 +2026,7 @@ impl LayoutState {
                     text: pg.number.to_string(),
                     x,
                     y,
+                    sheet: on_sheet,
                 });
             }
         }
@@ -1898,17 +2048,18 @@ impl LayoutState {
             }
             let id = self.furniture_id(pg.section, kind, variant);
             let snap = self.furniture_snapshot(id, &text, hf.align);
-            let layout = lock(&self.engine).full(&snap, geo.content_width());
+            let layout = lock(&self.engine).full(&snap, sheet.content_width());
             let distance = self.section(pg.section).header_footer_distance(kind);
             let y = match kind {
                 HfKind::Header => distance,
-                HfKind::Footer => geo.height_pt - distance - layout.height,
+                HfKind::Footer => sheet.height_pt - distance - layout.height,
             };
             out.push(Decoration::Text {
                 layout,
                 text,
-                x: geo.margins.left,
+                x: sheet.margins.left,
                 y,
+                sheet: on_sheet,
             });
         }
         // The endnote section: heading and notes from the top of its own page.
@@ -1922,6 +2073,7 @@ impl LayoutState {
                 text: "Endnotes".to_owned(),
                 x: geo.margins.left,
                 y,
+                sheet: false,
             });
             y += heading_height + 8.0;
             for note in &pg.notes {
@@ -1938,6 +2090,7 @@ impl LayoutState {
                     text,
                     x: geo.margins.left,
                     y,
+                    sheet: false,
                 });
                 y += height + 2.0;
             }
@@ -1981,6 +2134,7 @@ impl LayoutState {
                     text,
                     x: geo.margins.left,
                     y,
+                    sheet: false,
                 });
                 y += height + 2.0;
             }
@@ -2008,6 +2162,7 @@ impl LayoutState {
                         text: String::new(),
                         x: rect.x - marker.width - 1.0,
                         y: rect.y - 2.0,
+                        sheet: false,
                     });
                 }
             }
@@ -2135,8 +2290,14 @@ impl LayoutState {
         for d in self.page_decorations(page) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             let (top, bottom) = match &d {
-                Decoration::Text { layout, text, x, y } => {
-                    (text, x.to_bits(), y.to_bits()).hash(&mut h);
+                Decoration::Text {
+                    layout,
+                    text,
+                    x,
+                    y,
+                    sheet,
+                } => {
+                    (text, x.to_bits(), y.to_bits(), sheet).hash(&mut h);
                     let pad = layout.height * INK_OVERHANG;
                     (y - pad, y + layout.height + pad)
                 }
@@ -2196,7 +2357,17 @@ impl LayoutState {
         let geo = pg.geometry;
         let cx = x_pt - geo.margins.left;
         let cy = y_pt - geo.margins.top;
-        if let Some(s) = self.table_slice_at(pg, cx, cy) {
+        // A point on an upright table is looked up on the sheet itself: the turned layout
+        // point (x, y) is at (sheet width - y, x) there.
+        if pg.tables.iter().any(|t| t.upright) {
+            let sheet = geo.untransposed();
+            let sx = geo.height_pt - y_pt - sheet.margins.left;
+            let sy = x_pt - sheet.margins.top;
+            if let Some(s) = self.table_slice_at(pg, sx, sy, true) {
+                return self.hit_test_slice(s, sx, sy);
+            }
+        }
+        if let Some(s) = self.table_slice_at(pg, cx, cy, false) {
             return self.hit_test_slice(s, cx, cy);
         }
         let section = self.section(pg.section);
@@ -2218,11 +2389,14 @@ impl LayoutState {
             .slices
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.col as usize == col)
+            .filter(|(_, s)| !s.upright && s.col as usize == col)
             .map(|(i, _)| i)
             .collect();
         let idx = if in_column.is_empty() {
-            pg.slices.len().checked_sub(1)?
+            pg.slices
+                .iter()
+                .rposition(|s| !s.upright)
+                .or_else(|| pg.slices.len().checked_sub(1))?
         } else {
             in_column
                 .iter()
@@ -2252,8 +2426,14 @@ impl LayoutState {
 
     /// The text slice under a point inside a table row (cells are side by side, so the
     /// column-based choice used for body text would pick the wrong cell).
-    fn table_slice_at(&self, pg: &PageLayout, cx: f32, cy: f32) -> Option<ParaSlice> {
-        for draw in &pg.tables {
+    fn table_slice_at(
+        &self,
+        pg: &PageLayout,
+        cx: f32,
+        cy: f32,
+        upright: bool,
+    ) -> Option<ParaSlice> {
+        for draw in pg.tables.iter().filter(|t| t.upright == upright) {
             if cy < draw.y || cy > draw.y + draw.height || cx < draw.x || cx > draw.x + draw.width {
                 continue;
             }
@@ -2262,7 +2442,7 @@ impl LayoutState {
                     continue;
                 }
                 let mut best: Option<ParaSlice> = None;
-                for s in &pg.slices {
+                for s in pg.slices.iter().filter(|s| s.upright == upright) {
                     if s.x < cell.x - EPS || s.x > cell.x + cell.width + EPS {
                         continue;
                     }
@@ -2274,7 +2454,11 @@ impl LayoutState {
                     best = pg
                         .slices
                         .iter()
-                        .find(|s| s.x >= cell.x - EPS && s.x <= cell.x + cell.width + EPS)
+                        .find(|s| {
+                            s.upright == upright
+                                && s.x >= cell.x - EPS
+                                && s.x <= cell.x + cell.width + EPS
+                        })
                         .copied();
                 }
                 if let Some(s) = best {
@@ -2306,12 +2490,22 @@ impl LayoutState {
             }
             None => (g.y0 as f32, (g.y1 - g.y0) as f32),
         };
+        let (x, y, width, height) = slice_rect(
+            &geo,
+            s,
+            (
+                pl.x_offset + g.x0 as f32,
+                caret_top - top,
+                (g.x1 - g.x0) as f32,
+                caret_height,
+            ),
+        );
         Some(CaretRect {
             page,
-            x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
-            y: geo.margins.top + s.y + (caret_top - top),
-            width: (g.x1 - g.x0) as f32,
-            height: caret_height,
+            x,
+            y,
+            width,
+            height,
         })
     }
 
@@ -2330,12 +2524,22 @@ impl LayoutState {
         let (page, s, top) = self.page_and_slice(para, line)?;
         let geo = self.page_geometry(page);
         let line_box = pl.lines.get(line)?;
+        let (x, y, width, height) = slice_rect(
+            &geo,
+            s,
+            (
+                pl.x_offset + g.x0 as f32,
+                line_box.top - top,
+                0.0,
+                line_box.height,
+            ),
+        );
         Some(CaretRect {
             page,
-            x: geo.margins.left + s.x + pl.x_offset + g.x0 as f32,
-            y: geo.margins.top + s.y + (line_box.top - top),
-            width: 0.0,
-            height: line_box.height,
+            x,
+            y,
+            width,
+            height,
         })
     }
 
@@ -2350,12 +2554,18 @@ impl LayoutState {
         line_top: f32,
         line_bottom: f32,
         direction: i32,
+        upright: bool,
     ) -> Option<f32> {
         let pg = self.pages.get(page)?;
-        let geo = pg.geometry;
+        // Upright slices are on the sheet, so their neighbours are looked for there.
+        let geo = if upright {
+            pg.geometry.untransposed()
+        } else {
+            pg.geometry
+        };
         // (holds x, distance from the current line, middle)
         let mut best: Option<(bool, f32, f32)> = None;
-        for s in &pg.slices {
+        for s in pg.slices.iter().filter(|s| s.upright == upright) {
             let Some(pl) = self.paragraph_layout(s.para) else {
                 continue;
             };
@@ -2426,15 +2636,30 @@ impl LayoutState {
                 continue;
             }
             let geo = self.page_geometry(page);
+            let (x, y, width, height) = slice_rect(
+                &geo,
+                s,
+                (
+                    pl.x_offset + rect.x0 as f32,
+                    rect.y0 as f32 - top,
+                    width,
+                    height,
+                ),
+            );
             out.push(SelectionRect {
                 page,
-                x: geo.margins.left + s.x + pl.x_offset + rect.x0 as f32,
-                y: geo.margins.top + s.y + (rect.y0 as f32 - top),
+                x,
+                y,
                 width,
                 height,
             });
         }
         out
+    }
+
+    /// Whether paragraph `index` is in a table kept upright on a vertical page.
+    pub fn paragraph_is_upright(&self, index: usize) -> bool {
+        self.paragraphs.get(index).is_some_and(|p| p.upright)
     }
 
     /// Page index, page slice and the slice's first-line top for a paragraph line.
@@ -2471,6 +2696,24 @@ impl LayoutState {
         }
         None
     }
+}
+
+/// A rectangle given relative to a slice's text (x along the line, y down from the slice's
+/// first line), as it lies on the layout page `geo`. A slice of an upright table is on the
+/// sheet, so its rectangle is turned back the other way: the sheet point (x, y) is the layout
+/// point (y, sheet width - x), which the app turns to the sheet again.
+fn slice_rect(
+    geo: &PageGeometry,
+    s: &ParaSlice,
+    (x, y, w, h): (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    if !s.upright {
+        return (geo.margins.left + s.x + x, geo.margins.top + s.y + y, w, h);
+    }
+    let sheet = geo.untransposed();
+    let sx = sheet.margins.left + s.x + x;
+    let sy = sheet.margins.top + s.y + y;
+    (sy, sheet.width_pt - sx - w, h, w)
 }
 
 /// Where a line's text ends, measured from the positioned glyph runs: justified lines are
@@ -2696,6 +2939,7 @@ fn layout_table_row(
         header,
         bottom: last_row && table.borders.outer,
         sides: table.borders.outer,
+        upright: false,
     };
     let Some(row) = table.rows.get(row_index) else {
         return LaidRow {
@@ -2818,6 +3062,7 @@ fn layout_table_row(
                         y: line_y,
                         col,
                         x: cell_x + margin,
+                        upright: false,
                     });
                 }
             }
@@ -2927,6 +3172,7 @@ fn note_block_height(eng: &mut Engine, notes: &[PageNote], width: f32) -> f32 {
 fn build_page(
     paras: &[ParagraphSnapshot],
     tables: &[TableSnapshot],
+    upright: &[bool],
     row_at: &HashMap<usize, (usize, usize)>,
     eng: &mut Engine,
     geo: &PageGeometry,
@@ -2964,6 +3210,7 @@ fn build_page(
         if col == 0
             && let Some(&(table_index, row_index)) = row_at.get(&p)
             && let Some(table) = tables.get(table_index)
+            && !upright.get(table_index).copied().unwrap_or(false)
         {
             let headers = usize::from(table.header_rows).min(row_index);
             for header in 0..headers {
@@ -2991,6 +3238,61 @@ fn build_page(
                     l = 0;
                     continue;
                 };
+                if upright.get(table_index).copied().unwrap_or(false) {
+                    // An upright table: laid out on the sheet's own frame as horizontal
+                    // rows, as wide as the table is (at most the sheet's width) along the
+                    // flow, and as many rows as the column holds across it.
+                    let sheet_width = geo.content_height();
+                    let total: f32 = table.widths_pt.iter().sum();
+                    let flow = total.min(sheet_width).max(1.0);
+                    if y > EPS && y + flow > page_h + EPS {
+                        filled = true;
+                        break;
+                    }
+                    let left = (sheet_width - (y + flow)).max(0.0);
+                    let mut cross = 0.0f32;
+                    let mut row = row_index;
+                    let mut next = p;
+                    while row < table.rows.len() {
+                        let mut laid = layout_table_row(
+                            paras,
+                            eng,
+                            table,
+                            row,
+                            left,
+                            flow,
+                            x + cross,
+                            col as u16,
+                            false,
+                            0.0,
+                            None,
+                            false,
+                        );
+                        if row > row_index && cross + laid.height > width + EPS {
+                            break;
+                        }
+                        cross += laid.height;
+                        for s in &mut laid.slices {
+                            s.upright = true;
+                        }
+                        laid.draw.upright = true;
+                        slices.extend(laid.slices);
+                        page_tables.push(laid.draw);
+                        next = table.rows[row]
+                            .cells
+                            .iter()
+                            .flat_map(|cell| cell.paragraphs.iter())
+                            .copied()
+                            .max()
+                            .map_or(next + 1, |last| last + 1);
+                        row += 1;
+                    }
+                    y += flow;
+                    used = used.max(y);
+                    p = next;
+                    l = 0;
+                    continue;
+                }
                 let after_row = table.rows[row_index]
                     .cells
                     .iter()
@@ -3109,6 +3411,7 @@ fn build_page(
                     y: y_start,
                     col: col as u16,
                     x,
+                    upright: false,
                 });
             } else {
                 y = y_before;

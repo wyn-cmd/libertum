@@ -10,12 +10,13 @@ shortcut tests, unless the row says otherwise.
 
 | Action | Route |
 |---|---|
-| Open, Save, Save As | Cmd/Ctrl+O, Cmd/Ctrl+S, Cmd/Ctrl+Shift+S |
+| New (template picker), Open, Save, Save As | Cmd/Ctrl+N, Cmd/Ctrl+O, Cmd/Ctrl+S, Cmd/Ctrl+Shift+S |
 | Find & Replace | Cmd/Ctrl+F (bar), Enter/Next, Shift+Enter/Previous, F3 and Cmd/Ctrl+G forward, Shift+F3 and Cmd/Ctrl+Shift+G back |
 | Settings | Cmd/Ctrl+, |
 | Bold, italic, underline | Cmd/Ctrl+B, I, U |
 | Superscript, subscript | Cmd/Ctrl+Shift+=, Cmd/Ctrl+= |
 | Alignment | Ctrl+L, E, R, J (Cmd+{, |, } on macOS) |
+| Heading 1 to 4, body text | Cmd/Ctrl+Alt+1 to 4, Cmd/Ctrl+Alt+0 |
 | Page break | Cmd/Ctrl+Enter |
 | Sidebar toggle | Cmd/Ctrl+Alt+I |
 | Full screen | F11 (Ctrl+Cmd+F on macOS); Escape leaves it when nothing else is open |

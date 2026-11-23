@@ -79,7 +79,14 @@ pub(crate) fn build(
     }
     let (document_part, media) =
         document_xml(document, &extras, &note_ids, &table_styles, toc_pages);
-    let mut styles_part = styles_xml(&document.styles, &table_styles);
+    let mut styles_part = styles_xml(
+        &document.styles,
+        &table_styles,
+        document
+            .sections
+            .first()
+            .and_then(|section| section.language.as_deref()),
+    );
     if let Some(toc_styles) = toc_styles_xml(document)
         && let Some(end) = styles_part.rfind("</w:styles>")
     {
@@ -124,6 +131,13 @@ pub(crate) fn build(
     };
     add_media(&mut package, &media);
     header_edits.apply(&mut package);
+    crate::headers::set_language2(
+        &mut package,
+        document
+            .sections
+            .first()
+            .and_then(|section| section.language2.as_deref()),
+    );
 
     if !package.contains("docProps/core.xml") {
         package.set_text("docProps/core.xml", core_properties());
@@ -873,13 +887,16 @@ fn paragraph_xml(
         Image(&'a InlineImage),
         FieldBegin(String),
         FieldEnd,
+        /// A reading over the text up to the matching `RubyEnd`.
+        RubyBegin(&'a str),
+        RubyEnd,
     }
     /// Closing a field comes before anything else at its offset and opening one after, so
     /// adjacent references never nest and a picture at a boundary stays outside the field.
     fn priority(anchor: &Anchor<'_>) -> u8 {
         match anchor {
-            Anchor::FieldEnd => 0,
-            Anchor::FieldBegin(_) => 2,
+            Anchor::FieldEnd | Anchor::RubyEnd => 0,
+            Anchor::FieldBegin(_) | Anchor::RubyBegin(_) => 2,
             _ => 1,
         }
     }
@@ -907,6 +924,11 @@ fn paragraph_xml(
                 escape_text(instruction)
             ),
             Anchor::FieldEnd => "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>".to_owned(),
+            Anchor::RubyBegin(reading) => format!(
+                "<w:r><w:ruby><w:rubyPr><w:rubyAlign w:val=\"distributeSpace\"/><w:hps w:val=\"10\"/><w:hpsRaise w:val=\"18\"/><w:hpsBaseText w:val=\"21\"/><w:lid w:val=\"ja-JP\"/></w:rubyPr><w:rt><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:rt><w:rubyBase>",
+                escape_text(reading)
+            ),
+            Anchor::RubyEnd => "</w:rubyBase></w:ruby></w:r>".to_owned(),
         }
     }
     let mut anchors: Vec<(usize, Anchor)> = references
@@ -936,6 +958,15 @@ fn paragraph_xml(
             Anchor::FieldBegin(cross_ref_instruction(&cross_ref.target, cross_ref.kind)),
         ));
         anchors.push((end, Anchor::FieldEnd));
+    }
+    for ruby in paragraph.ruby() {
+        let end = ruby.range.end.min(text.len());
+        let start = ruby.range.start.min(end);
+        if start == end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        anchors.push((start, Anchor::RubyBegin(ruby.text.as_str())));
+        anchors.push((end, Anchor::RubyEnd));
     }
     anchors.sort_by_key(|(offset, anchor)| (*offset, priority(anchor)));
     let mut pending_ends: Vec<u32> = Vec::new();
@@ -1555,6 +1586,10 @@ fn sect_pr(section: &Section, extra: &SectionExtras) -> String {
         }
         None => {}
     }
+    // Vertical text, right to left. CT_SectPr puts it after titlePg and before docGrid.
+    if section.vertical {
+        out.push_str("<w:textDirection w:val=\"tbRl\"/>");
+    }
     if let Some((name, attrs)) = extra.elements.iter().find(|(name, _)| name == "docGrid") {
         emit(&mut out, name, attrs);
     }
@@ -1699,7 +1734,7 @@ fn table_style_xml(def: &TableStyleDef) -> String {
 
 // ------------------------------------------------------------------ styles.xml
 
-fn styles_xml(styles: &StyleSheet, table_styles: &TableStyles) -> String {
+fn styles_xml(styles: &StyleSheet, table_styles: &TableStyles, language: Option<&str>) -> String {
     let mut out = String::with_capacity(4096);
     out.push_str(XML_DECL);
     out.push_str(&format!("<w:styles xmlns:w=\"{W_NS}\">"));
@@ -1719,6 +1754,11 @@ fn styles_xml(styles: &StyleSheet, table_styles: &TableStyles) -> String {
         letter_spacing_pt: Some(defaults.letter_spacing_pt),
         ligatures: None,
     }));
+    // The document's language; the tag came through `language_tag`, so it is safe to print.
+    // `w:lang` is the last child Libertum writes here, as the schema's order wants.
+    if let Some(language) = language {
+        out.push_str(&format!("<w:lang w:val=\"{language}\"/>"));
+    }
     out.push_str("</w:rPr></w:rPrDefault>");
     let para_defaults = &styles.para_defaults;
     let defaults_format = ParaFormat {

@@ -1352,3 +1352,124 @@ fn merged_steps_undo_and_redo_as_one() {
     h.redo(&mut doc).unwrap();
     assert!(doc.content_eq(&after), "one redo repeats it");
 }
+
+// ---------------------------------------------------------------- language tags
+
+#[test]
+fn language_tags_are_normalised_and_unsafe_ones_refused() {
+    for (raw, expected) in [
+        ("en-GB", Some("en-GB")),
+        ("EN-gb", Some("en-GB")),
+        ("en_US", Some("en-US")),
+        ("en", Some("en")),
+        (" fr-CA ", Some("fr-CA")),
+        ("zh-hant-TW", Some("zh-Hant-TW")),
+        ("es-419", Some("es-419")),
+        ("", None),
+        ("e", None),
+        ("english", None),
+        ("en-", None),
+        ("en-GB\"><script>", None),
+        ("en-GB-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
+    ] {
+        assert_eq!(language_tag(raw).as_deref(), expected, "{raw:?}");
+    }
+}
+
+// ---------------------------------------------------------------- word count
+
+#[test]
+fn words_are_counted_the_way_word_counts_them() {
+    for (text, expected) in [
+        ("", 0),
+        ("   ", 0),
+        ("one two  three", 3),
+        ("Hello, world!", 2),
+        // Each ideograph and each kana is a word; punctuation is not.
+        ("你好，世界。", 4),
+        ("こんにちは", 5),
+        ("吾輩は猫である。", 7),
+        // Hangul is counted by its space-separated words.
+        ("안녕하세요", 1),
+        ("동해물과 백두산이 마르고", 3),
+        // Mixed: Latin words and East Asian characters count together.
+        ("Hello世界", 3),
+        ("Mixed English and 中文 and 한국어", 7),
+        ("世界 world", 3),
+        ("「括弧」（全角）", 4),
+        // A dash on its own is still a word, as it always was.
+        ("a — b", 3),
+        // Full-width letters and digits are words, not punctuation.
+        ("ＡＢＣ １２３", 2),
+    ] {
+        assert_eq!(count_words(text), expected, "{text:?}");
+    }
+}
+
+#[test]
+fn a_paragraph_and_a_document_count_east_asian_text() {
+    let doc = doc_with(&["你好，世界", "two words", ""]);
+    assert_eq!(doc.word_count(), 4 + 2);
+    let mut edited = doc;
+    edited
+        .apply(Operation::InsertText {
+            block: BlockId(1),
+            offset: 0,
+            text: "再见".into(),
+            format: None,
+        })
+        .expect("insert");
+    assert_eq!(
+        edited.word_count(),
+        6 + 2,
+        "the running count follows edits"
+    );
+}
+
+#[test]
+fn ruby_follows_edits_to_its_paragraph() {
+    let mut p = Paragraph::new(BlockId(1), "abcdefgh");
+    p.set_ruby(vec![Ruby::new(2..5, "xyz")]);
+    // Text before moves it; text at an edge stays outside; text inside grows it.
+    p.insert_text(0, "__");
+    assert_eq!(p.ruby()[0].range, 4..7);
+    p.insert_text(4, "-");
+    assert_eq!(p.ruby()[0].range, 5..8);
+    p.insert_text(6, "+");
+    assert_eq!(p.ruby()[0].range, 5..9);
+    // Deleting all of the base removes the reading; deleting part shrinks it.
+    p.delete_range(6..8);
+    assert_eq!(p.ruby()[0].range, 5..7);
+    p.delete_range(0..9);
+    assert!(p.ruby().is_empty());
+    // A split keeps the reading with the part holding its start, and a merge brings it back.
+    let mut q = Paragraph::new(BlockId(2), "abcdefgh");
+    q.set_ruby(vec![Ruby::new(1..3, "ab"), Ruby::new(5..7, "cd")]);
+    let tail = q.split_off(4, BlockId(3), None);
+    assert_eq!(q.ruby().len(), 1);
+    assert_eq!(tail.ruby()[0].range, 1..3);
+    q.append(tail);
+    assert_eq!(q.ruby().len(), 2);
+    assert_eq!(q.ruby()[1].range, 5..7);
+}
+
+#[test]
+fn ruby_ranges_are_normalised_and_undone() {
+    let mut doc = doc_with(&["漢字を読む"]);
+    let id = doc.paragraph_at(0).unwrap().id;
+    let inverse = doc
+        .apply(Operation::SetRuby {
+            block: id,
+            // The second overlaps the first and an empty reading is dropped; the third
+            // starts inside a character.
+            ruby: vec![
+                Ruby::new(0..6, "かんじ"),
+                Ruby::new(3..9, "xx"),
+                Ruby::new(10..14, ""),
+            ],
+        })
+        .expect("set");
+    assert_eq!(doc.paragraph_at(0).unwrap().ruby().len(), 1);
+    doc.apply(inverse).expect("undo");
+    assert!(doc.paragraph_at(0).unwrap().ruby().is_empty());
+}

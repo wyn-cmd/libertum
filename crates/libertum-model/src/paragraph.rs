@@ -11,6 +11,7 @@ use crate::format::{CharFormat, ParaFormat, StyleId};
 use crate::lists::ListItem;
 use crate::media::{CrossRef, InlineImage};
 use crate::note::{Note, NoteKind};
+use crate::ruby::Ruby;
 
 /// Stable identity of a block for the lifetime of a document.
 ///
@@ -136,6 +137,10 @@ pub struct Paragraph {
     /// both. Sorted by start, non-overlapping, never empty.
     #[serde(default)]
     date_fields: Vec<DateTimeField>,
+    /// Ruby: readings set beside ranges of this paragraph's text (furigana, pinyin).
+    /// Sorted by start, non-overlapping, never empty.
+    #[serde(default)]
+    ruby: Vec<Ruby>,
 }
 
 impl Paragraph {
@@ -151,6 +156,7 @@ impl Paragraph {
             images: Vec::new(),
             cross_refs: Vec::new(),
             date_fields: Vec::new(),
+            ruby: Vec::new(),
         }
     }
 
@@ -277,6 +283,26 @@ impl Paragraph {
             .find(|f| f.range.start <= offset && offset < f.range.end)
     }
 
+    /// Ruby in this paragraph, sorted by start.
+    pub fn ruby(&self) -> &[Ruby] {
+        &self.ruby
+    }
+
+    /// Replaces the ruby and returns the old list. Ranges are clamped to the text and snapped
+    /// to character boundaries; empty ranges, readings with no text and overlaps are dropped.
+    pub fn set_ruby(&mut self, ruby: Vec<Ruby>) -> Vec<Ruby> {
+        let ruby = normalise_ruby(&self.text, ruby);
+        self.version += 1;
+        std::mem::replace(&mut self.ruby, ruby)
+    }
+
+    /// The ruby whose base text covers byte `offset`, if any.
+    pub fn ruby_at(&self, offset: usize) -> Option<&Ruby> {
+        self.ruby
+            .iter()
+            .find(|r| r.range.start <= offset && offset < r.range.end)
+    }
+
     /// The first bookmark with `name` (Word names are case-insensitive).
     pub fn bookmark(&self, name: &str) -> Option<&Bookmark> {
         self.bookmarks
@@ -330,7 +356,7 @@ impl Paragraph {
     }
 
     pub fn word_count(&self) -> usize {
-        self.text.split_whitespace().count()
+        count_words(&self.text)
     }
 
     /// Structural equality: same id, text, runs and props. The edit `version` is a cache key,
@@ -355,6 +381,7 @@ impl Paragraph {
             && self.images == other.images
             && self.cross_refs == other.cross_refs
             && self.date_fields == other.date_fields
+            && self.ruby == other.ruby
     }
 
     /// Inserts `text` at byte offset `at`, keeping runs consistent, and bumps the version.
@@ -409,6 +436,7 @@ impl Paragraph {
             }
         }
         grow_or_move_date_fields(&mut self.date_fields, at, n);
+        grow_or_move_ruby(&mut self.ruby, at, n);
         self.version += 1;
     }
 
@@ -677,6 +705,10 @@ impl Paragraph {
             f.range = moved(f.range.start)..moved(f.range.end);
         }
         self.date_fields.retain(|f| f.range.start < f.range.end);
+        for r in &mut self.ruby {
+            r.range = moved(r.range.start)..moved(r.range.end);
+        }
+        self.ruby.retain(|r| r.range.start < r.range.end);
         self.version += 1;
         (removed, removed_runs)
     }
@@ -781,6 +813,19 @@ impl Paragraph {
             }
         }
         self.date_fields = head_fields;
+        // And ruby: the part before the split keeps the reading.
+        let mut head_ruby = Vec::new();
+        let mut tail_ruby = Vec::new();
+        for mut r in std::mem::take(&mut self.ruby) {
+            if r.range.start >= at {
+                r.range = r.range.start - at..r.range.end - at;
+                tail_ruby.push(r);
+            } else {
+                r.range.end = r.range.end.min(at);
+                head_ruby.push(r);
+            }
+        }
+        self.ruby = head_ruby;
         Paragraph {
             id: new_id,
             version: 0,
@@ -792,6 +837,7 @@ impl Paragraph {
             images: tail_images,
             cross_refs: tail_refs,
             date_fields: tail_fields,
+            ruby: tail_ruby,
         }
     }
 
@@ -826,6 +872,10 @@ impl Paragraph {
             f.range = f.range.start + boundary..f.range.end + boundary;
         }
         self.date_fields.extend(other.date_fields);
+        for r in &mut other.ruby {
+            r.range = r.range.start + boundary..r.range.end + boundary;
+        }
+        self.ruby.extend(other.ruby);
         self.runs.append(&mut other.runs);
         self.runs = normalise_runs(self.text.len(), std::mem::take(&mut self.runs));
         self.version += 1;
@@ -960,6 +1010,40 @@ fn grow_or_move_date_fields(fields: &mut [DateTimeField], at: usize, n: usize) {
     }
 }
 
+/// Keeps ruby inside the text, sorted and non-overlapping, with a reading each.
+fn normalise_ruby(text: &str, mut ruby: Vec<Ruby>) -> Vec<Ruby> {
+    let len = text.len();
+    for r in &mut ruby {
+        let start = floor_char_boundary(text, r.range.start.min(len));
+        let end = ceil_char_boundary(text, r.range.end.min(len).max(start));
+        r.range = start..end;
+    }
+    ruby.retain(|r| r.range.start < r.range.end && !r.text.is_empty());
+    ruby.sort_by_key(|r| r.range.start);
+    let mut out: Vec<Ruby> = Vec::with_capacity(ruby.len());
+    for r in ruby {
+        if let Some(last) = out.last()
+            && r.range.start < last.range.end
+        {
+            continue;
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// Text typed inside ruby's base grows it; text at either edge stays outside.
+fn grow_or_move_ruby(ruby: &mut [Ruby], at: usize, n: usize) {
+    for r in ruby {
+        if at <= r.range.start {
+            r.range.start += n;
+            r.range.end += n;
+        } else if at < r.range.end {
+            r.range.end += n;
+        }
+    }
+}
+
 fn normalise_cross_refs(text: &str, mut refs: Vec<CrossRef>) -> Vec<CrossRef> {
     for r in &mut refs {
         let start = floor_char_boundary(text, r.range.start);
@@ -1013,4 +1097,57 @@ pub fn ceil_char_boundary(text: &str, mut at: usize) -> usize {
         at += 1;
     }
     at
+}
+
+/// Counts the words in `text` the way Word does: words are separated by white space, but each
+/// Han ideograph and each kana is a word by itself (Chinese and Japanese have no spaces),
+/// while Hangul is counted by its space-separated words like any alphabetic script. CJK
+/// punctuation and full-width forms are not words; they separate the words around them.
+pub fn count_words(text: &str) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+    for c in text.chars() {
+        if c.is_whitespace() || is_east_asian_punctuation(c) {
+            in_word = false;
+        } else if is_ideograph_or_kana(c) {
+            count += 1;
+            in_word = false;
+        } else if !in_word {
+            count += 1;
+            in_word = true;
+        }
+    }
+    count
+}
+
+/// A Han ideograph or a kana: counted one by one, since nothing separates them.
+pub fn is_ideograph_or_kana(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x3005 | 0x3007
+            | 0x3021..=0x3029
+            | 0x3038..=0x303B
+            | 0x3041..=0x30FF
+            | 0x31F0..=0x31FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xFF66..=0xFF9F
+            | 0x1B000..=0x1B16F
+            | 0x20000..=0x2EBEF
+            | 0x2F800..=0x2FA1F
+            | 0x30000..=0x323AF
+    )
+}
+
+/// CJK punctuation, vertical forms and full-width ASCII punctuation (not full-width letters
+/// and digits, which are words like any others).
+fn is_east_asian_punctuation(c: char) -> bool {
+    match u32::from(c) {
+        // Ideographic space and punctuation, minus the ideographs and marks that are letters.
+        0x3000..=0x3004 | 0x3008..=0x3020 | 0x302A..=0x3037 | 0x303C..=0x303F => true,
+        0xFE30..=0xFE4F | 0xFF01..=0xFF0F | 0xFF1A..=0xFF20 | 0xFF3B..=0xFF40 => true,
+        0xFF5B..=0xFF65 | 0xFFE0..=0xFFEE => true,
+        _ => false,
+    }
 }

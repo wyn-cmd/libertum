@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -36,12 +36,15 @@ swash = "0.2"
 tiny-skia = "0.12"
 vello = "0.7"  # 0.7 is the last vello on wgpu 27, which iced_wgpu 0.14 uses (vello 0.11 needs wgpu 30)
 unicode-segmentation = "1"
+# Word boundaries in Chinese and Japanese text come from a dictionary (cjdict), which ICU4X ships
+# as compiled data; parley already depends on the same crate. Unicode-3.0 licence.
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
 # Text comparison for "compare with last posted" (Apache-2.0, no dependencies with the
 # default features). See docs/decisions.md.
 similar = "3.2.1"
 # Hyphenation (MIT OR Apache-2.0). Only languages whose embedded TeX patterns carry a
 # permissive licence are enabled; see docs/third-party-licences.md.
-hypher = { version = "0.1.8", default-features = false, features = ["alloc", "english"] }
+hypher = { version = "0.1.8", default-features = false, features = ["alloc", "english", "ukrainian"] }
 
 # Formats
 # Pure-Rust deflate only: no C toolchain is needed to cross-check macOS.
@@ -82,7 +85,10 @@ toml = "0.9"
 directories = "6"
 # Spellchecking with Hunspell-format dictionaries. Apache-2.0, and the bundled SCOWL
 # dictionaries are permissive; see docs/third-party-licences.md and the spell module.
-zspell = { version = "0.5.5", features = ["unstable-suggestions"] }
+# Hunspell-compatible spelling (MPL-2.0, file-level copyleft: the crate is used unmodified).
+# Replaced zspell on 2026-11-23: English fits in 3 MB instead of 45 MB, Russian loads in 16 MB
+# (zspell: 435 MB) and Ukrainian loads at all (zspell cannot parse its affix file).
+spellbook = "0.4"
 
 # MCP server (dev mode, docs/mcp-plan.md). rmcp is Apache-2.0; tokio and axum are MIT;
 # getrandom is MIT OR Apache-2.0. tokio runs on libertum-mcp's own thread only: the app's

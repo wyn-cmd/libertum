@@ -437,6 +437,11 @@ impl PageSize {
     }
 }
 
+choice_enum!(TextDirection {
+    Horizontal => s::TEXT_HORIZONTAL,
+    Vertical => s::TEXT_VERTICAL,
+});
+
 choice_enum!(Orientation {
     Portrait => s::ORIENT_PORTRAIT,
     Landscape => s::ORIENT_LANDSCAPE,
@@ -706,6 +711,12 @@ impl NumberingHorizontal {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentState {
+    /// The text runs vertically, in columns from the right.
+    pub vertical: bool,
+    /// The language the open document is written in (spelling follows it).
+    pub language: crate::language::DocLanguage,
+    /// The document's second language, if it has one.
+    pub language2: Option<crate::language::DocLanguage>,
     pub page_size: Mixed<PageSize>,
     pub orientation: Mixed<Orientation>,
     pub margin_top: Mixed<Margin>,
@@ -759,6 +770,9 @@ pub struct DocumentState {
 impl Default for DocumentState {
     fn default() -> Self {
         Self {
+            vertical: false,
+            language: crate::language::DocLanguage::default(),
+            language2: None,
             page_size: Mixed::Value(PageSize::A4),
             orientation: Mixed::Value(Orientation::Portrait),
             margin_top: Mixed::Value(Margin(254)),
@@ -1054,6 +1068,11 @@ pub struct ImageEntry {
     pub index: usize,
     pub width_pt: f32,
     pub alt: String,
+    /// The online address this picture stands for, when it is a link.
+    pub link: Option<libertum_model::MediaLink>,
+    /// A preview can be downloaded for it (a picture, or a video whose site gives a
+    /// thumbnail address).
+    pub previewable: bool,
 }
 
 /// Duration of the inspector slide animation.
@@ -1094,8 +1113,19 @@ pub struct AppState {
     pub column_width_pt: Option<f32>,
     /// The open document is a Markdown file: controls Markdown cannot store are hidden.
     pub markdown: bool,
+    /// The format the document will be saved in keeps a page colour / a watermark. When it
+    /// does not, those controls are hidden rather than explained.
+    pub keeps_page_colour: bool,
+    pub keeps_watermark: bool,
+    /// The format keeps vertical text (Libertum, Word and OpenDocument files do).
+    pub keeps_vertical: bool,
+    /// The file's format can store ruby.
+    pub keeps_ruby: bool,
     /// Inline images of the caret's paragraph.
     pub images: Vec<ImageEntry>,
+    /// The reading over the selected text, when the Ruby group applies (a selection in one
+    /// paragraph, or the caret in ruby) and the file format can keep it.
+    pub ruby: Option<String>,
     /// The Find & Replace bar.
     pub find: FindState,
     /// Text being typed into a stepper, shown instead of the formatted value.
@@ -1149,7 +1179,12 @@ impl Default for AppState {
             column_width_pt: None,
             find: FindState::default(),
             markdown: false,
+            keeps_page_colour: true,
+            keeps_watermark: true,
+            keeps_vertical: true,
+            keeps_ruby: true,
             images: Vec::new(),
+            ruby: None,
             editing: None,
             units: Units::Centimetres,
             zoom: Zoom::Percent(100),

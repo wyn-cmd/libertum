@@ -621,7 +621,7 @@ fn from_document_matches_snapshot_layout() {
         .body()
         .iter()
         .filter_map(|b| b.as_paragraph())
-        .map(|p| ParagraphSnapshot::from_model(p, &doc.styles))
+        .map(|p| ParagraphSnapshot::from_model(p, &doc.styles, None))
         .collect();
     let mut from_snaps = LayoutState::new(PageGeometry::a4(), snaps, LayoutOptions::default());
     from_snaps.paginate_all();
@@ -1742,7 +1742,7 @@ fn table_state(rows: usize, columns: usize, cell_text: &str, width: f32) -> Layo
         .expect("insert table");
     let paragraphs: Vec<ParagraphSnapshot> = doc
         .paragraphs()
-        .map(|p| ParagraphSnapshot::from_model(p, &doc.styles))
+        .map(|p| ParagraphSnapshot::from_model(p, &doc.styles, None))
         .collect();
     let mut state = LayoutState::new(PageGeometry::a4(), paragraphs, LayoutOptions::default());
     state.set_tables(table_snapshots(&doc));
@@ -2565,4 +2565,596 @@ fn the_automatic_thread_count_stops_at_four_and_an_explicit_one_is_honoured() {
     assert_eq!(with(1).worker_count(10_000), 1);
     assert_eq!(with(4).worker_count(10_000), 4);
     assert_eq!(with(64).worker_count(10_000), MAX_LAYOUT_THREADS);
+}
+
+/// The font files each paragraph's glyph runs were drawn with, all shaped in one state: a
+/// font's id is only comparable within the engine that loaded it.
+fn fonts_used(snapshots: Vec<ParagraphSnapshot>) -> Vec<Vec<(u64, u32)>> {
+    let count = snapshots.len();
+    let state = LayoutState::new(PageGeometry::a4(), snapshots, LayoutOptions::default());
+    (0..count)
+        .map(|index| {
+            let layout = state.paragraph_layout(index).expect("layout");
+            let mut fonts = Vec::new();
+            for line in layout.layout.lines() {
+                for item in line.items() {
+                    if let parley::PositionedLayoutItem::GlyphRun(run) = item {
+                        let font = run.run().font();
+                        fonts.push((font.data.id(), font.index));
+                    }
+                }
+            }
+            fonts
+        })
+        .collect()
+}
+
+fn han(id: u64, text: &str, locale: Option<&'static str>) -> ParagraphSnapshot {
+    let mut p = ParagraphSnapshot::new(id, text);
+    p.locale = locale;
+    p
+}
+
+#[test]
+fn the_document_language_picks_the_regional_font_for_han_text() {
+    // 直 and 骨 are drawn differently in Chinese and Japanese fonts. With no kana or Hangul
+    // in the paragraph the document language decides.
+    let fonts = fonts_used(vec![
+        han(0, "直骨海角", Some("ja")),
+        han(1, "直骨海角", Some("zh-CN")),
+        han(2, "直骨海角", Some("zh-TW")),
+        han(3, "直骨海角", None),
+    ]);
+    let (japanese, chinese, traditional, default) = (&fonts[0], &fonts[1], &fonts[2], &fonts[3]);
+    assert!(!japanese.is_empty() && !chinese.is_empty());
+    if japanese == chinese && chinese == traditional {
+        eprintln!("skipped: this machine has no separate Japanese and Chinese fonts");
+        return;
+    }
+    assert_ne!(
+        japanese, chinese,
+        "Japanese and Chinese forms use different fonts"
+    );
+    // No hint at all is Simplified Chinese, as the document default.
+    assert_eq!(default, chinese);
+}
+
+#[test]
+fn kana_and_hangul_settle_the_language_without_a_hint() {
+    // One kana makes the paragraph Japanese, so its ideographs get the Japanese font even
+    // in a document set to Chinese; one Hangul syllable makes it Korean.
+    let fonts = fonts_used(vec![
+        han(0, "直骨海角の", Some("zh-CN")),
+        han(1, "直骨海角の", Some("ja")),
+        han(2, "直骨海角", Some("zh-CN")),
+    ]);
+    assert_eq!(fonts[0], fonts[1]);
+    if fonts[0] == fonts[2] {
+        eprintln!("skipped part: no separate Japanese and Chinese fonts");
+        return;
+    }
+    assert_ne!(fonts[0], fonts[2]);
+}
+
+#[test]
+fn english_hyphenation_leaves_east_asian_and_other_scripts_alone() {
+    let mut p = ParagraphSnapshot::new(
+        0,
+        "한국어단어가매우길어서 日本語の長い文章です Привет, мир! extraordinarily",
+    );
+    p.hyphenate = true;
+    let state = LayoutState::new(PageGeometry::a4(), vec![p], LayoutOptions::default());
+    let layout = state.paragraph_layout(0).expect("layout");
+    // Only the English word can be broken at syllables.
+    assert!(layout.hyphen_lines.len() <= 1);
+}
+
+fn vertical_document(paragraphs: usize) -> libertum_model::Document {
+    let text = "縦書きの日本語の文章です。".repeat(60);
+    let mut document = libertum_model::Document::from_paragraphs(
+        (0..paragraphs)
+            .map(|i| {
+                libertum_model::Paragraph::new(libertum_model::BlockId(i as u64 + 1), text.clone())
+            })
+            .collect(),
+    );
+    for section in &mut document.sections {
+        section.vertical = true;
+    }
+    document
+}
+
+#[test]
+fn vertical_text_is_laid_out_on_the_page_turned_a_quarter_turn() {
+    let document = vertical_document(4);
+    let setup = document.page_setup();
+    let physical = PageGeometry::from_setup(&setup);
+    let mut state = LayoutState::from_document(&document, physical, LayoutOptions::default());
+    state.paginate_all();
+    assert!(state.is_vertical());
+    // The layout page is the real page turned: its width is the real height.
+    let layout = state.page_geometry(0);
+    assert_eq!(layout.width_pt, physical.height_pt);
+    assert_eq!(layout.height_pt, physical.width_pt);
+    assert_eq!(layout.margins.top, physical.margins.right);
+    assert_eq!(layout.margins.left, physical.margins.top);
+    // And the real page comes back unchanged.
+    assert_eq!(state.physical_page_geometry(0), physical);
+    // Lines are as long as the real page is tall, less its margins.
+    let widest = (0..state.paragraph_count())
+        .filter_map(|i| state.paragraph_layout(i))
+        .map(|pl| pl.layout.width())
+        .fold(0.0_f32, f32::max);
+    assert!(widest <= physical.content_height() + 0.5, "{widest}");
+    assert!(widest > physical.content_height() * 0.8, "{widest}");
+
+    // The same document set horizontally is the ordinary page.
+    let mut horizontal = document.clone();
+    for section in &mut horizontal.sections {
+        section.vertical = false;
+    }
+    let state = LayoutState::from_document(&horizontal, physical, LayoutOptions::default());
+    assert!(!state.is_vertical());
+    assert_eq!(state.page_geometry(0), physical);
+    assert_eq!(state.physical_page_geometry(0), physical);
+}
+
+#[test]
+fn a_pageless_view_is_never_vertical() {
+    let document = vertical_document(1);
+    let physical = PageGeometry::from_setup(&document.page_setup());
+    let mut state = LayoutState::from_document(&document, physical, LayoutOptions::default());
+    state.set_pageless(true);
+    assert!(!state.is_vertical());
+}
+
+/// The glyph ids of each paragraph's runs, shaped in one state.
+fn glyph_ids(snapshots: Vec<ParagraphSnapshot>) -> Vec<Vec<u32>> {
+    let count = snapshots.len();
+    let state = LayoutState::new(PageGeometry::a4(), snapshots, LayoutOptions::default());
+    (0..count)
+        .map(|index| {
+            let layout = state.paragraph_layout(index).expect("layout");
+            let mut ids = Vec::new();
+            for line in layout.layout.lines() {
+                for item in line.items() {
+                    if let parley::PositionedLayoutItem::GlyphRun(run) = item {
+                        ids.extend(run.positioned_glyphs().map(|g| g.id));
+                    }
+                }
+            }
+            ids
+        })
+        .collect()
+}
+
+#[test]
+fn vertical_text_uses_the_fonts_vertical_forms_of_punctuation() {
+    let make = |id: u64, vertical: bool| {
+        let mut p = ParagraphSnapshot::new(id, "「縦書き」、日本語。");
+        p.locale = Some("ja");
+        p.vertical = vertical;
+        p
+    };
+    let ids = glyph_ids(vec![make(0, false), make(1, true)]);
+    assert_eq!(ids[0].len(), ids[1].len());
+    if ids[0] == ids[1] {
+        eprintln!("skipped: the font on this machine has no vertical forms (`vert`)");
+        return;
+    }
+    // Same characters, different glyphs: the brackets, comma and full stop are turned.
+    let differing = ids[0].iter().zip(&ids[1]).filter(|(a, b)| a != b).count();
+    assert!(differing >= 2, "{differing} glyphs changed");
+}
+
+fn vertical_page_with_furniture() -> (LayoutState, PageGeometry) {
+    let mut document = vertical_document(1);
+    for section in &mut document.sections {
+        section.headers = libertum_model::HeadersFooters::with_default("Running head");
+        section.footers = libertum_model::HeadersFooters::with_default("Footer {page}");
+    }
+    let mut numbering = document.page_numbering();
+    numbering.show = true;
+    document.set_page_numbering(Some(numbering));
+    let sheet = PageGeometry::from_setup(&document.page_setup());
+    let mut state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+    state.paginate_all();
+    (state, sheet)
+}
+
+#[test]
+fn headers_footers_and_page_numbers_of_a_vertical_page_are_on_the_sheet() {
+    let (state, sheet) = vertical_page_with_furniture();
+    let on_sheet: Vec<(String, f32, f32)> = state
+        .page_decorations(0)
+        .into_iter()
+        .filter_map(|d| match d {
+            Decoration::Text {
+                text,
+                x,
+                y,
+                sheet: true,
+                ..
+            } => Some((text, x, y)),
+            _ => None,
+        })
+        .collect();
+    let find = |needle: &str| {
+        on_sheet
+            .iter()
+            .find(|(text, ..)| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is on the sheet: {on_sheet:?}"))
+    };
+    let header = find("Running head");
+    let footer = find("Footer");
+    // At the real top and bottom of the real (portrait) sheet, from its left margin.
+    assert!(header.2 < 60.0, "header y {}", header.2);
+    assert!(footer.2 > sheet.height_pt - 90.0, "footer y {}", footer.2);
+    assert!((header.1 - sheet.margins.left).abs() < 0.1);
+    assert!((footer.1 - sheet.margins.left).abs() < 0.1);
+    // The page number is on the sheet too, in the bottom margin by default.
+    let number = on_sheet
+        .iter()
+        .find(|(text, ..)| text == "1")
+        .expect("a page number on the sheet");
+    assert!(number.2 > sheet.height_pt - 80.0, "number y {}", number.2);
+    // Body text (the column text and its hyphens, if any) is not on the sheet.
+    assert!(
+        state
+            .page_decorations(0)
+            .iter()
+            .filter(|d| !matches!(d, Decoration::Text { sheet: true, .. }))
+            .all(|d| !matches!(d, Decoration::Text { text, .. } if text.contains("Running")))
+    );
+}
+
+#[test]
+fn a_tall_header_pushes_the_sheets_top_margin_and_so_the_layouts_left_one() {
+    let mut document = vertical_document(1);
+    let plain = {
+        let sheet = PageGeometry::from_setup(&document.page_setup());
+        let state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+        state.page_geometry(0)
+    };
+    for section in &mut document.sections {
+        section.headers = libertum_model::HeadersFooters::with_default(
+            "A running head long enough to wrap onto several lines of the sheet's width. "
+                .repeat(12),
+        );
+    }
+    let sheet = PageGeometry::from_setup(&document.page_setup());
+    let state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+    let with_header = state.page_geometry(0);
+    // The sheet's top is the layout page's left: that is what the header pushed.
+    assert!(with_header.margins.left > plain.margins.left + 20.0);
+    // Its right and bottom margins, and the sheet's own other sides, are untouched.
+    assert_eq!(with_header.margins.top, plain.margins.top);
+    assert_eq!(with_header.margins.right, plain.margins.right);
+    assert_eq!(with_header.margins.bottom, plain.margins.bottom);
+    assert_eq!(
+        state.physical_page_geometry(0).margins.top,
+        with_header.margins.left
+    );
+}
+
+#[test]
+fn horizontal_furniture_is_not_marked_as_on_the_sheet() {
+    let mut document = vertical_document(1);
+    for section in &mut document.sections {
+        section.vertical = false;
+        section.headers = libertum_model::HeadersFooters::with_default("Running head");
+    }
+    let sheet = PageGeometry::from_setup(&document.page_setup());
+    let mut state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+    state.paginate_all();
+    assert!(
+        state
+            .page_decorations(0)
+            .iter()
+            .all(|d| !matches!(d, Decoration::Text { sheet: true, .. }))
+    );
+}
+
+#[test]
+fn a_picture_in_vertical_text_is_laid_out_with_its_width_and_height_swapped() {
+    let red = std::sync::Arc::new(
+        libertum_model::Media::new(libertum_model::test_png_header(60, 20)).expect("header"),
+    );
+    let mut paragraph = libertum_model::Paragraph::new(libertum_model::BlockId(1), "");
+    paragraph.set_images(vec![libertum_model::InlineImage {
+        offset: 0,
+        media: red,
+        width_pt: 120.0,
+        height_pt: 40.0,
+        alt: String::new(),
+        name: String::new(),
+    }]);
+    let size_of = |vertical: bool| {
+        let mut document = libertum_model::Document::from_paragraphs(vec![paragraph.clone()]);
+        for section in &mut document.sections {
+            section.vertical = vertical;
+        }
+        let sheet = PageGeometry::from_setup(&document.page_setup());
+        let mut state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+        state.paginate_all();
+        state
+            .page_decorations(0)
+            .into_iter()
+            .find_map(|d| match d {
+                Decoration::Image { width, height, .. } => Some((width, height)),
+                _ => None,
+            })
+            .expect("a picture")
+    };
+    assert_eq!(size_of(false), (120.0, 40.0));
+    // Turned back onto the sheet this box is 120 wide and 40 tall: the picture's own shape.
+    assert_eq!(size_of(true), (40.0, 120.0));
+}
+
+#[test]
+fn a_snapshot_swaps_its_pictures_only_when_the_direction_changes() {
+    let mut p = ParagraphSnapshot::new(0, "x");
+    p.images.push(ImageSnapshot {
+        offset: 0,
+        width_pt: 30.0,
+        height_pt: 10.0,
+        media: std::sync::Arc::new(
+            libertum_model::Media::new(libertum_model::test_png_header(3, 1)).expect("header"),
+        ),
+    });
+    p.set_vertical(true);
+    p.set_vertical(true);
+    assert_eq!((p.images[0].width_pt, p.images[0].height_pt), (10.0, 30.0));
+    p.set_vertical(false);
+    assert_eq!((p.images[0].width_pt, p.images[0].height_pt), (30.0, 10.0));
+}
+
+#[test]
+fn text_columns_on_a_vertical_page_split_the_sheet_into_an_upper_and_a_lower_block() {
+    let mut document = vertical_document(6);
+    for section in &mut document.sections {
+        section.set_columns(2);
+    }
+    let sheet = PageGeometry::from_setup(&document.page_setup());
+    let mut state = LayoutState::from_document(&document, sheet, LayoutOptions::default());
+    state.paginate_all();
+    assert!(state.is_vertical());
+    let page = &state.pages()[0];
+    let upper: Vec<_> = page.slices.iter().filter(|s| s.col == 0).collect();
+    let lower: Vec<_> = page.slices.iter().filter(|s| s.col == 1).collect();
+    assert!(
+        !upper.is_empty() && !lower.is_empty(),
+        "both columns have text"
+    );
+    // The layout's x runs down the sheet, so the second column starts about half way down.
+    let half = state.page_geometry(0).content_width() / 2.0;
+    assert!(
+        upper.iter().all(|s| s.x < half),
+        "the first column is the upper block"
+    );
+    assert!(
+        lower.iter().all(|s| s.x >= half - 1.0),
+        "the second is the lower block"
+    );
+}
+
+fn vertical_table_state(
+    rows: usize,
+    columns: usize,
+    text: &str,
+    width: f32,
+) -> (LayoutState, PageGeometry) {
+    use libertum_model::{Operation, Paragraph};
+    let mut doc = libertum_model::Document::from_paragraphs(vec![
+        Paragraph::new(libertum_model::BlockId(1), "縦書きの前の文章です。"),
+        Paragraph::new(libertum_model::BlockId(2), "後の文章です。"),
+    ]);
+    for section in &mut doc.sections {
+        section.vertical = true;
+    }
+    let mut table = doc.new_table(rows, columns, width);
+    for row in &mut table.rows {
+        for cell in &mut row.cells {
+            for p in &mut cell.paragraphs {
+                p.insert_text(0, text);
+            }
+        }
+    }
+    doc.apply(Operation::InsertTable { index: 1, table })
+        .expect("insert table");
+    let physical = PageGeometry::from_setup(&doc.page_setup());
+    let mut state = LayoutState::from_document(&doc, physical, LayoutOptions::default());
+    state.paginate_all();
+    (state, physical)
+}
+
+#[test]
+fn a_table_on_a_vertical_page_stays_upright_on_the_sheet() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    let (state, physical) = vertical_table_state(3, 2, "Cell text", 300.0);
+    let page = &state.pages()[0];
+    assert!(!page.tables.is_empty());
+    assert!(page.tables.iter().all(|t| t.upright));
+    // Its cell text is horizontal: laid out at the cell's width, not the column's length.
+    let cell_slices: Vec<_> = page.slices.iter().filter(|s| s.upright).collect();
+    assert_eq!(cell_slices.len(), 6);
+    for s in &cell_slices {
+        let pl = state.paragraph_layout(s.para).expect("layout");
+        assert!(pl.layout.width() <= 150.0, "cell text is as wide as a cell");
+    }
+    // Rows go down the sheet and cells run across it, inside the margins.
+    let ys: Vec<f32> = page.tables.iter().map(|t| t.y).collect();
+    assert!(ys.windows(2).all(|w| w[1] > w[0]), "{ys:?}");
+    for t in &page.tables {
+        assert!(
+            t.x >= -0.01 && t.x + t.width <= physical.content_width() + 0.5,
+            "{} {}",
+            t.x,
+            t.width
+        );
+    }
+    // The paragraphs before and after turn with the columns as before.
+    assert!(page.slices.iter().any(|s| !s.upright));
+}
+
+#[test]
+fn clicking_and_the_caret_agree_inside_an_upright_cell() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    let (state, physical) = vertical_table_state(2, 2, "Hello", 300.0);
+    let page = &state.pages()[0];
+    let slice = page
+        .slices
+        .iter()
+        .find(|s| s.upright)
+        .copied()
+        .expect("cell");
+    // The caret at the start of the cell text, turned to the layout page, then back to the
+    // sheet: it lies inside the cell on the sheet.
+    let caret = state.caret_rect(slice.para, 0, 1.0).expect("caret");
+    let sheet_x = physical.width_pt - caret.y - caret.height;
+    let sheet_y = caret.x;
+    assert!(
+        (sheet_x - (physical.margins.left + slice.x)).abs() < 1.5,
+        "{sheet_x}"
+    );
+    assert!(sheet_y >= physical.margins.top + slice.y - 1.0);
+    // A click at the middle of the first line lands in that cell's paragraph, in the text.
+    let layout_x = sheet_y + caret.width + 5.0;
+    let layout_y = physical.width_pt - (sheet_x + 6.0);
+    let hit = state.hit_test(0, layout_x, layout_y).expect("hit");
+    assert_eq!(hit.para, slice.para);
+    assert!(hit.byte_offset <= 5);
+    // A selection of the first word is a horizontal rectangle on the sheet.
+    let rects = state.selection_rects(slice.para, 0..5);
+    assert_eq!(rects.len(), 1);
+    assert!(
+        rects[0].height > rects[0].width,
+        "turned rectangle is tall in the layout frame"
+    );
+}
+
+#[test]
+fn a_table_with_a_list_item_in_a_cell_turns_with_the_page() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    use libertum_model::{Operation, Paragraph};
+    let mut doc = libertum_model::Document::from_paragraphs(vec![
+        Paragraph::new(libertum_model::BlockId(1), "前"),
+        Paragraph::new(libertum_model::BlockId(2), "後"),
+    ]);
+    for section in &mut doc.sections {
+        section.vertical = true;
+    }
+    let mut table = doc.new_table(1, 1, 200.0);
+    table.rows[0].cells[0].paragraphs[0].insert_text(0, "item");
+    table.rows[0].cells[0].paragraphs[0].props.list = Some(libertum_model::ListItem {
+        style: libertum_model::ListStyle::Bullet,
+        level: 0,
+        group: 1,
+    });
+    doc.apply(Operation::InsertTable { index: 1, table })
+        .expect("insert table");
+    let physical = PageGeometry::from_setup(&doc.page_setup());
+    let mut state = LayoutState::from_document(&doc, physical, LayoutOptions::default());
+    state.paginate_all();
+    assert!(state.pages()[0].tables.iter().all(|t| !t.upright));
+}
+
+fn ruby_paragraph(id: u64, with_ruby: bool) -> ParagraphSnapshot {
+    let mut p = para(id, "漢字を読む。長い文章がここに続きます。");
+    if with_ruby {
+        p.ruby = vec![
+            (0..6, "かんじ".to_owned()),
+            (9..15, "ながいながい".to_owned()),
+        ];
+    }
+    p
+}
+
+#[test]
+fn ruby_makes_room_above_its_line_and_sits_over_its_base() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    let s = LayoutState::new(
+        PageGeometry::a4(),
+        vec![ruby_paragraph(1, false), ruby_paragraph(2, true)],
+        LayoutOptions::default(),
+    );
+    let plain = s.paragraph_layout(0).expect("layout");
+    let with = s.paragraph_layout(1).expect("layout");
+    assert!(with.ruby.len() == 2, "{}", with.ruby.len());
+    // The line is taller by about the reading's height, and it all comes above the text.
+    let (a, b) = (plain.lines[0], with.lines[0]);
+    assert!(b.height > a.height + 4.0, "{} vs {}", b.height, a.height);
+    assert!((b.baseline - a.baseline) > 4.0, "baseline moved down");
+    // Each reading is above the baseline and centred over its base, which it is as wide as
+    // or narrower than (a longer reading spreads the base's letters).
+    for r in &with.ruby {
+        assert_eq!(r.line, 0);
+        assert!(
+            r.y >= -0.5 && r.y + r.layout.height <= b.baseline,
+            "{} {}",
+            r.y,
+            r.layout.height
+        );
+    }
+    let first = &with.ruby[0];
+    let base_left = 0.0;
+    assert!(first.x >= base_left - 0.5);
+    // The second reading is wider than its two-letter base, so the base grew to fit it.
+    let second = &with.ruby[1];
+    assert!(second.layout.layout.width() > 0.0);
+    let selection = parley::editing::Selection::new(
+        parley::editing::Cursor::from_byte_index(
+            &with.layout,
+            9,
+            parley::layout::Affinity::Downstream,
+        ),
+        parley::editing::Cursor::from_byte_index(
+            &with.layout,
+            15,
+            parley::layout::Affinity::Downstream,
+        ),
+    );
+    let base_width: f32 = selection
+        .geometry(&with.layout)
+        .iter()
+        .map(|(rect, _)| (rect.x1 - rect.x0) as f32)
+        .sum();
+    assert!(
+        base_width + 0.5 >= second.layout.layout.width(),
+        "{base_width} vs {}",
+        second.layout.layout.width()
+    );
+}
+
+#[test]
+fn ruby_is_drawn_as_page_decorations_in_both_directions() {
+    if !fcx_has_fonts() {
+        return;
+    }
+    use libertum_model::{BlockId, Document, Paragraph, Ruby};
+    for vertical in [false, true] {
+        let mut p = Paragraph::new(BlockId(1), "漢字を読む。");
+        p.set_ruby(vec![Ruby::new(0..6, "かんじ")]);
+        let mut document = Document::from_paragraphs(vec![p]);
+        for section in &mut document.sections {
+            section.vertical = vertical;
+        }
+        let physical = PageGeometry::from_setup(&document.page_setup());
+        let mut state = LayoutState::from_document(&document, physical, LayoutOptions::default());
+        state.paginate_all();
+        let readings: Vec<_> = state
+            .page_decorations(0)
+            .into_iter()
+            .filter(|d| matches!(d, Decoration::Text { text, .. } if text == "かんじ"))
+            .collect();
+        assert_eq!(readings.len(), 1, "vertical = {vertical}");
+    }
 }

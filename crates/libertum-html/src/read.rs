@@ -60,6 +60,9 @@ pub struct Defaults {
     pub colour: [u8; 4],
     pub page_colour: Option<[u8; 4]>,
     pub page: Option<PageSetup>,
+    /// The `lang` (or `xml:lang`) of the `html` element, else of `body`, as a normalised tag.
+    pub language: Option<String>,
+    pub language2: Option<String>,
 }
 
 fn document_defaults(dom: &Dom) -> Defaults {
@@ -93,6 +96,23 @@ fn document_defaults(dom: &Dom) -> Defaults {
         colour: base.defaults.colour,
         page_colour: None,
         page: None,
+        language2: dom
+            .find(Dom::ROOT, &|d, id| {
+                d.name(id) == "meta" && d.attr(id, "name") == Some("libertum-language-2")
+            })
+            .and_then(|id| dom.attr(id, "content"))
+            .and_then(libertum_model::language_tag),
+        language: [
+            dom.find(Dom::ROOT, &|d, id| d.name(id) == "html"),
+            Some(body),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|element| {
+            dom.attr(element, "lang")
+                .or_else(|| dom.attr(element, "xml:lang"))
+                .and_then(libertum_model::language_tag)
+        }),
     };
     for (key, value) in &decls {
         match key.as_str() {
@@ -186,6 +206,8 @@ struct Pending {
     runs: Vec<Run>,
     images: Vec<InlineImage>,
     bookmarks: Vec<libertum_model::Bookmark>,
+    /// Ruby: the base's byte range and its reading.
+    ruby: Vec<libertum_model::Ruby>,
     /// Footnote references: offset and the id of the note's text.
     note_refs: Vec<(usize, String)>,
     props: ParaProps,
@@ -424,6 +446,32 @@ impl<'a> Reader<'a> {
                 return;
             }
         }
+        if name == "ruby" {
+            // The base is the element's own text, the reading is in `rt` (`rp` is the
+            // fallback parentheses for browsers without ruby).
+            let mut inner = ctx.clone();
+            inner.char = self.char_from(id, &inner.char);
+            self.ensure(ctx);
+            self.settle_space();
+            let start = self.pending.as_ref().map_or(0, |p| p.text.len());
+            let mut reading = String::new();
+            for &child in dom.children(id) {
+                match dom.name(child) {
+                    "rt" => reading.push_str(&dom.text(child)),
+                    "rp" | "rtc" => {}
+                    _ => self.walk(child, &inner),
+                }
+            }
+            let reading = reading.trim().to_owned();
+            if let Some(p) = &mut self.pending
+                && p.text.len() > start
+                && !reading.is_empty()
+            {
+                p.ruby
+                    .push(libertum_model::Ruby::new(start..p.text.len(), reading));
+            }
+            return;
+        }
         let mut inner = ctx.clone();
         let format = &mut inner.char;
         match name {
@@ -547,6 +595,7 @@ impl<'a> Reader<'a> {
             runs: Vec::new(),
             images: Vec::new(),
             bookmarks: Vec::new(),
+            ruby: Vec::new(),
             note_refs: Vec::new(),
             props,
             space: None,
@@ -589,6 +638,7 @@ impl<'a> Reader<'a> {
                 runs: Vec::new(),
                 images: Vec::new(),
                 bookmarks: Vec::new(),
+                ruby: Vec::new(),
                 note_refs: Vec::new(),
                 props,
                 space: None,
@@ -801,6 +851,9 @@ impl<'a> Reader<'a> {
         }
         if !p.bookmarks.is_empty() {
             paragraph.set_bookmarks(p.bookmarks);
+        }
+        if !p.ruby.is_empty() {
+            paragraph.set_ruby(p.ruby);
         }
         if !p.note_refs.is_empty() {
             let notes = p
@@ -1074,6 +1127,8 @@ impl<'a> Reader<'a> {
                 section.page = page;
             }
             section.page_colour = defaults.page_colour;
+            section.language = defaults.language;
+            section.language2 = defaults.language2;
         }
         ReadResult {
             document,

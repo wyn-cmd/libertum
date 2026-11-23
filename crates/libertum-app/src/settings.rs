@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::language::DocLanguage;
 use crate::spell::Language as SpellLanguage;
 use crate::state::{Inspector, Units};
 
-pub const SIDEBAR_MIN_WIDTH: f32 = 240.0;
+/// The inspector cannot be resized, so the minimum is the default: a width saved by an
+/// earlier version (260) is raised to it. 260 clipped the Section pane's Position buttons.
+pub const SIDEBAR_MIN_WIDTH: f32 = 320.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
-/// Pages' inspector is 260 points wide.
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 260.0;
+/// A little wider than Pages' 260 points, so the longest labels fit their buttons.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 320.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -65,6 +68,19 @@ pub struct UpdateMute {
     pub until: Option<u64>,
 }
 
+/// How many files' languages are remembered by path.
+pub const MAX_DOCUMENT_LANGUAGES: usize = 200;
+
+/// The language chosen for one RTF or Markdown file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentLanguage {
+    pub path: PathBuf,
+    pub language: DocLanguage,
+    /// The file's second language, if it has one.
+    #[serde(default)]
+    pub second: Option<DocLanguage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -106,6 +122,10 @@ pub struct Settings {
     pub spellcheck: bool,
     /// The dictionary used for the open document's spelling checks.
     pub spellcheck_language: SpellLanguage,
+    /// The language of RTF and Markdown files, by path. Those formats cannot hold a language
+    /// of their own, so the app remembers it here; the other formats carry it inside the
+    /// file. Newest first, at most [`MAX_DOCUMENT_LANGUAGES`].
+    pub document_languages: Vec<DocumentLanguage>,
     /// When the last update check was attempted (Unix seconds), so launches do not check
     /// more than once a day.
     pub last_update_check: Option<u64>,
@@ -358,6 +378,7 @@ impl Default for Settings {
             check_for_updates: true,
             spellcheck: true,
             spellcheck_language: SpellLanguage::British,
+            document_languages: Vec::new(),
             last_update_check: None,
             update_mute: None,
             dev_mode: false,
@@ -389,6 +410,54 @@ impl Settings {
         settings.script_memory_mb = crate::script::clamp_mb(settings.script_memory_mb);
         settings.script_total_memory_mb = crate::script::clamp_mb(settings.script_total_memory_mb);
         Ok(settings)
+    }
+
+    /// The language remembered for the file at `path`, if one was chosen.
+    pub fn language_for(&self, path: &Path) -> Option<DocLanguage> {
+        self.document_languages
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.language)
+    }
+
+    /// The second language remembered for the file at `path`, if one was chosen.
+    pub fn second_language_for(&self, path: &Path) -> Option<DocLanguage> {
+        self.document_languages
+            .iter()
+            .find(|entry| entry.path == path)
+            .and_then(|entry| entry.second)
+    }
+
+    /// Remembers `language` for the file at `path` (with no second language).
+    #[cfg(test)]
+    pub fn remember_language(&mut self, path: &Path, language: DocLanguage) -> bool {
+        self.remember_languages(path, language, None)
+    }
+
+    /// Remembers a first and second language for the file at `path`: newest first, the oldest
+    /// dropped past [`MAX_DOCUMENT_LANGUAGES`]. Returns whether anything changed.
+    pub fn remember_languages(
+        &mut self,
+        path: &Path,
+        language: DocLanguage,
+        second: Option<DocLanguage>,
+    ) -> bool {
+        if self.document_languages.first().is_some_and(|entry| {
+            entry.path == path && entry.language == language && entry.second == second
+        }) {
+            return false;
+        }
+        self.document_languages.retain(|entry| entry.path != path);
+        self.document_languages.insert(
+            0,
+            DocumentLanguage {
+                path: path.to_path_buf(),
+                language,
+                second,
+            },
+        );
+        self.document_languages.truncate(MAX_DOCUMENT_LANGUAGES);
+        true
     }
 
     /// Sidebar width clamped to a usable range (a hand-edited file may hold anything).
@@ -462,6 +531,39 @@ mod tests {
     }
 
     #[test]
+    fn languages_are_remembered_by_path_newest_first_and_capped() {
+        let mut settings = Settings::default();
+        let a = Path::new("a.rtf");
+        let b = Path::new("b.md");
+        assert_eq!(settings.language_for(a), None);
+        assert!(settings.remember_language(a, DocLanguage::American));
+        assert!(settings.remember_language(b, DocLanguage::Korean));
+        assert_eq!(settings.language_for(a), Some(DocLanguage::American));
+        assert_eq!(settings.document_languages[0].path, b, "newest first");
+        // The same again changes nothing; a new choice replaces the old one, once.
+        assert!(!settings.remember_language(b, DocLanguage::Korean));
+        assert!(settings.remember_language(a, DocLanguage::British));
+        assert_eq!(settings.language_for(a), Some(DocLanguage::British));
+        assert_eq!(settings.document_languages.len(), 2);
+        for n in 0..MAX_DOCUMENT_LANGUAGES + 20 {
+            settings.remember_language(Path::new(&format!("{n}.rtf")), DocLanguage::British);
+        }
+        assert_eq!(settings.document_languages.len(), MAX_DOCUMENT_LANGUAGES);
+        assert_eq!(settings.language_for(a), None, "the oldest are forgotten");
+        // An old settings file has no list.
+        let old = Settings::from_toml("spellcheck = true").expect("parse");
+        assert!(old.document_languages.is_empty());
+    }
+
+    #[test]
+    fn a_sidebar_width_saved_by_an_older_version_is_widened() {
+        let old = Settings::from_toml("sidebar_width = 260.0").expect("parse");
+        assert_eq!(old.clamped_sidebar_width(), DEFAULT_SIDEBAR_WIDTH);
+        let wide = Settings::from_toml("sidebar_width = 400.0").expect("parse");
+        assert_eq!(wide.clamped_sidebar_width(), 400.0);
+    }
+
+    #[test]
     fn round_trips_through_toml() {
         let original = Settings {
             theme: ThemePreference::Dark,
@@ -497,6 +599,11 @@ mod tests {
             check_for_updates: false,
             spellcheck: false,
             spellcheck_language: crate::spell::Language::American,
+            document_languages: vec![DocumentLanguage {
+                path: PathBuf::from("notes.rtf"),
+                language: DocLanguage::Japanese,
+                second: Some(DocLanguage::British),
+            }],
             last_update_check: Some(1_700_000_000),
             update_mute: Some(UpdateMute {
                 version: "0.1.3".to_owned(),

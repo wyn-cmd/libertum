@@ -14,6 +14,8 @@ mod home;
 mod icons;
 mod inspector;
 mod install;
+mod language;
+mod linked;
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_icon;
 mod macros;
@@ -221,6 +223,12 @@ fn main() -> iced::Result {
     .theme(App::theme)
     .subscription(App::subscription)
     .window(window_settings())
+    // Iced's window-wide 4x MSAA only smooths `canvas` geometry, and Libertum draws none:
+    // the UI is quads (smoothed in their shader), text, SVG icons and page textures, which
+    // carry their own antialiasing. Leaving it on costs a 4x colour buffer and a resolve pass
+    // on every frame. Screenshots with it on and off were pixel-identical (docs/decisions.md,
+    // 2026-11-23). The "Smooth text and shapes on the page" setting is separate and unchanged.
+    .antialiasing(false)
     .exit_on_close_request(false)
     .centered()
     .run();

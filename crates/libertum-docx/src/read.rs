@@ -16,8 +16,8 @@ use libertum_model::{
     Align, Block, BlockId, Bookmark, BorderSides, Borders, CharFormat, CrossRef, CrossRefKind,
     Document, InlineImage, Ligatures, LineSpacing, ListItem, ListStyle, MAX_LIST_LEVEL,
     MIN_TABLE_COLUMN_PT, Media, Note, NoteKind, Orientation, PaperSize, ParaFormat, ParaProps,
-    Paragraph, ParagraphStyle, Run, Section, StyleId, StyleSheet, TabStop, TabStopKind, TabStops,
-    Table, TableBorders, TableCell, TableRow, TableStyle, VerticalAlign,
+    Paragraph, ParagraphStyle, Ruby, Run, Section, StyleId, StyleSheet, TabStop, TabStopKind,
+    TabStops, Table, TableBorders, TableCell, TableRow, TableStyle, VerticalAlign,
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -84,7 +84,14 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Parsed, DocxError> {
     let mut document = Document::from_blocks(blocks);
     document.styles = styles.sheet;
     document.sections = sections;
+    for section in &mut document.sections {
+        section.language = styles.language.clone();
+    }
     crate::headers::read(&package, &body.extras, &mut document.sections);
+    let language2 = crate::headers::read_language2(&package);
+    for section in &mut document.sections {
+        section.language2 = language2.clone();
+    }
     // A watermark in the headers belongs to the whole document.
     if let Some(watermark) = crate::watermark::read(&package, &body.extras) {
         for section in &mut document.sections {
@@ -119,6 +126,8 @@ struct Styles {
     char_styles: HashMap<String, CharFormat>,
     /// Table styles by `w:styleId`, with the fills their conditional formatting gives.
     table_styles: HashMap<String, TableStyle>,
+    /// The document's language (`w:lang` in the document defaults), as a normalised tag.
+    language: Option<String>,
 }
 
 impl Styles {
@@ -213,6 +222,7 @@ fn parse_styles(xml_text: Option<&str>, warnings: &mut Vec<String>) -> Result<St
             ids,
             char_styles: HashMap::new(),
             table_styles: HashMap::new(),
+            language: None,
         });
     };
     let root = xml::parse(xml_text, "word/styles.xml")?;
@@ -354,12 +364,20 @@ fn parse_styles(xml_text: Option<&str>, warnings: &mut Vec<String>) -> Result<St
     }
 
     let table_styles = parse_table_styles(&root);
+    let language = root
+        .child("docDefaults")
+        .and_then(|defaults| defaults.child("rPrDefault"))
+        .and_then(|default| default.child("rPr"))
+        .and_then(|rpr| rpr.child("lang"))
+        .and_then(|lang| lang.attr("val"))
+        .and_then(libertum_model::language_tag);
 
     Ok(Styles {
         sheet,
         ids,
         char_styles,
         table_styles,
+        language,
     })
 }
 
@@ -1215,6 +1233,12 @@ fn parse_section(node: &XmlNode, warnings: &mut Vec<String>) -> (Section, Sectio
         section.headers.different_first = true;
         section.footers.different_first = true;
     }
+    // Vertical text, right to left (`tbRl`; `tbRlV` is the same flow with Latin kept upright).
+    // `btLr` and `tbLrV` turn the page another way and are not modelled.
+    section.vertical = node
+        .child("textDirection")
+        .and_then(|n| n.attr("val"))
+        .is_some_and(|value| matches!(value, "tbRl" | "tbRlV"));
 
     // Raw elements we do not model yet: keep them so a save does not drop header/footer
     // references, grid settings or page-number formats.
@@ -1241,6 +1265,7 @@ struct Segment {
     bookmarks: Vec<Bookmark>,
     images: Vec<InlineImage>,
     cross_refs: Vec<CrossRef>,
+    ruby: Vec<Ruby>,
     starts_page: bool,
 }
 
@@ -1253,6 +1278,7 @@ impl Segment {
             bookmarks: Vec::new(),
             images: Vec::new(),
             cross_refs: Vec::new(),
+            ruby: Vec::new(),
             starts_page,
         }
     }
@@ -1565,6 +1591,7 @@ fn parse_paragraph(
             bookmarks,
             images,
             cross_refs,
+            ruby,
             starts_page,
         } = segment;
         let mut para = Paragraph::with_runs(BlockId(0), text, runs);
@@ -1582,6 +1609,9 @@ fn parse_paragraph(
         }
         if !cross_refs.is_empty() {
             para.set_cross_refs(cross_refs);
+        }
+        if !ruby.is_empty() {
+            para.set_ruby(ruby);
         }
         paragraphs.push(para);
     }
@@ -1641,6 +1671,31 @@ fn parse_run(
                 if let Some(segment) = segments.last_mut() {
                     image.offset = segment.text.len();
                     segment.images.push(image);
+                }
+            }
+            "ruby" => {
+                // The reading is in `rt`, the text it sits over in `rubyBase`.
+                let reading: String = child
+                    .child("rt")
+                    .map(|rt| {
+                        rt.children_named("r")
+                            .flat_map(|r| r.children_named("t"))
+                            .map(|t| t.text())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let index = segments.len() - 1;
+                let start = segments[index].text.len();
+                if let Some(base) = child.child("rubyBase") {
+                    for r in base.children_named("r") {
+                        parse_run(r, styles, segments, notes, images, field, warnings)?;
+                    }
+                }
+                if segments.len() - 1 == index {
+                    let end = segments[index].text.len();
+                    if start < end && !reading.is_empty() {
+                        segments[index].ruby.push(Ruby::new(start..end, reading));
+                    }
                 }
             }
             "pict" | "object" => return Err(unsupported("a picture or drawing")),

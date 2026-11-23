@@ -512,6 +512,8 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
             Entry::item(s::VIEW_FIND, Message::OpenFind).shortcut(shortcuts::label(Shortcut::Find)),
             Entry::item(s::VIEW_SETTINGS, Message::OpenSettings)
                 .shortcut(shortcuts::label(Shortcut::Settings)),
+            Entry::item(s::VIEW_NEW, Message::GoHome)
+                .shortcut(shortcuts::label(Shortcut::NewDocument)),
             Entry::item(s::VIEW_HOME, Message::GoHome)
                 .shortcut(shortcuts::label(Shortcut::CloseDocument)),
             Entry::item(s::VIEW_STITCH, Message::OpenStitch),
@@ -612,6 +614,7 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 Entry::Separator,
                 item(InsertAction::Table),
                 item(InsertAction::Image),
+                Entry::item(s::INSERT_LINKED_MEDIA, Message::OpenLinkedMedia),
                 Entry::Separator,
                 item(InsertAction::Footnote),
                 item(InsertAction::Endnote),

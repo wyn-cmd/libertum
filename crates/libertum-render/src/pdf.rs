@@ -6,16 +6,17 @@
 //! fonts, builds a `ToUnicode` map, and therefore the text can be selected, searched and
 //! copied. The archival variant adds the sRGB output intent and XMP metadata PDF/A-2b needs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use libertum_layout::parley::PositionedLayoutItem;
 use libertum_layout::{Decoration, LayoutOptions, LayoutState, PageGeometry, ParagraphLayout};
 use libertum_model::Document;
 use printpdf::{
-    Actions, BorderArray, Codepoint, Color, Destination, FontId, LinkAnnotation, Mm, Op, PaintMode,
-    ParsedFont, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, PdfWarnMsg, Point, Pt,
-    RawImage, RawImageData, RawImageFormat, Rect, Rgb, TextItem, TextMatrix, TextRenderingMode,
-    XObjectId, XObjectTransform,
+    Actions, BorderArray, Codepoint, Color, CurTransMat, Destination, FontId, LinePoint,
+    LinkAnnotation, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
+    PdfSaveOptions, PdfWarnMsg, Point, Polygon, PolygonRing, Pt, RawImage, RawImageData,
+    RawImageFormat, Rect, Rgb, TextItem, TextMatrix, TextRenderingMode, WindingOrder, XObjectId,
+    XObjectTransform,
 };
 
 /// Why a PDF could not be written.
@@ -45,16 +46,21 @@ pub fn export(document: &Document, archival: bool, title: &str) -> Result<Vec<u8
     let mut exporter = Exporter {
         pdf: &mut pdf,
         fonts: HashMap::new(),
+        drawn_as_shapes: HashSet::new(),
+        scale_cx: swash::scale::ScaleContext::new(),
         images: HashMap::new(),
+        vertical: false,
     };
     let mut pages = Vec::with_capacity(layout.page_count());
     for index in 0..layout.page_count() {
+        // The layout page (turned for vertical text) and the sheet it is written onto.
         let geometry = layout.page_geometry(index);
+        let sheet = layout.physical_page_geometry(index);
         let mut ops = Vec::new();
-        exporter.page(&layout, index, &geometry, &mut ops)?;
+        exporter.page(&layout, index, &geometry, &sheet, &mut ops)?;
         pages.push(PdfPage::new(
-            Mm::from(Pt(geometry.width_pt)),
-            Mm::from(Pt(geometry.height_pt)),
+            Mm::from(Pt(sheet.width_pt)),
+            Mm::from(Pt(sheet.height_pt)),
             ops,
         ));
     }
@@ -114,6 +120,27 @@ struct FontInfo {
     units_per_em: u16,
 }
 
+/// A run of glyphs to draw as shapes (see `Exporter::glyph_shapes`).
+struct ShapeRun<'a> {
+    data: &'a [u8],
+    index: u32,
+    /// The font's variation coordinates, as parley shaped the run.
+    coords: &'a [i16],
+    size: f32,
+    /// Where the run's glyph positions are measured from, page points from the top-left.
+    origin: (f32, f32),
+    colour: &'a Color,
+    bold: bool,
+    /// Which glyphs stand upright on a vertical page (empty otherwise), with the run's ascent
+    /// and descent and the sheet's width, for placing them.
+    upright: &'a [crate::vertical::Stand],
+    ascent: f32,
+    descent: f32,
+    sheet_width: f32,
+    /// The run's font size, points: upright digits were given room after them in proportion.
+    font_size: f32,
+}
+
 /// Where a watermark's single line goes: turned by an angle (screen sense, y down) about the
 /// page's centre, in one flat colour.
 struct Placement {
@@ -129,15 +156,60 @@ struct Placement {
 struct Exporter<'a> {
     pdf: &'a mut PdfDocument,
     fonts: HashMap<(u64, u32), FontInfo>,
+    /// Fonts a PDF cannot carry as text (variable fonts with CFF2 outlines, which is how
+    /// Noto CJK ships on some Linux distributions): their glyphs are drawn as vector shapes.
+    drawn_as_shapes: HashSet<(u64, u32)>,
+    scale_cx: swash::scale::ScaleContext,
     images: HashMap<u64, XObjectId>,
+    /// The page being written is vertical text: its content is laid out on the turned page and
+    /// turned back by one matrix, with ideographs counter-turned to stand upright.
+    vertical: bool,
+}
+
+/// Whether the font at `index` of an sfnt file or collection has a table `tag`.
+fn sfnt_has_table(data: &[u8], index: u32, tag: &[u8; 4]) -> bool {
+    let be32 = |at: usize| -> Option<usize> {
+        let bytes: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
+        Some(u32::from_be_bytes(bytes) as usize)
+    };
+    let start = if data.get(..4) == Some(b"ttcf") {
+        let count = be32(8).unwrap_or(0);
+        if (index as usize) >= count {
+            return false;
+        }
+        match be32(12 + 4 * index as usize) {
+            Some(at) => at,
+            None => return false,
+        }
+    } else {
+        0
+    };
+    let Some(tables) = data.get(start + 4..start + 6) else {
+        return false;
+    };
+    let tables = usize::from(u16::from_be_bytes([tables[0], tables[1]]));
+    (0..tables).any(|n| data.get(start + 12 + 16 * n..start + 16 + 16 * n) == Some(tag.as_slice()))
 }
 
 impl Exporter<'_> {
     fn font(&mut self, data: &[u8], data_id: u64, index: u32) -> Option<&FontInfo> {
         let key = (data_id, index);
+        if self.drawn_as_shapes.contains(&key) {
+            return None;
+        }
         if !self.fonts.contains_key(&key) {
             let mut warnings = Vec::new();
-            let parsed = ParsedFont::from_bytes(data, index as usize, &mut warnings)?;
+            // A CFF2 font cannot be embedded as text, and one printpdf cannot read at all
+            // would stop the export: both are drawn as shapes instead.
+            let parsed = if sfnt_has_table(data, index, b"CFF2") {
+                None
+            } else {
+                ParsedFont::from_bytes(data, index as usize, &mut warnings)
+            };
+            let Some(parsed) = parsed else {
+                self.drawn_as_shapes.insert(key);
+                return None;
+            };
             let id = self.pdf.add_font(&parsed);
             let widths = parsed.glyph_widths.clone();
             let units_per_em = parsed.units_per_em.max(1);
@@ -158,12 +230,14 @@ impl Exporter<'_> {
         layout: &LayoutState,
         page_index: usize,
         geometry: &PageGeometry,
+        sheet: &PageGeometry,
         ops: &mut Vec<Op>,
     ) -> Result<(), PdfError> {
         let Some(page) = layout.pages().get(page_index) else {
             return Ok(());
         };
         let page_height = geometry.height_pt;
+        self.vertical = layout.is_vertical();
 
         // A page colour fills the whole sheet, under everything else (as the editor shows it).
         if let Some(colour) = layout.page_colour(page_index) {
@@ -171,11 +245,19 @@ impl Exporter<'_> {
                 ops,
                 0.0,
                 0.0,
-                geometry.width_pt,
-                page_height,
+                sheet.width_pt,
+                sheet.height_pt,
                 colour,
-                page_height,
+                sheet.height_pt,
             );
+        }
+        // Vertical text: everything below is written for the turned layout page and turned
+        // back onto the sheet by one matrix (a quarter turn clockwise: x' = y, y' = width - x).
+        if self.vertical {
+            ops.push(Op::SaveGraphicsState);
+            ops.push(Op::SetTransformationMatrix {
+                matrix: CurTransMat::Raw([0.0, -1.0, 1.0, 0.0, 0.0, geometry.width_pt]),
+            });
         }
 
         // The watermark lies under everything else.
@@ -201,76 +283,17 @@ impl Exporter<'_> {
             )?;
         }
 
-        // Table cell fills and borders, under the text.
-        for table in &page.tables {
-            let top = geometry.margins.top + table.y;
-            for cell in &table.cells {
-                if let Some(fill) = cell.fill {
-                    rect(
-                        ops,
-                        geometry.margins.left + cell.x,
-                        top,
-                        cell.width,
-                        table.height,
-                        fill,
-                        page_height,
-                    );
-                }
-            }
-            if table.borders.is_visible() {
-                let colour = table.borders.colour;
-                let line = table.borders.width_pt.max(0.5);
-                let x = geometry.margins.left + table.x;
-                for cell in table.cells.iter().filter(|cell| cell.top) {
-                    rect(
-                        ops,
-                        geometry.margins.left + cell.x,
-                        top,
-                        cell.width,
-                        line,
-                        colour,
-                        page_height,
-                    );
-                }
-                if table.bottom {
-                    rect(
-                        ops,
-                        x,
-                        top + table.height - line,
-                        table.width,
-                        line,
-                        colour,
-                        page_height,
-                    );
-                }
-                if table.sides {
-                    rect(ops, x, top, line, table.height, colour, page_height);
-                    rect(
-                        ops,
-                        x + table.width - line,
-                        top,
-                        line,
-                        table.height,
-                        colour,
-                        page_height,
-                    );
-                }
-                for cell in table.cells.iter().filter(|cell| cell.left) {
-                    rect(
-                        ops,
-                        geometry.margins.left + cell.x,
-                        top,
-                        line,
-                        table.height,
-                        colour,
-                        page_height,
-                    );
-                }
-            }
-        }
+        // Table cell fills and borders, under the text. Upright tables are on the sheet
+        // itself and come after the turned content.
+        table_rects(
+            ops,
+            page.tables.iter().filter(|t| !t.upright),
+            geometry,
+            page_height,
+        );
 
         // Body and table-cell paragraphs.
-        for slice in &page.slices {
+        for slice in page.slices.iter().filter(|s| !s.upright) {
             let Some(pl) = layout.paragraph_layout(slice.para) else {
                 continue;
             };
@@ -292,13 +315,25 @@ impl Exporter<'_> {
         // Each generated contents entry jumps to the page its heading is on. The box has no
         // border and does not change the look of the page.
         for link in layout.page_toc_links(page_index) {
+            // Annotation boxes are in the sheet's own space, not the turned content's.
+            let (x, y, width, height) = (
+                link.x,
+                page_height - (link.y + link.height),
+                link.width,
+                link.height,
+            );
+            let (x, y, width, height) = if self.vertical {
+                (y, geometry.width_pt - x - width, height, width)
+            } else {
+                (x, y, width, height)
+            };
             ops.push(Op::LinkAnnotation {
                 link: LinkAnnotation::new(
                     Rect {
-                        x: Pt(link.x),
-                        y: Pt(page_height - (link.y + link.height)),
-                        width: Pt(link.width),
-                        height: Pt(link.height),
+                        x: Pt(x),
+                        y: Pt(y),
+                        width: Pt(width),
+                        height: Pt(height),
                         mode: None,
                         winding_order: None,
                     },
@@ -315,9 +350,19 @@ impl Exporter<'_> {
             });
         }
 
-        // Page numbers, TOC entries, headers and footers, inline images and rules.
+        // Page numbers, TOC entries, headers and footers, inline images and rules. On a vertical
+        // page the headers, footers and page numbers are on the sheet itself, upright and
+        // horizontal, so they are written after the turned content, outside its matrix.
+        let mut on_sheet = Vec::new();
         for decoration in layout.page_decorations(page_index) {
             match decoration {
+                Decoration::Text {
+                    layout,
+                    x,
+                    y,
+                    sheet: true,
+                    ..
+                } => on_sheet.push((layout, x, y)),
                 Decoration::Text { layout, x, y, .. } => {
                     self.lines(
                         ops,
@@ -354,19 +399,88 @@ impl Exporter<'_> {
                     height,
                 } => {
                     let id = self.image(&media)?;
-                    ops.push(Op::UseXobject {
-                        id,
-                        transform: XObjectTransform {
-                            translate_x: Some(Pt(x)),
-                            translate_y: Some(Pt(page_height - y - height)),
-                            scale_x: Some(width / media.width_px().max(1) as f32),
-                            scale_y: Some(height / media.height_px().max(1) as f32),
-                            dpi: Some(72.0),
-                            ..XObjectTransform::default()
-                        },
-                    });
+                    if self.vertical {
+                        // The box has its width and height swapped, so on the sheet it is the
+                        // picture's own shape. The page matrix would turn the picture with the
+                        // text; this matrix turns it back the other way and puts it in its box:
+                        // (u, v) -> (x + width - v, page_height - y - height + u).
+                        ops.push(Op::SaveGraphicsState);
+                        ops.push(Op::SetTransformationMatrix {
+                            matrix: CurTransMat::Raw([
+                                0.0,
+                                1.0,
+                                -1.0,
+                                0.0,
+                                x + width,
+                                page_height - y - height,
+                            ]),
+                        });
+                        ops.push(Op::UseXobject {
+                            id,
+                            transform: XObjectTransform {
+                                scale_x: Some(height / media.width_px().max(1) as f32),
+                                scale_y: Some(width / media.height_px().max(1) as f32),
+                                dpi: Some(72.0),
+                                ..XObjectTransform::default()
+                            },
+                        });
+                        ops.push(Op::RestoreGraphicsState);
+                    } else {
+                        ops.push(Op::UseXobject {
+                            id,
+                            transform: XObjectTransform {
+                                translate_x: Some(Pt(x)),
+                                translate_y: Some(Pt(page_height - y - height)),
+                                scale_x: Some(width / media.width_px().max(1) as f32),
+                                scale_y: Some(height / media.height_px().max(1) as f32),
+                                dpi: Some(72.0),
+                                ..XObjectTransform::default()
+                            },
+                        });
+                    }
                 }
             }
+        }
+        if self.vertical {
+            ops.push(Op::RestoreGraphicsState);
+            self.vertical = false;
+        }
+        // Upright tables: fills, lines and text on the sheet like any horizontal page.
+        if page.tables.iter().any(|t| t.upright) {
+            table_rects(
+                ops,
+                page.tables.iter().filter(|t| t.upright),
+                sheet,
+                sheet.height_pt,
+            );
+            for slice in page.slices.iter().filter(|s| s.upright) {
+                let Some(pl) = layout.paragraph_layout(slice.para) else {
+                    continue;
+                };
+                let Some(first) = pl.lines.get(slice.line_start) else {
+                    continue;
+                };
+                let dy = sheet.margins.top + slice.y - first.top;
+                let dx = sheet.margins.left + slice.x + pl.x_offset;
+                self.lines(
+                    ops,
+                    &pl,
+                    slice.line_start..slice.line_end,
+                    (dx, dy),
+                    sheet.height_pt,
+                    None,
+                )?;
+            }
+        }
+        for (text, x, y) in on_sheet {
+            self.lines(
+                ops,
+                &text,
+                0..text.lines.len(),
+                (x, y),
+                sheet.height_pt,
+                None,
+            )?;
         }
         Ok(())
     }
@@ -406,102 +520,182 @@ impl Exporter<'_> {
                 let font = text_run.font();
                 let size = text_run.font_size();
                 let rise = brush.rise_pt();
-                let Some(info) = self.font(font.data.data(), font.data.id(), font.index) else {
-                    return Err(PdfError::Font(format!("data {}", font.data.id())));
-                };
+                let key = (font.data.id(), font.index);
+                let as_text = self
+                    .font(font.data.data(), font.data.id(), font.index)
+                    .is_some();
                 let positions: Vec<_> = run.positioned_glyphs().collect();
-                let Some(first) = positions.first() else {
+                if positions.is_empty() {
                     continue;
-                };
-                // What each shaped glyph stands for, so the PDF's ToUnicode map (and so
-                // copying and searching) knows the text of a ligature or a contextual form.
-                let mut unicode: HashMap<u16, String> = HashMap::new();
-                for cluster in run.run().clusters() {
-                    let text = pl
-                        .text
-                        .get(cluster.text_range())
-                        .filter(|text| !text.is_empty())
-                        .unwrap_or("");
-                    if text.is_empty() {
-                        continue;
-                    }
-                    for glyph in cluster.glyphs() {
-                        unicode
-                            .entry(glyph.id.min(u32::from(u16::MAX)) as u16)
-                            .or_insert_with(|| text.to_owned());
-                    }
                 }
-                let mut glyphs = Vec::with_capacity(positions.len());
-                for (at, glyph) in positions.iter().enumerate() {
-                    let gid = glyph.id.min(u32::from(u16::MAX)) as u16;
-                    let natural = info.widths.get(&gid).copied().unwrap_or(0) as f32 * size
-                        / f32::from(info.units_per_em);
-                    let desired = positions
-                        .get(at + 1)
-                        .map_or(natural, |next| next.x - glyph.x);
-                    let offset = (natural - desired) * 1000.0 / size.max(0.01);
-                    glyphs.push(match unicode.get(&gid) {
-                        Some(text) => Codepoint::with_cid(gid, offset, text.clone()),
-                        None => Codepoint::new(gid, offset),
-                    });
-                }
-                let font_id = info.id.clone();
                 let colour = turned.map_or_else(|| blend(brush.color), |t| t.colour.clone());
                 let bold = text_run.synthesis().embolden();
-                let baseline = dy + first.y - rise;
-                ops.push(Op::StartTextSection);
-                ops.push(Op::SetFillColor {
-                    col: colour.clone(),
-                });
-                ops.push(Op::SetFont {
-                    font: PdfFontHandle::External(font_id),
-                    size: Pt(size),
-                });
-                if bold {
-                    ops.push(Op::SetTextRenderingMode {
-                        mode: TextRenderingMode::FillStroke,
-                    });
-                    ops.push(Op::SetOutlineColor { col: colour });
-                    ops.push(Op::SetOutlineThickness {
-                        pt: Pt(size * 0.03),
-                    });
+                // Vertical text: which glyphs stand upright. A watermark turns as a whole, so
+                // its glyphs all go with the page.
+                let vertical = self.vertical && turned.is_none();
+                let upright = if vertical {
+                    crate::vertical::upright_glyphs(&pl.text, text_run)
                 } else {
-                    ops.push(Op::SetTextRenderingMode {
-                        mode: TextRenderingMode::Fill,
-                    });
-                }
-                match turned {
-                    None => ops.push(Op::SetTextCursor {
-                        pos: Point {
-                            x: Pt(dx + first.x),
-                            y: Pt(page_height - baseline),
+                    Vec::new()
+                };
+                let run_metrics = text_run.font_metrics();
+                let (ascent, descent) = (run_metrics.ascent, run_metrics.descent);
+                if !as_text {
+                    let coords: Vec<i16> = text_run
+                        .normalized_coords()
+                        .iter()
+                        .map(|c| c.to_bits())
+                        .collect();
+                    self.glyph_shapes(
+                        &ShapeRun {
+                            data: font.data.data(),
+                            index: font.index,
+                            coords: &coords,
+                            size,
+                            origin: (dx, dy - rise),
+                            colour: &colour,
+                            bold,
+                            upright: &upright,
+                            ascent,
+                            descent,
+                            sheet_width: page_height,
+                            font_size: size,
                         },
-                    }),
-                    Some(turn) => {
-                        // Turn the baseline's start about the page's centre; the matrix
-                        // turns the glyphs the same way (PDF's y axis points up).
-                        let (ox, oy) = (
-                            first.x - turn.layout_centre.0,
-                            first.y - turn.layout_centre.1,
-                        );
-                        let x = turn.centre.0 + ox * turn.cos - oy * turn.sin;
-                        let y = turn.centre.1 + ox * turn.sin + oy * turn.cos;
-                        ops.push(Op::SetTextMatrix {
-                            matrix: TextMatrix::Raw([
-                                turn.cos,
-                                -turn.sin,
-                                turn.sin,
-                                turn.cos,
-                                x,
-                                page_height - y,
-                            ]),
+                        &positions,
+                        page_height,
+                        turned,
+                        ops,
+                    );
+                }
+                if as_text && let Some(info) = self.fonts.get(&key) {
+                    // What each shaped glyph stands for, so the PDF's ToUnicode map (and so
+                    // copying and searching) knows the text of a ligature or a contextual form.
+                    let mut unicode: HashMap<u16, String> = HashMap::new();
+                    for cluster in run.run().clusters() {
+                        let text = pl
+                            .text
+                            .get(cluster.text_range())
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or("");
+                        if text.is_empty() {
+                            continue;
+                        }
+                        for glyph in cluster.glyphs() {
+                            unicode
+                                .entry(glyph.id.min(u32::from(u16::MAX)) as u16)
+                                .or_insert_with(|| text.to_owned());
+                        }
+                    }
+                    let font_id = info.id.clone();
+                    // Glyphs are written in groups: a vertical page's upright glyphs one at a
+                    // time, each placed in its own cell, and everything else as one string.
+                    let mut groups: Vec<(usize, usize, bool)> = Vec::new();
+                    for at in 0..positions.len() {
+                        let standing = upright.get(at).is_some_and(|stand| stand.upright());
+                        match groups.last_mut() {
+                            Some((_, end, last)) if !standing && !*last => *end = at + 1,
+                            _ => groups.push((at, at + 1, standing)),
+                        }
+                    }
+                    for (from, to, standing) in groups {
+                        let group = &positions[from..to];
+                        let mut glyphs = Vec::with_capacity(group.len());
+                        for (at, glyph) in group.iter().enumerate() {
+                            let gid = glyph.id.min(u32::from(u16::MAX)) as u16;
+                            let natural = info.widths.get(&gid).copied().unwrap_or(0) as f32 * size
+                                / f32::from(info.units_per_em);
+                            let desired =
+                                group.get(at + 1).map_or(natural, |next| next.x - glyph.x);
+                            let offset = (natural - desired) * 1000.0 / size.max(0.01);
+                            glyphs.push(match unicode.get(&gid) {
+                                Some(text) => Codepoint::with_cid(gid, offset, text.clone()),
+                                None => Codepoint::new(gid, offset),
+                            });
+                        }
+                        ops.push(Op::StartTextSection);
+                        ops.push(Op::SetFillColor {
+                            col: colour.clone(),
                         });
+                        ops.push(Op::SetFont {
+                            font: PdfFontHandle::External(font_id.clone()),
+                            size: Pt(size),
+                        });
+                        if bold {
+                            ops.push(Op::SetTextRenderingMode {
+                                mode: TextRenderingMode::FillStroke,
+                            });
+                            ops.push(Op::SetOutlineColor {
+                                col: colour.clone(),
+                            });
+                            ops.push(Op::SetOutlineThickness {
+                                pt: Pt(size * 0.03),
+                            });
+                        } else {
+                            ops.push(Op::SetTextRenderingMode {
+                                mode: TextRenderingMode::Fill,
+                            });
+                        }
+                        let first = &group[0];
+                        if standing {
+                            // The page is turned a quarter turn clockwise by the page matrix,
+                            // so an upright glyph is written turned a quarter turn the other
+                            // way, with its em box centred on the column and its top at the
+                            // cell's start (the same placement the page renderer uses).
+                            let cell_of = crate::vertical::upright_cell(
+                                upright[from],
+                                &positions,
+                                from,
+                                size,
+                            );
+                            let (cell, centre) = crate::vertical::upright_origin(
+                                dx + cell_of.start,
+                                dy + first.y - rise,
+                                &cell_of,
+                                ascent,
+                                descent,
+                                page_height,
+                            );
+                            ops.push(Op::SetTextMatrix {
+                                matrix: TextMatrix::Raw([0.0, 1.0, -1.0, 0.0, cell, centre]),
+                            });
+                        } else {
+                            let baseline = dy + first.y - rise;
+                            match turned {
+                                None => ops.push(Op::SetTextCursor {
+                                    pos: Point {
+                                        x: Pt(dx + first.x),
+                                        y: Pt(page_height - baseline),
+                                    },
+                                }),
+                                Some(turn) => {
+                                    // Turn the baseline's start about the page's centre; the
+                                    // matrix turns the glyphs the same way (PDF's y axis
+                                    // points up).
+                                    let (ox, oy) = (
+                                        first.x - turn.layout_centre.0,
+                                        first.y - turn.layout_centre.1,
+                                    );
+                                    let x = turn.centre.0 + ox * turn.cos - oy * turn.sin;
+                                    let y = turn.centre.1 + ox * turn.sin + oy * turn.cos;
+                                    ops.push(Op::SetTextMatrix {
+                                        matrix: TextMatrix::Raw([
+                                            turn.cos,
+                                            -turn.sin,
+                                            turn.sin,
+                                            turn.cos,
+                                            x,
+                                            page_height - y,
+                                        ]),
+                                    });
+                                }
+                            }
+                        }
+                        ops.push(Op::ShowText {
+                            items: vec![TextItem::GlyphIds(glyphs)],
+                        });
+                        ops.push(Op::EndTextSection);
                     }
                 }
-                ops.push(Op::ShowText {
-                    items: vec![TextItem::GlyphIds(glyphs)],
-                });
-                ops.push(Op::EndTextSection);
 
                 // Underline and strikethrough, at the font's own offsets.
                 let style = run.style();
@@ -536,6 +730,174 @@ impl Exporter<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Draws a run's glyphs as filled vector shapes, for a font the PDF cannot embed as text.
+    /// The page looks the same; the text of such a run cannot be selected or searched.
+    fn glyph_shapes(
+        &mut self,
+        run: &ShapeRun<'_>,
+        positions: &[libertum_layout::parley::Glyph],
+        page_height: f32,
+        turned: Option<&Placement>,
+        ops: &mut Vec<Op>,
+    ) {
+        use swash::zeno::Verb;
+        let Some(font) = swash::FontRef::from_index(run.data, run.index as usize) else {
+            return;
+        };
+        let mut scaler = self
+            .scale_cx
+            .builder(font)
+            .size(run.size)
+            .hint(false)
+            .normalized_coords(run.coords)
+            .build();
+        // Maps a point of a glyph (font size units, y up) to the page (PDF points, y up). An
+        // upright glyph on a vertical page is turned a quarter turn the other way and put in
+        // its cell, since the page matrix is about to turn everything clockwise.
+        let place = |glyph: &libertum_layout::parley::Glyph,
+                     cell: Option<&crate::vertical::UprightCell>,
+                     x: f32,
+                     y: f32|
+         -> Point {
+            let (gx, gy) = (run.origin.0 + glyph.x, run.origin.1 + glyph.y);
+            if let Some(cell) = cell {
+                let (along, across) = crate::vertical::upright_origin(
+                    run.origin.0 + cell.start,
+                    gy,
+                    cell,
+                    run.ascent,
+                    run.descent,
+                    run.sheet_width,
+                );
+                return Point {
+                    x: Pt(along - y),
+                    y: Pt(across + x),
+                };
+            }
+            match turned {
+                None => Point {
+                    x: Pt(gx + x),
+                    y: Pt(page_height - gy + y),
+                },
+                Some(turn) => {
+                    let (dx, dy) = (gx - turn.layout_centre.0, gy - turn.layout_centre.1);
+                    let cx = turn.centre.0 + dx * turn.cos - dy * turn.sin;
+                    let cy = turn.centre.1 + dx * turn.sin + dy * turn.cos;
+                    Point {
+                        x: Pt(cx + turn.cos * x + turn.sin * y),
+                        y: Pt(page_height - cy - turn.sin * x + turn.cos * y),
+                    }
+                }
+            }
+        };
+        ops.push(Op::SetFillColor {
+            col: run.colour.clone(),
+        });
+        let mode = if run.bold {
+            ops.push(Op::SetOutlineColor {
+                col: run.colour.clone(),
+            });
+            ops.push(Op::SetOutlineThickness {
+                pt: Pt(run.size * 0.03),
+            });
+            PaintMode::FillStroke
+        } else {
+            PaintMode::Fill
+        };
+        for (index, glyph) in positions.iter().enumerate() {
+            let stand = run
+                .upright
+                .get(index)
+                .copied()
+                .unwrap_or(crate::vertical::Stand::Sideways);
+            let standing = stand.upright();
+            let cell = standing
+                .then(|| crate::vertical::upright_cell(stand, positions, index, run.font_size));
+            let Some(outline) = scaler.scale_outline(glyph.id.min(u32::from(u16::MAX)) as u16)
+            else {
+                continue;
+            };
+            let points = outline.points();
+            let mut rings: Vec<PolygonRing> = Vec::new();
+            let mut ring: Vec<LinePoint> = Vec::new();
+            let mut next = 0;
+            let mut current = (0.0_f32, 0.0_f32);
+            let at = |i: usize| (points[i].x, points[i].y);
+            let on = |p: (f32, f32)| LinePoint {
+                p: place(glyph, cell.as_ref(), p.0, p.1),
+                bezier: false,
+            };
+            let off = |p: (f32, f32)| LinePoint {
+                p: place(glyph, cell.as_ref(), p.0, p.1),
+                bezier: true,
+            };
+            for verb in outline.verbs() {
+                match verb {
+                    Verb::MoveTo => {
+                        if !ring.is_empty() {
+                            rings.push(PolygonRing {
+                                points: std::mem::take(&mut ring),
+                            });
+                        }
+                        current = at(next);
+                        ring.push(on(current));
+                        next += 1;
+                    }
+                    Verb::LineTo => {
+                        current = at(next);
+                        ring.push(on(current));
+                        next += 1;
+                    }
+                    Verb::QuadTo => {
+                        // A quadratic curve as the cubic with the same shape.
+                        let (c, end) = (at(next), at(next + 1));
+                        let c1 = (
+                            current.0 + 2.0 / 3.0 * (c.0 - current.0),
+                            current.1 + 2.0 / 3.0 * (c.1 - current.1),
+                        );
+                        let c2 = (
+                            end.0 + 2.0 / 3.0 * (c.0 - end.0),
+                            end.1 + 2.0 / 3.0 * (c.1 - end.1),
+                        );
+                        ring.push(off(c1));
+                        ring.push(off(c2));
+                        ring.push(on(end));
+                        current = end;
+                        next += 2;
+                    }
+                    Verb::CurveTo => {
+                        let (c1, c2, end) = (at(next), at(next + 1), at(next + 2));
+                        ring.push(off(c1));
+                        ring.push(off(c2));
+                        ring.push(on(end));
+                        current = end;
+                        next += 3;
+                    }
+                    Verb::Close => {
+                        if !ring.is_empty() {
+                            rings.push(PolygonRing {
+                                points: std::mem::take(&mut ring),
+                            });
+                        }
+                    }
+                }
+            }
+            if !ring.is_empty() {
+                rings.push(PolygonRing { points: ring });
+            }
+            if rings.is_empty() {
+                continue;
+            }
+            ops.push(Op::DrawPolygon {
+                polygon: Polygon {
+                    rings,
+                    mode,
+                    winding_order: WindingOrder::NonZero,
+                },
+            });
+        }
     }
 
     fn image(&mut self, media: &libertum_model::Media) -> Result<XObjectId, PdfError> {
@@ -805,6 +1167,82 @@ fn tag_description(text: &str) -> Vec<u8> {
     out.push(0); // ScriptCode count.
     out.extend_from_slice(&[0u8; 67]); // ScriptCode characters.
     out
+}
+
+/// Table cell fills and borders of `tables`, under the text, on a page `page_height` high
+/// whose margins are those of `geometry`.
+fn table_rects<'a>(
+    ops: &mut Vec<Op>,
+    tables: impl Iterator<Item = &'a libertum_layout::TableDraw>,
+    geometry: &PageGeometry,
+    page_height: f32,
+) {
+    for table in tables {
+        let top = geometry.margins.top + table.y;
+        for cell in &table.cells {
+            if let Some(fill) = cell.fill {
+                rect(
+                    ops,
+                    geometry.margins.left + cell.x,
+                    top,
+                    cell.width,
+                    table.height,
+                    fill,
+                    page_height,
+                );
+            }
+        }
+        if table.borders.is_visible() {
+            let colour = table.borders.colour;
+            let line = table.borders.width_pt.max(0.5);
+            let x = geometry.margins.left + table.x;
+            for cell in table.cells.iter().filter(|cell| cell.top) {
+                rect(
+                    ops,
+                    geometry.margins.left + cell.x,
+                    top,
+                    cell.width,
+                    line,
+                    colour,
+                    page_height,
+                );
+            }
+            if table.bottom {
+                rect(
+                    ops,
+                    x,
+                    top + table.height - line,
+                    table.width,
+                    line,
+                    colour,
+                    page_height,
+                );
+            }
+            if table.sides {
+                rect(ops, x, top, line, table.height, colour, page_height);
+                rect(
+                    ops,
+                    x + table.width - line,
+                    top,
+                    line,
+                    table.height,
+                    colour,
+                    page_height,
+                );
+            }
+            for cell in table.cells.iter().filter(|cell| cell.left) {
+                rect(
+                    ops,
+                    geometry.margins.left + cell.x,
+                    top,
+                    line,
+                    table.height,
+                    colour,
+                    page_height,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

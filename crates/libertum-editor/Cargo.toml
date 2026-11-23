@@ -9,6 +9,7 @@ license.workspace = true
 libertum-model = { workspace = true }
 chrono = { workspace = true }
 unicode-segmentation = { workspace = true }
+icu_segmenter = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

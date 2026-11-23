@@ -370,6 +370,17 @@ impl Writer<'_> {
     /// `wrap_link` is false while a link's own brackets are open around this position (an
     /// image inside a link is not given a second link).
     fn image(&mut self, image: &InlineImage, wrap_link: bool) -> String {
+        // A linked video has no Markdown form of its own: a link to it.
+        if let Some(link) = image.link()
+            && link.kind == libertum_model::MediaKind::Video
+        {
+            let label = if image.alt.is_empty() {
+                link.url.clone()
+            } else {
+                image.alt.clone()
+            };
+            return format!("[{}]({})", escape_alt(&label), destination(&link.url));
+        }
         let name = if image.name.trim().is_empty() {
             match self.sink.image_file(&image.media) {
                 Some(name) => name,

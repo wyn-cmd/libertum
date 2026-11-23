@@ -66,6 +66,19 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Parsed, OdtError> {
     } else {
         sections
     };
+    let language2 = package.text("meta.xml").and_then(|meta| {
+        let open = format!(
+            "<meta:user-defined meta:name=\"{}\">",
+            crate::write::LANGUAGE2_PROPERTY
+        );
+        let at = meta.find(&open)? + open.len();
+        let end = meta[at..].find("</meta:user-defined>")?;
+        libertum_model::language_tag(&meta[at..at + end])
+    });
+    for section in &mut document.sections {
+        section.language = styles.language.clone();
+        section.language2 = language2.clone();
+    }
     Ok(Parsed {
         document,
         package,
@@ -628,6 +641,9 @@ fn parse_paragraph(
     }
     if !inline.cross_refs.is_empty() {
         paragraph.set_cross_refs(inline.cross_refs);
+    }
+    if !inline.ruby.is_empty() {
+        paragraph.set_ruby(inline.ruby);
     }
     Ok(paragraph)
 }

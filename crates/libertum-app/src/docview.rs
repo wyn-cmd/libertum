@@ -71,6 +71,60 @@ const MAX_BAND_ROWS: u32 = 256;
 /// `BandKey::page` of strips with nothing on them: identical on every page, so shared.
 const BLANK_BAND_PAGE: usize = usize::MAX;
 
+// Vertical text is laid out on the page turned a quarter turn (`PageGeometry::transposed`), so
+// every point and rectangle the layout deals in is on that turned page. The canvas and the app
+// only know the sheet. These turn between the two: the layout point (x, y) is at
+// (sheet width - y, x) on the sheet. Horizontal documents pass through unchanged.
+
+/// The layout point for a point of the sheet.
+fn sheet_to_layout(layout: &LayoutState, page: usize, x: f32, y: f32) -> (f32, f32) {
+    if layout.is_vertical() {
+        (y, layout.physical_page_geometry(page).width_pt - x)
+    } else {
+        (x, y)
+    }
+}
+
+/// A layout rectangle (x, y, width, height) as it lies on the sheet.
+fn rect_on_sheet(
+    layout: &LayoutState,
+    page: usize,
+    (x, y, w, h): (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    if layout.is_vertical() {
+        (
+            layout.physical_page_geometry(page).width_pt - y - h,
+            x,
+            h,
+            w,
+        )
+    } else {
+        (x, y, w, h)
+    }
+}
+
+fn selection_on_sheet(layout: &LayoutState, r: SelectionRect) -> SelectionRect {
+    let (x, y, width, height) = rect_on_sheet(layout, r.page, (r.x, r.y, r.width, r.height));
+    SelectionRect {
+        page: r.page,
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn caret_on_sheet(layout: &LayoutState, c: CaretRect) -> CaretRect {
+    let (x, y, width, height) = rect_on_sheet(layout, c.page, (c.x, c.y, c.width, c.height));
+    CaretRect {
+        page: c.page,
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -300,9 +354,11 @@ pub fn plan_bands(state: &LayoutState, page: usize, scale: f32) -> Option<BandPl
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (width, r, scale.to_bits(), antialias()).hash(&mut h);
         let mut empty = true;
+        // A vertical page's strips cut across its columns, so every strip shows part of every
+        // item: the page's items are all in each strip's key, and no strip is blank.
         for item in items
             .iter()
-            .filter(|it| it.bottom >= top && it.top <= bottom)
+            .filter(|it| state.is_vertical() || (it.bottom >= top && it.top <= bottom))
         {
             item.key.hash(&mut h);
             empty = false;
@@ -834,6 +890,16 @@ impl DocView {
         }
     }
 
+    /// Whether the text runs vertically, in columns from the right. The canvas, caret and
+    /// selection rectangles and pointer positions this view deals in are on the sheet either
+    /// way; the layout underneath is turned a quarter turn.
+    pub fn is_vertical(&self) -> bool {
+        self.layout
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_vertical()
+    }
+
     /// One geometry per laid-out page for the canvas. Pages not laid out yet use section 0's
     /// setup and the canvas falls back to it, so the vector can be shorter than the page
     /// count while the background pass runs.
@@ -893,7 +959,7 @@ impl DocView {
             geometries.extend_from_slice(&views.geometries[..reuse_from]);
             used.extend_from_slice(&views.used[..reuse_from]);
             for page in reuse_from..known {
-                geometries.push(layout.page_geometry(page));
+                geometries.push(layout.physical_page_geometry(page));
                 used.push(layout.page_used_height(page));
             }
             drop(layout);
@@ -912,7 +978,7 @@ impl DocView {
             .read()
             .unwrap_or_else(|error| error.into_inner());
         let geometries: Arc<[PageGeometry]> = (0..known)
-            .map(|page| layout.page_geometry(page))
+            .map(|page| layout.physical_page_geometry(page))
             .collect::<Vec<_>>()
             .into();
         let used: Arc<[f32]> = (0..known)
@@ -942,7 +1008,7 @@ impl DocView {
         if page >= layout.page_count() {
             return None;
         }
-        let geometry = layout.page_geometry(page);
+        let geometry = layout.physical_page_geometry(page);
         let scale = width_px.max(8) as f32 / geometry.width_pt.max(1.0);
         self.thumbs.set_antialias(antialias());
         let pixmap = self.thumbs.render_page(&layout, page, scale)?;
@@ -1094,8 +1160,13 @@ impl DocView {
         }
         let epoch = self.style_epoch;
         let doc = self.editor.document();
+        let language = doc.sections.first().and_then(|s| s.language.as_deref());
+        let language2 = doc.sections.first().and_then(|s| s.language2.as_deref());
+        let vertical = !self.pageless && doc.sections.first().is_some_and(|s| s.vertical);
         let snap = |p: &libertum_model::Paragraph| {
-            let mut s = ParagraphSnapshot::from_model(p, &doc.styles);
+            let mut s = ParagraphSnapshot::from_model(p, &doc.styles, language);
+            s.add_language(language2);
+            s.set_vertical(vertical);
             s.version = s.version.wrapping_add(epoch << STYLE_EPOCH_SHIFT);
             s
         };
@@ -1347,6 +1418,16 @@ impl DocView {
 
     /// Maps a page point to the model block under it.
     pub fn hit_test(&self, page: usize, x_pt: f32, y_pt: f32) -> Option<(BlockId, usize)> {
+        let (x_pt, y_pt) = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            sheet_to_layout(&layout, page, x_pt, y_pt)
+        };
+        self.hit_test_layout(page, x_pt, y_pt)
+    }
+
+    /// [`hit_test`](Self::hit_test) for a point already in the layout page's own coordinates
+    /// (the turned page, for vertical text): what the caret movement works in.
+    fn hit_test_layout(&self, page: usize, x_pt: f32, y_pt: f32) -> Option<(BlockId, usize)> {
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
         let hit = layout.hit_test(page, x_pt, y_pt)?;
         let id = layout.paragraphs().get(hit.para)?.id;
@@ -1368,7 +1449,7 @@ impl DocView {
                     width,
                     height,
                     ..
-                } => Some((x, y, width, height)),
+                } => Some(rect_on_sheet(&layout, page, (x, y, width, height))),
                 _ => None,
             })
             .collect()
@@ -1410,7 +1491,11 @@ impl DocView {
             return Vec::new();
         };
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        layout.selection_rects(index, start..end)
+        layout
+            .selection_rects(index, start..end)
+            .into_iter()
+            .map(|rect| selection_on_sheet(&layout, rect))
+            .collect()
     }
 
     /// The image under a page point, with the paragraph that holds it and its index there:
@@ -1424,6 +1509,7 @@ impl DocView {
         }
         let hash = {
             let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            let (x_pt, y_pt) = sheet_to_layout(&layout, page, x_pt, y_pt);
             layout
                 .page_decorations(page)
                 .into_iter()
@@ -1456,7 +1542,9 @@ impl DocView {
         let caret = self.editor.caret();
         let index = self.editor.document().index_of(caret.block)?;
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        layout.caret_rect(index, caret.offset, 1.0)
+        layout
+            .caret_rect(index, caret.offset, 1.0)
+            .map(|rect| caret_on_sheet(&layout, rect))
     }
 
     /// A thin bar at a text position, in page coordinates: where compare mode marks removed
@@ -1464,10 +1552,56 @@ impl DocView {
     pub fn position_rect(&self, block: BlockId, offset: usize) -> Option<CaretRect> {
         let index = self.editor.document().index_of(block)?;
         let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-        layout.caret_rect(index, offset, 2.0)
+        layout
+            .caret_rect(index, offset, 2.0)
+            .map(|rect| caret_on_sheet(&layout, rect))
     }
 
     /// The line box the caret is on, in page coordinates (see `LayoutState::line_rect`).
+    /// The caret is in a table cell that stays upright on a vertical page: its text is
+    /// horizontal, so Up and Down step between lines as on any page.
+    pub fn caret_in_upright_cell(&self) -> bool {
+        let caret = self.editor.caret();
+        let Some(index) = self.editor.document().index_of(caret.block) else {
+            return false;
+        };
+        self.layout
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .paragraph_is_upright(index)
+    }
+
+    /// Up or Down inside an upright table, worked out on the sheet.
+    fn move_vertical_upright(&mut self, direction: i32, extend: bool) -> bool {
+        let Some(line) = self.caret_line_rect() else {
+            return false;
+        };
+        let (line, page) = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            let page = line.page;
+            let on_sheet = rect_on_sheet(&layout, page, (line.x, line.y, line.width, line.height));
+            (on_sheet, page)
+        };
+        let x = self.editor.preferred_x().unwrap_or(line.0);
+        let neighbour = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            layout.neighbour_line_y(page, x, line.1, line.1 + line.3, direction, true)
+        };
+        let Some(y) = neighbour else {
+            return false;
+        };
+        let (lx, ly) = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            sheet_to_layout(&layout, page, x, y)
+        };
+        let Some((block, offset)) = self.hit_test_layout(page, lx, ly) else {
+            return false;
+        };
+        self.editor
+            .set_caret_vertical(DocPosition { block, offset }, extend, x);
+        true
+    }
+
     fn caret_line_rect(&self) -> Option<CaretRect> {
         let caret = self.editor.caret();
         let index = self.editor.document().index_of(caret.block)?;
@@ -1538,7 +1672,12 @@ impl DocView {
             } else {
                 snapshot.text.len()
             };
-            out.extend(layout.selection_rects(i, from..to));
+            out.extend(
+                layout
+                    .selection_rects(i, from..to)
+                    .into_iter()
+                    .map(|rect| selection_on_sheet(&layout, rect)),
+            );
         }
         out
     }
@@ -1610,6 +1749,9 @@ impl DocView {
     /// Moves the caret one visual line up (`direction < 0`) or down, using the layout to
     /// decide where the previous/next line starts. Crosses page boundaries.
     pub fn move_vertical(&mut self, direction: i32, extend: bool) -> bool {
+        if self.caret_in_upright_cell() {
+            return self.move_vertical_upright(direction, extend);
+        }
         // The whole line box, not the caret: the caret is only as tall as the text, and a
         // step that short can stop in the space between paragraphs and stay on the line.
         let Some(caret) = self.caret_line_rect() else {
@@ -1630,10 +1772,10 @@ impl DocView {
         // space between paragraphs can be wider than a line); off the page, the next one.
         let neighbour = {
             let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
-            layout.neighbour_line_y(page, x, caret.y, caret.y + line, direction)
+            layout.neighbour_line_y(page, x, caret.y, caret.y + line, direction, false)
         };
         if let Some(y) = neighbour {
-            let Some((block, offset)) = self.hit_test(page, x, y) else {
+            let Some((block, offset)) = self.hit_test_layout(page, x, y) else {
                 return false;
             };
             self.editor
@@ -1656,7 +1798,7 @@ impl DocView {
                 y = bottom - line;
             }
         }
-        let Some((block, offset)) = self.hit_test(page, x, y) else {
+        let Some((block, offset)) = self.hit_test_layout(page, x, y) else {
             return false;
         };
         self.editor
@@ -1862,6 +2004,126 @@ fn spawn_render_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vertical_view() -> (DocView, BlockId) {
+        let text = "縦書きの日本語の文章です。".repeat(40);
+        let document = Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+            libertum_model::BlockId(1),
+            text,
+        )]);
+        let (mut view, _rx) = DocView::open(document);
+        view.edit(|editor| editor.set_vertical_text(true))
+            .expect("turn the text");
+        view.paginate_everything();
+        (view, libertum_model::BlockId(1))
+    }
+
+    #[test]
+    fn vertical_text_shows_the_sheet_not_the_turned_layout_page() {
+        let (view, _) = vertical_view();
+        let sheet = PageGeometry::from_setup(&view.document().page_setup());
+        // The canvas sees the real page (portrait stays portrait) and the layout is turned.
+        assert_eq!(view.geometry, sheet);
+        assert_eq!(view.page_geometries()[0], sheet);
+        let layout = view.layout.read().unwrap_or_else(|e| e.into_inner());
+        assert!(layout.is_vertical());
+        assert_eq!(layout.page_geometry(0).width_pt, sheet.height_pt);
+        assert_eq!(
+            libertum_render::page_pixel_size(&layout, 0, 1.0),
+            (sheet.width_pt.ceil() as u32, sheet.height_pt.ceil() as u32)
+        );
+    }
+
+    #[test]
+    fn in_vertical_text_a_click_lands_on_the_character_under_it_and_the_caret_lies_across_the_column()
+     {
+        let (mut view, block) = vertical_view();
+        // The fifth character's cell, on the sheet: a tall thin box, as a column's cell is.
+        let cell = view.range_rects(block, 15, 18)[0];
+        assert!(
+            cell.height > cell.width * 0.5 && cell.height < cell.width * 2.0,
+            "an ideograph's cell is about square: {cell:?}"
+        );
+        let sheet = PageGeometry::from_setup(&view.document().page_setup());
+        assert!(cell.x >= 0.0 && cell.x + cell.width <= sheet.width_pt + 0.5);
+        assert!(cell.y >= 0.0 && cell.y + cell.height <= sheet.height_pt + 0.5);
+        // The first line is the right-most column; clicks inside the cell pick its character
+        // by how far down the column they are.
+        let (x, mid) = (cell.x + cell.width / 2.0, cell.y + cell.height / 2.0);
+        let near_start = view.hit_test(cell.page, x, cell.y + cell.height * 0.2);
+        let near_end = view.hit_test(cell.page, x, cell.y + cell.height * 0.8);
+        assert_eq!(near_start, Some((block, 15)), "{mid}");
+        assert_eq!(near_end, Some((block, 18)));
+        // The caret there is a bar across the column, not a bar along it.
+        view.move_caret(|editor| {
+            editor.set_caret(libertum_editor::DocPosition { block, offset: 15 }, false)
+        });
+        let caret = view.caret_rect().expect("a caret");
+        assert!(caret.width > caret.height * 4.0, "{caret:?}");
+        // Moving along the column moves it down the sheet.
+        view.move_caret(|editor| editor.move_right(false));
+        let next = view.caret_rect().expect("a caret");
+        assert!(next.y > caret.y, "{caret:?} then {next:?}");
+        assert!((next.x - caret.x).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_selection_in_vertical_text_is_highlighted_down_the_columns_on_the_sheet() {
+        let (mut view, block) = vertical_view();
+        view.select_all();
+        let rects = view.selection_rects();
+        assert!(rects.len() > 2, "{} columns", rects.len());
+        let sheet = PageGeometry::from_setup(&view.document().page_setup());
+        for rect in &rects {
+            assert!(rect.width > 0.0 && rect.height > 0.0);
+            assert!(
+                rect.x >= -0.5 && rect.x + rect.width <= sheet.width_pt + 0.5,
+                "{rect:?}"
+            );
+            assert!(
+                rect.y >= -0.5 && rect.y + rect.height <= sheet.height_pt + 0.5,
+                "{rect:?}"
+            );
+        }
+        // Columns run from the right: the first line's box is right of the second's.
+        assert!(rects[0].x > rects[1].x, "{:?} {:?}", rects[0], rects[1]);
+        let _ = block;
+    }
+
+    #[test]
+    fn turning_vertical_text_off_again_restores_horizontal_pages() {
+        let (mut view, block) = vertical_view();
+        view.edit(|editor| editor.set_vertical_text(false))
+            .expect("turn back");
+        view.paginate_everything();
+        assert!(!view.layout.read().unwrap().is_vertical());
+        // Ten characters (three bytes each) on one line: wide, not tall.
+        let run = view.range_rects(block, 0, 30)[0];
+        assert!(run.width > run.height * 2.0, "a line is wide: {run:?}");
+    }
+
+    #[test]
+    fn changing_the_document_language_lays_every_paragraph_out_in_it() {
+        let mut document = Document::from_paragraphs(vec![
+            libertum_model::Paragraph::new(libertum_model::BlockId(1), "直骨海角"),
+            libertum_model::Paragraph::new(libertum_model::BlockId(2), "second 直骨"),
+        ]);
+        document.sections[0].language = Some("zh-CN".into());
+        let (mut view, _rx) = DocView::open(document);
+        view.paginate_everything();
+        let locales = |view: &DocView| -> Vec<Option<&'static str>> {
+            let layout = view.layout.read().unwrap_or_else(|e| e.into_inner());
+            layout.paragraphs().iter().map(|p| p.locale).collect()
+        };
+        assert_eq!(locales(&view), [Some("zh-CN"), Some("zh-CN")]);
+        view.edit(|editor| editor.set_language(Some("ja-JP")))
+            .expect("set the language");
+        assert_eq!(locales(&view), [Some("ja"), Some("ja")]);
+        // English carries no East Asian locale.
+        view.edit(|editor| editor.set_language(Some("en-GB")))
+            .expect("set the language");
+        assert_eq!(locales(&view), [None, None]);
+    }
 
     #[test]
     fn an_edit_rehashes_only_pages_from_the_edit_onward() {

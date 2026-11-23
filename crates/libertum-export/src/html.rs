@@ -16,7 +16,7 @@ use crate::{Chapter, chapter_blocks};
 
 /// The tags this export emits, kept in one place so a future AO3 whitelist change has one
 /// place to look.
-pub const AO3_WHITELIST: &str = "p, h1-h6, em, strong, u, s, sup, sub, blockquote, ul, ol, li, table, tbody, tr, td, br, hr, img";
+pub const AO3_WHITELIST: &str = "p, h1-h6, em, strong, u, s, sup, sub, blockquote, ul, ol, li, table, tbody, tr, td, br, hr, img, video, a";
 
 /// An image copied beside an EPUB chapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +62,46 @@ pub fn chapter_html(
     ChapterHtml {
         body,
         images: renderer.images,
+    }
+}
+
+/// File extensions a browser plays in a `video` element.
+const VIDEO_FILES: [&str; 5] = [".mp4", ".webm", ".ogv", ".ogg", ".m4v"];
+
+/// A linked picture as `img`; a linked video file as `video` with controls; any other video
+/// address (a streaming site's page) as a link, since AO3 does not embed other sites' players.
+fn linked_media(link: &libertum_model::MediaLink, alt: &str, out: &mut String) {
+    match link.kind {
+        libertum_model::MediaKind::Image => {
+            out.push_str("<img src=\"");
+            escape_attr_into(&link.url, out);
+            out.push('"');
+            if !alt.is_empty() {
+                out.push_str(" alt=\"");
+                escape_attr_into(alt, out);
+                out.push('"');
+            }
+            out.push_str(" />");
+        }
+        libertum_model::MediaKind::Video => {
+            let path = link
+                .url
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if VIDEO_FILES.iter().any(|ext| path.ends_with(ext)) {
+                out.push_str("<video controls src=\"");
+                escape_attr_into(&link.url, out);
+                out.push_str("\"></video>");
+            } else {
+                out.push_str("<a href=\"");
+                escape_attr_into(&link.url, out);
+                out.push_str("\">");
+                escape_into(if alt.is_empty() { &link.url } else { alt }, out);
+                out.push_str("</a>");
+            }
+        }
     }
 }
 
@@ -238,6 +278,14 @@ impl Renderer<'_> {
     }
 
     fn image(&mut self, image: &libertum_model::InlineImage, out: &mut String) {
+        // A linked video is always a link to it; a linked picture points at its address in
+        // an AO3 chapter, which cannot host files (an EPUB keeps the preview it holds).
+        if let Some(link) = image.link()
+            && (link.kind == libertum_model::MediaKind::Video || self.image_prefix.is_none())
+        {
+            linked_media(&link, &image.alt, out);
+            return;
+        }
         let Some(prefix) = self.image_prefix else {
             return;
         };

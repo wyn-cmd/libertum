@@ -336,6 +336,58 @@ pub struct Section {
     /// `fo:background-color` on the page layout, HTML `body` background). `None` is plain
     /// white paper. The app sets it on every section at once, like the watermark.
     pub page_colour: Option<[u8; 4]>,
+    /// The language the text is written in, as a BCP 47 tag such as `en-GB` (DOCX
+    /// `w:lang`, ODT `fo:language` and `fo:country`, HTML `lang`). `None` says nothing about
+    /// it. Always a tag [`language_tag`] accepted. The app sets it on every section at once,
+    /// like the watermark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// A second language for a document written in two (a tag like `language`). Spelling
+    /// accepts a word either language knows; hyphenation and the regional font for Chinese,
+    /// Japanese and Korean text take what either needs. `None` for one language. The app
+    /// sets it on every section at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language2: Option<String>,
+    /// Vertical text, set from right to left (DOCX `w:textDirection tbRl`, ODT
+    /// `style:writing-mode tb-rl`): lines run down the page and stack from the right, as in
+    /// Chinese, Japanese and Korean books. Latin text turns sideways and ideographs stay
+    /// upright. The app sets it on every section at once, like the watermark.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub vertical: bool,
+}
+
+/// Normalises a language tag read from a file or typed in: a 2 or 3 letter language, then
+/// optional subtags of 2 to 8 letters or digits, joined by `-` or `_`. The language is lower
+/// case, a 2 letter region upper case, a 4 letter script title case, the rest lower case.
+/// Anything else (empty, too long, odd characters) gives `None`, so a tag that reaches a file
+/// writer is always safe to print.
+pub fn language_tag(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 35 {
+        return None;
+    }
+    let mut parts = raw.split(['-', '_']);
+    let language = parts.next()?;
+    if !(2..=3).contains(&language.len()) || !language.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut out = language.to_ascii_lowercase();
+    for part in parts {
+        if !(2..=8).contains(&part.len()) || !part.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        out.push('-');
+        let alphabetic = part.chars().all(|c| c.is_ascii_alphabetic());
+        match part.len() {
+            2 if alphabetic => out.push_str(&part.to_ascii_uppercase()),
+            4 if alphabetic => {
+                out.push_str(&part[..1].to_ascii_uppercase());
+                out.push_str(&part[1..].to_ascii_lowercase());
+            }
+            _ => out.push_str(&part.to_ascii_lowercase()),
+        }
+    }
+    Some(out)
 }
 
 /// A text watermark: drawn behind the page's content, centred, in light grey.
@@ -402,6 +454,9 @@ impl Default for Section {
             link_footers_to_previous: false,
             watermark: None,
             page_colour: None,
+            language: None,
+            language2: None,
+            vertical: false,
         }
     }
 }
@@ -1307,6 +1362,10 @@ impl Document {
                     date_fields: old,
                 })
             }
+            Operation::SetRuby { block, ruby } => {
+                let old = self.paragraph_mut(block)?.set_ruby(ruby);
+                Ok(Operation::SetRuby { block, ruby: old })
+            }
             Operation::SetSection { index, section } => {
                 let len = self.sections.len();
                 let slot = self
@@ -1487,6 +1546,7 @@ impl ChangeSet {
             Operation::SetImages { block, .. } => set.touch(*block),
             Operation::SetCrossRefs { block, .. } => set.touch(*block),
             Operation::SetDateTimeFields { block, .. } => set.touch(*block),
+            Operation::SetRuby { block, .. } => set.touch(*block),
             // Page numbers are drawn on every page, so every page's hash changes.
             Operation::SetPageNumbering { .. } => set.sections = true,
             Operation::SetSection { .. } => set.sections = true,

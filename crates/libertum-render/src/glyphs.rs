@@ -28,6 +28,7 @@ pub(crate) struct GlyphKey {
     coords_hash: u64,
     embolden: bool,
     skew: i8,
+    rotated: bool,
     smooth: bool,
 }
 
@@ -41,6 +42,9 @@ pub(crate) struct GlyphRequest<'a> {
     pub coords: &'a [i16],
     pub embolden: bool,
     pub skew_degrees: Option<f32>,
+    /// The glyph turned a quarter turn clockwise about its origin, for sideways text in a
+    /// vertical page. Ignores `skew_degrees`.
+    pub rotated: bool,
     /// Antialiased edges; false thresholds coverage to hard pixels.
     pub smooth: bool,
 }
@@ -97,6 +101,7 @@ impl GlyphCache {
             coords_hash: h.finish(),
             embolden: req.embolden,
             skew: req.skew_degrees.map_or(0, |s| s as i8),
+            rotated: req.rotated,
             smooth: req.smooth,
         };
         if let Some(e) = self.map.get_mut(&key) {
@@ -139,7 +144,10 @@ impl GlyphCache {
         if req.embolden {
             render.embolden(req.size_px / 40.0);
         }
-        if let Some(deg) = req.skew_degrees {
+        if req.rotated {
+            // Outlines are y-up, so a clockwise turn as seen on the page is a negative angle.
+            render.transform(Some(Transform::rotation(Angle::from_degrees(-90.0))));
+        } else if let Some(deg) = req.skew_degrees {
             render.transform(Some(Transform::skew(
                 Angle::from_degrees(deg),
                 Angle::from_degrees(0.0),

@@ -10,6 +10,7 @@
 mod engine;
 mod geometry;
 mod paginate;
+pub mod script;
 pub mod spike;
 
 pub use engine::{

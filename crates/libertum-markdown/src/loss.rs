@@ -83,6 +83,8 @@ pub enum LossKind {
     Bookmarks,
     /// Cross-references: the text stays, the live reference does not. Per reference.
     CrossReferences,
+    /// Ruby (readings over text). Per ruby: the base text stays, the reading does not.
+    Ruby,
     /// Displayed image size (Markdown has no size). Per image.
     ImageSize,
     /// Merged table cells (spans across columns or rows). Per cell.
@@ -135,6 +137,7 @@ impl LossKind {
             LossKind::Footnotes => "Footnotes and endnotes",
             LossKind::Bookmarks => "Bookmarks",
             LossKind::CrossReferences => "Cross-references (the text stays, the link does not)",
+            LossKind::Ruby => "Ruby readings (the text stays, the reading does not)",
             LossKind::ImageSize => "Image sizes",
             LossKind::TableSpans => "Merged table cells",
             LossKind::TableFills => "Table cell shading",
@@ -365,6 +368,7 @@ fn scan_paragraph(
     add(LossKind::Footnotes, paragraph.notes().len());
     add(LossKind::Bookmarks, paragraph.bookmarks().len());
     add(LossKind::CrossReferences, paragraph.cross_refs().len());
+    add(LossKind::Ruby, paragraph.ruby().len());
     add(
         LossKind::ImageSize,
         paragraph

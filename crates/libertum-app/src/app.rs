@@ -32,6 +32,7 @@ use crate::inspector;
 use crate::inspector::bookmarks::BookmarkEntry;
 use crate::inspector::headers::HeadingEntry;
 use crate::inspector::notes::NoteEntry;
+use crate::language::DocLanguage;
 use crate::mcp;
 use crate::perf;
 use crate::recovery;
@@ -148,6 +149,13 @@ pub enum DocumentMsg {
     LinkFooters(bool),
     /// Edit the caret paragraph's footnote text.
     FootnoteText(String),
+    /// The language of this document (Document pane): spelling follows it, and the file
+    /// remembers it.
+    Language(DocLanguage),
+    /// The second language (`None` for one language only).
+    Language2(Option<DocLanguage>),
+    /// Text direction: vertical text runs down the page in columns from the right.
+    Vertical(bool),
 }
 
 /// The file formats the app reads and writes.
@@ -187,6 +195,42 @@ impl Format {
             DefaultFormat::Markdown => Format::Markdown,
             DefaultFormat::Native => Format::Native,
         }
+    }
+
+    /// Whether a file of this format stores the page colour (Libertum, Word, OpenDocument
+    /// and HTML do; RTF and Markdown do not).
+    fn keeps_page_colour(self) -> bool {
+        matches!(
+            self,
+            Format::Native | Format::Docx | Format::Odt | Format::Html
+        )
+    }
+
+    /// Whether a file of this format stores the document's language. RTF and Markdown do not;
+    /// the app remembers theirs by path instead (`Settings::document_languages`).
+    fn keeps_language(self) -> bool {
+        matches!(
+            self,
+            Format::Native | Format::Docx | Format::Odt | Format::Html
+        )
+    }
+
+    /// Whether a file of this format stores vertical text (Libertum, Word and OpenDocument).
+    fn keeps_vertical(self) -> bool {
+        matches!(self, Format::Native | Format::Docx | Format::Odt)
+    }
+
+    /// Whether a file of this format stores ruby (Libertum, Word, OpenDocument and HTML).
+    fn keeps_ruby(self) -> bool {
+        matches!(
+            self,
+            Format::Native | Format::Docx | Format::Odt | Format::Html
+        )
+    }
+
+    /// Whether a file of this format stores the watermark (Libertum, Word and OpenDocument).
+    fn keeps_watermark(self) -> bool {
+        matches!(self, Format::Native | Format::Docx | Format::Odt)
     }
 
     fn extension(self) -> &'static str {
@@ -499,6 +543,19 @@ enum Modal {
         versions: Vec<libertum_library::Version>,
         from_library: bool,
     },
+    /// Adding an online picture or video by its address.
+    LinkedMedia {
+        url: String,
+        alt: String,
+        video: bool,
+        /// Download a preview picture when inserting.
+        preview: bool,
+        /// The kind was chosen by hand, so typing the address no longer guesses it.
+        kind_chosen: bool,
+        /// A download is under way.
+        busy: bool,
+        error: Option<String>,
+    },
     /// Choosing what to insert for Date & Time.
     DateTime {
         updated: bool,
@@ -617,6 +674,27 @@ pub enum Message {
     CloseSettings,
     /// Open the Date & Time chooser (Insert menu).
     OpenDateTime,
+    /// Insert > Linked Image or Video.
+    OpenLinkedMedia,
+    CloseLinkedMedia,
+    LinkedUrl(String),
+    LinkedAlt(String),
+    LinkedVideo(bool),
+    LinkedPreview(bool),
+    LinkedInsert,
+    /// The preview for a new link arrived (or failed); the link is inserted either way.
+    LinkedInserted {
+        link: libertum_model::MediaLink,
+        alt: String,
+        preview: Result<std::sync::Arc<libertum_model::Media>, String>,
+    },
+    /// Fetch Preview in the Image group: download the picture for image `index` of a block.
+    FetchPreview(libertum_model::BlockId, usize),
+    PreviewFetched(
+        libertum_model::BlockId,
+        usize,
+        Result<std::sync::Arc<libertum_model::Media>, String>,
+    ),
     /// Close the chooser without inserting anything.
     CloseDateTime,
     /// The chooser: show the moment of insertion or the document's last save.
@@ -716,6 +794,8 @@ pub enum Message {
     ImageStep(libertum_model::BlockId, usize, i8),
     /// Alternative text typed for an image in the Format inspector.
     ImageAlt(libertum_model::BlockId, usize, String),
+    /// The Ruby group's reading changed.
+    RubyEdit(String),
     ImageRemove(libertum_model::BlockId, usize),
     /// Insert a reference to the named bookmark at the caret (Bookmarks pane).
     InsertCrossRef(String, libertum_model::CrossRefKind),
@@ -1213,6 +1293,9 @@ pub struct App {
     )>,
     /// Current IME composition string, drawn inline until committed.
     ime_preedit: Option<String>,
+    /// `LIBERTUM_PREEDIT` (screenshots): a composition shown whatever the platform's input
+    /// method reports, which would otherwise clear it.
+    preedit_hook: Option<String>,
     autoscroll: Option<AutoScroll>,
     /// Last keystroke, click or edit: the caret blinks for [`BLINK_TIMEOUT`] after it.
     caret_activity: Instant,
@@ -1407,6 +1490,7 @@ impl App {
             window_focused: true,
             selection_words_cache: None,
             ime_preedit: None,
+            preedit_hook: None,
             autoscroll: AutoScroll::from_env(),
             caret_activity: Instant::now(),
             caret_on: true,
@@ -1816,6 +1900,16 @@ impl App {
                 _ => {}
             }
         }
+        // `LIBERTUM_PREEDIT=<text>` shows that text as an input-method composition at the
+        // caret (for screenshots; a real composition comes from the platform's input method,
+        // which this hook does not depend on).
+        if let Ok(text) = std::env::var("LIBERTUM_PREEDIT")
+            && !text.is_empty()
+            && self.doc.is_some()
+        {
+            self.canvas_focused = true;
+            self.preedit_hook = Some(text);
+        }
         // `LIBERTUM_SETTINGS=1` opens the Settings window at start-up (for screenshots).
         if std::env::var("LIBERTUM_SETTINGS").is_ok_and(|v| v != "0" && !v.is_empty()) {
             self.settings_open = true;
@@ -1877,7 +1971,8 @@ impl App {
     /// Replaces the home screen with a new document built from `template`. The caret starts
     /// at the end of the document (the empty body paragraph), ready to type.
     fn create_document(&mut self, template: TemplateId) -> Task<Message> {
-        let new = template.build(self.state.units);
+        let mut new = template.build(self.state.units);
+        self.stamp_default_language(&mut new.document);
         let (mut doc, events) = DocView::open_with(new.document, new.options);
         doc.move_caret(|ed| ed.move_doc_end(false));
         self.state.fonts = installed_fonts(&doc);
@@ -1917,6 +2012,8 @@ impl App {
             tracing::info!(%warning, path = %template.path.display(), "template import warning");
         }
         let view = context.view();
+        let mut document = document;
+        self.stamp_default_language(&mut document);
         let (mut doc, events) = match template.format {
             TemplateFormat::Native if view.as_ref().is_some_and(|view| view.pageless) => {
                 DocView::open_pageless(document)
@@ -2521,7 +2618,7 @@ impl App {
         let words = doc
             .editor()
             .selected_text()
-            .map_or(0, |text| text.split_whitespace().count());
+            .map_or(0, |text| libertum_model::count_words(&text));
         self.selection_words_cache = Some((key.0, key.1, key.2, key.3, words));
         Some(words)
     }
@@ -2724,6 +2821,7 @@ impl App {
     fn on_keyboard(&mut self, event: keyboard::Event) -> Task<Message> {
         let keyboard::Event::KeyPressed {
             key,
+            physical_key,
             text,
             modifiers,
             ..
@@ -2731,6 +2829,8 @@ impl App {
         else {
             return Task::none();
         };
+        // Ctrl+C, V, Z and the others by position, so they work on a Cyrillic layout too.
+        let key = shortcuts::latin_key(&key, &physical_key, modifiers);
         // An inspector field owns the keyboard while it is being edited.
         if self.state.editing.is_some() {
             return Task::none();
@@ -2740,6 +2840,8 @@ impl App {
         };
         let command = modifiers.command();
         let shift = modifiers.shift();
+        // Text in an upright table cell is horizontal even on a vertical page.
+        let vertical = doc.is_vertical() && !doc.caret_in_upright_cell();
         use keyboard::key::Named;
 
         if command {
@@ -2762,6 +2864,24 @@ impl App {
                 }
                 if c.eq_ignore_ascii_case("v") {
                     return iced::clipboard::read().map(Message::PasteText);
+                }
+            }
+            // In vertical text Up and Down run along the column, so Ctrl+Up and Ctrl+Down move
+            // by word; Left and Right cross between columns and have no word step.
+            if vertical {
+                match key.as_ref() {
+                    keyboard::Key::Named(Named::ArrowUp) => {
+                        doc.move_caret(|ed| ed.move_word_left(shift));
+                        return self.after_move();
+                    }
+                    keyboard::Key::Named(Named::ArrowDown) => {
+                        doc.move_caret(|ed| ed.move_word_right(shift));
+                        return self.after_move();
+                    }
+                    keyboard::Key::Named(Named::ArrowLeft | Named::ArrowRight) => {
+                        return Task::none();
+                    }
+                    _ => {}
                 }
             }
             match key.as_ref() {
@@ -2788,6 +2908,31 @@ impl App {
             return Task::none();
         }
 
+        // Vertical text reads down a column and the columns follow from the right, so the
+        // arrows turn with it: Up and Down step along the column, Left goes to the next
+        // column (the one on the left) and Right to the previous one.
+        if vertical {
+            match key.as_ref() {
+                keyboard::Key::Named(Named::ArrowUp) => {
+                    doc.move_caret(|ed| ed.move_left(shift));
+                    return self.after_move();
+                }
+                keyboard::Key::Named(Named::ArrowDown) => {
+                    doc.move_caret(|ed| ed.move_right(shift));
+                    return self.after_move();
+                }
+                keyboard::Key::Named(Named::ArrowLeft) => {
+                    doc.move_vertical(1, shift);
+                    return self.after_move();
+                }
+                keyboard::Key::Named(Named::ArrowRight) => {
+                    doc.move_vertical(-1, shift);
+                    return self.after_move();
+                }
+                _ => {}
+            }
+        }
+
         match key.as_ref() {
             keyboard::Key::Named(Named::Backspace) => {
                 let result = doc.edit(|ed| ed.delete_backward());
@@ -2802,14 +2947,16 @@ impl App {
                 self.finish_edit(result)
             }
             // Tab and Shift+Tab change a list item's level (at the start of an item, or with
-            // list items selected). Outside a list, Tab inserts a tab character and
-            // Shift+Tab does nothing.
+            // list items selected), and with any text selected they indent or outdent the
+            // selected paragraphs instead of replacing the selection (Word, Pages). With a
+            // plain caret outside a list, Tab inserts a tab character and Shift+Tab does
+            // nothing.
             keyboard::Key::Named(Named::Tab) => {
                 if doc.editor().in_table() {
                     // Tab moves to the next cell; in the last cell it adds a row (Word).
                     let result = doc.edit(|ed| ed.tab_in_table(shift));
                     self.finish_edit(result)
-                } else if doc.editor().tab_changes_list_level() {
+                } else if doc.editor().has_selection() || doc.editor().tab_changes_list_level() {
                     let result = doc.edit(|ed| ed.indent(if shift { -1 } else { 1 }));
                     self.finish_edit(result)
                 } else if shift {
@@ -3098,13 +3245,14 @@ impl App {
     }
 
     fn preedit_overlay(&self) -> Option<canvas::PreeditOverlay> {
-        let text = self.ime_preedit.as_ref()?;
+        let text = self.ime_preedit.as_ref().or(self.preedit_hook.as_ref())?;
         let caret = self.doc.as_ref()?.caret_rect()?;
         Some(canvas::PreeditOverlay {
             page: caret.page,
             x_pt: caret.x,
             y_pt: caret.y,
-            height_pt: caret.height,
+            // A caret in vertical text is a bar across the column: its length is the text's size.
+            height_pt: caret.height.max(caret.width),
             text: text.clone(),
         })
     }
@@ -3197,8 +3345,15 @@ impl App {
             self.clear_spell_errors();
             return Task::none();
         };
+        // A document in Chinese, Japanese or Korean has no dictionary: nothing to underline.
+        let languages = self.spell_languages();
+        if languages.is_empty() {
+            self.spell_generation = self.spell_generation.wrapping_add(1);
+            self.spell_signature = None;
+            self.clear_spell_errors();
+            return Task::none();
+        };
         let pages = self.pages_near_view();
-        let language = self.settings.spellcheck_language;
         // Cheap change detection: without a document edit, a page-setup change or a new
         // viewport range, the paragraphs near the view and the result are the same. The
         // old signature cloned and hashed every visible paragraph on every tick.
@@ -3213,7 +3368,7 @@ impl App {
             // The caret's place, not just its paragraph: moving off a word releases it
             // for checking.
             doc.editor().caret().hash(&mut hasher);
-            language.hash(&mut hasher);
+            languages.hash(&mut hasher);
             self.spell_personal.len().hash(&mut hasher);
             self.spell_ignored_document.len().hash(&mut hasher);
             hasher.finish()
@@ -3245,8 +3400,8 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("libertum-spell-check".into())
             .spawn(move || {
-                let _ = tx.send(spell::check_paragraphs(
-                    &targets, language, &personal, &ignored,
+                let _ = tx.send(spell::check_paragraphs_any(
+                    &targets, &languages, &personal, &ignored,
                 ));
             });
         if let Err(error) = spawned {
@@ -3325,13 +3480,17 @@ impl App {
         x_pt: f32,
         y_pt: f32,
     ) -> Option<crate::toolbar::SpellingMenu> {
+        let languages = self.spell_languages();
+        if languages.is_empty() {
+            return None;
+        }
         let doc = self.doc.as_ref()?;
         let (block, offset) = doc.hit_test(page, x_pt, y_pt)?;
         let text = doc.document().paragraph(block)?.text().to_owned();
         let (start, end, word) = spell::word_at(&text, offset)?;
-        let errors = spell::check(
+        let errors = spell::check_any(
             &text,
-            self.settings.spellcheck_language,
+            &languages,
             &self.spell_personal,
             &self.spell_ignored_document,
         )
@@ -3351,7 +3510,7 @@ impl App {
         {
             return None;
         }
-        let suggestions = spell::suggestions(&span.word, self.settings.spellcheck_language);
+        let suggestions = spell::suggestions_any(&span.word, &languages);
         Some(crate::toolbar::SpellingMenu { span, suggestions })
     }
 
@@ -3576,6 +3735,8 @@ impl App {
         // An EPUB or an AO3 download is imported: it opens as a new, unsaved document, so the
         // original file is never rewritten in Libertum's own HTML.
         let imported = Format::for_path(&path) == Format::Epub || context.is_ao3();
+        let mut document = document;
+        self.apply_remembered_language(&mut document, &path, context.format());
         let (mut doc, events) = match context.format() {
             Format::Markdown => DocView::open_markdown(document),
             // RTF carries a page size but its flow is best read as one continuous column.
@@ -3623,6 +3784,10 @@ impl App {
         self.ime_preedit = None;
         if let Some(view) = &view {
             self.state.zoom = Zoom::Percent(view.zoom_percent.clamp(1, 800));
+        }
+        // The file may be in the other English: build that dictionary off the UI thread.
+        for language in self.spell_languages() {
+            spell::warm(language);
         }
         self.refresh_document();
         self.refresh_view();
@@ -4304,6 +4469,7 @@ impl App {
                     self.file_context = Some(FileContext::new(format, document));
                 }
                 self.remember_recent(&path);
+                self.remember_language_for_path(&path);
                 self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
                 self.file = Some(path);
                 self.dirty = false;
@@ -4390,6 +4556,7 @@ impl App {
             // The AO3 chapter window has its own Close button; it is not a choice.
             (Modal::Ao3Chapter { .. }, _) => Task::none(),
             (Modal::DateTime { .. }, _) => Task::none(),
+            (Modal::LinkedMedia { .. }, _) => Task::none(),
             // The update prompt has its own buttons; an Escape or backdrop click dismisses it.
             (Modal::UpdateAvailable { .. }, _) => Task::none(),
             (Modal::Recovery, ModalChoice::Restore) => self.restore_recovery(),
@@ -4606,6 +4773,7 @@ impl App {
                 | Message::TableStyle(_)
                 | Message::ImageStep(..)
                 | Message::ImageAlt(..)
+                | Message::RubyEdit(_)
                 | Message::ImageRemove(..)
                 | Message::Cut
                 | Message::Copy
@@ -4862,7 +5030,9 @@ impl App {
                 }
                 self.show_library();
             }
-            Message::Shortcut(Shortcut::CloseDocument) => return self.request_home(),
+            Message::Shortcut(Shortcut::CloseDocument | Shortcut::NewDocument) => {
+                return self.request_home();
+            }
             Message::OpenSettings => {
                 self.state.open_menu = None;
                 self.settings_open = true;
@@ -4885,6 +5055,164 @@ impl App {
                     return iced::clipboard::write(report.to_text());
                 }
             }
+            Message::OpenLinkedMedia => {
+                self.state.open_menu = None;
+                if self.doc.is_some() {
+                    self.modal = Some(Modal::LinkedMedia {
+                        url: String::new(),
+                        alt: String::new(),
+                        video: false,
+                        preview: true,
+                        kind_chosen: false,
+                        busy: false,
+                        error: None,
+                    });
+                }
+            }
+            Message::CloseLinkedMedia => {
+                if matches!(self.modal, Some(Modal::LinkedMedia { busy: false, .. })) {
+                    self.modal = None;
+                }
+            }
+            Message::LinkedUrl(value) => {
+                if let Some(Modal::LinkedMedia {
+                    url,
+                    video,
+                    kind_chosen,
+                    error,
+                    ..
+                }) = &mut self.modal
+                {
+                    if !*kind_chosen {
+                        *video = crate::linked::looks_like_video(&value);
+                    }
+                    *url = value;
+                    *error = None;
+                }
+            }
+            Message::LinkedAlt(value) => {
+                if let Some(Modal::LinkedMedia { alt, .. }) = &mut self.modal {
+                    *alt = value;
+                }
+            }
+            Message::LinkedVideo(is_video) => {
+                if let Some(Modal::LinkedMedia {
+                    video, kind_chosen, ..
+                }) = &mut self.modal
+                {
+                    *video = is_video;
+                    *kind_chosen = true;
+                }
+            }
+            Message::LinkedPreview(on) => {
+                if let Some(Modal::LinkedMedia { preview, .. }) = &mut self.modal {
+                    *preview = on;
+                }
+            }
+            Message::LinkedInsert => {
+                let Some(Modal::LinkedMedia {
+                    url,
+                    alt,
+                    video,
+                    preview,
+                    ..
+                }) = self.modal.clone()
+                else {
+                    return Task::none();
+                };
+                let Some(address) = crate::linked::normalise(&url) else {
+                    if let Some(Modal::LinkedMedia { error, .. }) = &mut self.modal {
+                        *error = Some(s::LINKED_BAD_URL.to_owned());
+                    }
+                    return Task::none();
+                };
+                let kind = if video {
+                    libertum_model::MediaKind::Video
+                } else {
+                    libertum_model::MediaKind::Image
+                };
+                let link = libertum_model::MediaLink { url: address, kind };
+                let from = crate::linked::preview_address(&link).filter(|_| preview);
+                let Some(from) = from else {
+                    // No preview wanted, or none to be had: the placeholder stands in.
+                    let media = Ok(crate::linked::placeholder(kind));
+                    return self.update(Message::LinkedInserted {
+                        link,
+                        alt,
+                        preview: media,
+                    });
+                };
+                if let Some(Modal::LinkedMedia { busy, error, .. }) = &mut self.modal {
+                    *busy = true;
+                    *error = None;
+                }
+                return Task::perform(
+                    async move { crate::linked::fetch_image(&from) },
+                    move |preview| Message::LinkedInserted {
+                        link: link.clone(),
+                        alt: alt.clone(),
+                        preview,
+                    },
+                );
+            }
+            Message::LinkedInserted { link, alt, preview } => {
+                // A failed download still inserts the link, with its placeholder, and says why.
+                let (media, failure) = match preview {
+                    Ok(media) => (media, None),
+                    Err(error) => (crate::linked::placeholder(link.kind), Some(error)),
+                };
+                let width = self.text_column_width().min(360.0);
+                let Some(doc) = self.doc.as_mut() else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                let result = doc.edit(|ed| ed.insert_linked_media(media, width, &link, &alt));
+                self.modal = failure
+                    .map(|error| Modal::Error(format!("{} {error}", s::LINKED_PREVIEW_FAILED)));
+                self.canvas_focused = self.modal.is_none();
+                let task = self.finish_edit(result);
+                self.refresh_format();
+                return task;
+            }
+            Message::FetchPreview(block, index) => {
+                let Some(link) = self
+                    .state
+                    .images
+                    .iter()
+                    .find(|image| image.block == block && image.index == index)
+                    .and_then(|image| image.link.clone())
+                else {
+                    return Task::none();
+                };
+                let Some(from) = crate::linked::preview_address(&link) else {
+                    self.modal = Some(Modal::Notice {
+                        title: s::LINKED_NO_PREVIEW.to_owned(),
+                        detail: String::new(),
+                    });
+                    return Task::none();
+                };
+                return Task::perform(
+                    async move { crate::linked::fetch_image(&from) },
+                    move |result| Message::PreviewFetched(block, index, result),
+                );
+            }
+            Message::PreviewFetched(block, index, result) => match result {
+                Ok(media) => {
+                    let Some(doc) = self.doc.as_mut() else {
+                        return Task::none();
+                    };
+                    let result = doc.edit(|ed| ed.replace_image_media(block, index, media));
+                    let task = self.finish_edit(result);
+                    self.refresh_format();
+                    return task;
+                }
+                Err(error) => {
+                    self.modal = Some(Modal::Error(format!(
+                        "{} {error}",
+                        s::LINKED_PREVIEW_FAILED
+                    )));
+                }
+            },
             Message::OpenDateTime => {
                 self.state.open_menu = None;
                 if self.doc.is_some() {
@@ -4935,6 +5263,7 @@ impl App {
             Message::SetDefaultFormat(format) => {
                 self.settings.default_format = format;
                 self.save_settings();
+                self.refresh_format();
             }
             Message::SetAutosave(seconds) => {
                 self.settings.autosave_secs = seconds;
@@ -5229,6 +5558,18 @@ impl App {
             ) => {
                 if self.canvas_focused && self.state.editing.is_none() {
                     self.toggle_char(shortcut);
+                }
+            }
+            Message::Shortcut(Shortcut::Heading(level)) => {
+                if self.canvas_focused && self.state.editing.is_none() {
+                    let style = match level {
+                        1 => ParagraphStyle::Heading1,
+                        2 => ParagraphStyle::Heading2,
+                        3 => ParagraphStyle::Heading3,
+                        4 => ParagraphStyle::Heading4,
+                        _ => ParagraphStyle::Body,
+                    };
+                    return self.update(Message::Format(FormatMsg::Style(style)));
                 }
             }
             Message::Shortcut(Shortcut::PageBreak) => {
@@ -5978,6 +6319,15 @@ impl App {
                 self.refresh_format();
                 return task;
             }
+            Message::RubyEdit(reading) => {
+                let Some(doc) = self.doc.as_mut() else {
+                    return Task::none();
+                };
+                let result = doc.edit(|ed| ed.set_ruby(&reading));
+                let task = self.finish_edit(result);
+                self.refresh_format();
+                return task;
+            }
             Message::ImageRemove(block, index) => {
                 let Some(doc) = self.doc.as_mut() else {
                     return Task::none();
@@ -6590,6 +6940,106 @@ impl App {
 
     /// Shows the selection's character formatting in the inspector (uniform values, or the
     /// mixed state). O(1) for a caret; O(selected runs) for a selection.
+    /// The format a save would use: the file's, else the Settings default (an imported EPUB
+    /// is never written back, so it is saved like a new document).
+    fn save_format(&self) -> Format {
+        self.file
+            .as_deref()
+            .map(Format::for_path)
+            .or_else(|| self.file_context.as_ref().map(FileContext::format))
+            .filter(|format| *format != Format::Epub)
+            .unwrap_or_else(|| Format::from_settings(&self.settings))
+    }
+
+    /// The language of the open document: the one its tag names, else the Settings default (a
+    /// new file, one that does not say, or one in a language this list does not have).
+    fn doc_language(&self) -> DocLanguage {
+        self.doc
+            .as_ref()
+            .and_then(|doc| doc.editor().language())
+            .and_then(DocLanguage::from_tag)
+            .unwrap_or_else(|| DocLanguage::from(self.settings.spellcheck_language))
+    }
+
+    /// The second language of the open document, if it has one this list knows.
+    fn doc_language2(&self) -> Option<DocLanguage> {
+        self.doc
+            .as_ref()
+            .and_then(|doc| doc.editor().language2())
+            .and_then(DocLanguage::from_tag)
+    }
+
+    /// The dictionaries to check the open document with: its language's and its second
+    /// language's, those that have one (a document in Chinese, Japanese or Korean only has
+    /// none, so nothing is underlined in it).
+    fn spell_languages(&self) -> Vec<spell::Language> {
+        let mut out: Vec<spell::Language> = Vec::new();
+        for language in [Some(self.doc_language()), self.doc_language2()]
+            .into_iter()
+            .flatten()
+            .filter_map(DocLanguage::dictionary)
+        {
+            if !out.contains(&language) {
+                out.push(language);
+            }
+        }
+        out
+    }
+
+    /// The dictionary to check the open document with, or `None` when its language has none
+    /// (Chinese, Japanese and Korean documents are not spell-checked).
+    #[cfg(test)]
+    fn spell_language(&self) -> Option<spell::Language> {
+        self.doc_language().dictionary()
+    }
+
+    /// Gives a document that has no language the Settings default, so it is written into the
+    /// file and the choice stays with the document when the default changes later.
+    fn stamp_default_language(&self, document: &mut libertum_model::Document) {
+        if document
+            .sections
+            .iter()
+            .all(|section| section.language.is_none())
+        {
+            let tag = self.settings.spellcheck_language.tag().to_owned();
+            for section in &mut document.sections {
+                section.language = Some(tag.clone());
+            }
+        }
+    }
+
+    /// RTF and Markdown cannot hold a language, so a file of those formats gets the one the
+    /// app remembered for its path.
+    fn apply_remembered_language(
+        &self,
+        document: &mut libertum_model::Document,
+        path: &std::path::Path,
+        format: Format,
+    ) {
+        if format.keeps_language() {
+            return;
+        }
+        if let Some(language) = self.settings.language_for(path) {
+            let second = self.settings.second_language_for(path);
+            for section in &mut document.sections {
+                section.language = Some(language.tag().to_owned());
+                section.language2 = second.map(|s| s.tag().to_owned());
+            }
+        }
+    }
+
+    /// Remembers the open document's language for `path` when its format cannot hold one.
+    fn remember_language_for_path(&mut self, path: &std::path::Path) {
+        if Format::for_path(path).keeps_language() {
+            return;
+        }
+        let language = self.doc_language();
+        let second = self.doc_language2();
+        if self.settings.remember_languages(path, language, second) {
+            self.save_settings();
+        }
+    }
+
     fn refresh_format(&mut self) {
         let Some(doc) = &self.doc else {
             return;
@@ -6610,14 +7060,24 @@ impl App {
                 index,
                 width_pt: image.width_pt,
                 alt: image.alt.clone(),
+                link: image.link(),
+                previewable: image
+                    .link()
+                    .is_some_and(|link| crate::linked::preview_address(&link).is_some()),
             })
             .collect();
+        self.state.ruby = editor.ruby_target().map(|(_, _, text)| text);
         self.state.markdown = self
             .file
             .as_deref()
             .map(Format::for_path)
             .or_else(|| self.file_context.as_ref().map(FileContext::format))
             == Some(Format::Markdown);
+        let saves_as = self.save_format();
+        self.state.keeps_page_colour = saves_as.keeps_page_colour();
+        self.state.keeps_watermark = saves_as.keeps_watermark();
+        self.state.keeps_vertical = saves_as.keeps_vertical();
+        self.state.keeps_ruby = saves_as.keeps_ruby();
         let sum = doc.editor().char_summary();
         fn mixed<T>(v: Option<T>) -> Mixed<T> {
             v.map_or(Mixed::Mixed, Mixed::Value)
@@ -6748,6 +7208,43 @@ impl App {
             DocumentMsg::PageColour(colour) => {
                 if let Some(doc) = self.doc.as_mut() {
                     let result = doc.edit(|ed| ed.set_page_colour(colour));
+                    let _ = self.finish_edit(result);
+                }
+                self.refresh_document();
+            }
+            DocumentMsg::Language(_) | DocumentMsg::Language2(_) => {
+                let was_dirty = self.dirty;
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| match &msg {
+                        DocumentMsg::Language(language) => ed.set_language(Some(language.tag())),
+                        DocumentMsg::Language2(second) => {
+                            let first = ed.language().map(str::to_owned);
+                            ed.set_languages(first.as_deref(), second.map(DocLanguage::tag))
+                        }
+                        _ => unreachable!("matched above"),
+                    });
+                    let _ = self.finish_edit(result);
+                }
+                // An RTF or Markdown file cannot hold the choice, so it is not an unsaved
+                // change to the file: the app remembers it by path at once instead.
+                if !self.save_format().keeps_language() {
+                    self.dirty = was_dirty;
+                    if let Some(path) = self.file.clone() {
+                        self.remember_language_for_path(&path);
+                    }
+                }
+                self.refresh_document();
+                for language in self.spell_languages() {
+                    spell::warm(language);
+                }
+                self.spell_ignored_once.clear();
+                // The next quiet tick re-checks the page in the new language.
+                self.spell_signature = None;
+                note_spell_edit();
+            }
+            DocumentMsg::Vertical(on) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    let result = doc.edit(|ed| ed.set_vertical_text(on));
                     let _ = self.finish_edit(result);
                 }
                 self.refresh_document();
@@ -6948,6 +7445,9 @@ impl App {
         let document = doc.editor().document();
         self.state.pageless = doc.pageless;
         let setup = doc.editor().page_setup_at_caret();
+        let language = self.doc_language();
+        let language2 = self.doc_language2();
+        let vertical = doc.is_vertical();
         let d = &mut self.state.document;
         d.page_size = Mixed::Value(PageSize::from_model(setup.paper));
         d.orientation = Mixed::Value(Orientation::from_model(setup.orientation));
@@ -6962,6 +7462,9 @@ impl App {
         d.watermark_diagonal = watermark.as_ref().is_none_or(|w| w.diagonal);
         d.watermark_text = watermark.map(|w| w.text).unwrap_or_default();
         d.page_colour = doc.editor().page_colour();
+        d.language = language;
+        d.language2 = language2;
+        d.vertical = vertical;
         d.page_colour_hex = d
             .page_colour
             .map(|[r, g, b, _]| format!("#{r:02X}{g:02X}{b:02X}"))
@@ -7074,6 +7577,8 @@ impl App {
                 caret: doc.caret_rect().filter(|_| self.caret_on),
                 ime_enabled: self.canvas_focused && self.state.editing.is_none(),
                 ime_caret: doc.caret_rect(),
+                vertical_text: doc.is_vertical(),
+                composition_vertical: doc.is_vertical() && !doc.caret_in_upright_cell(),
                 selection: doc.selection_rects_on(self.pages_near_view()),
                 find: self.find_match_rects(),
                 spell: self.spell_rects(),
@@ -7313,6 +7818,107 @@ impl App {
         stack![
             mouse_area(space().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::CloseDateTime),
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Insert > Linked Image or Video: the address, a description and whether to download a
+    /// preview.
+    fn linked_media_layer<'a>(&'a self, modal: &'a Modal, t: Tokens) -> Element<'a, Message> {
+        use crate::widgets::controls;
+        let Modal::LinkedMedia {
+            url,
+            alt,
+            video,
+            preview,
+            busy,
+            error,
+            ..
+        } = modal
+        else {
+            return space().into();
+        };
+        let kind = segmented::select(
+            t,
+            Look::Raised,
+            &[
+                (false, Content::Label(s::LINKED_KIND_IMAGE)),
+                (true, Content::Label(s::LINKED_KIND_VIDEO)),
+            ],
+            Some(*video),
+            Message::LinkedVideo,
+        );
+        let mut address = iced::widget::text_input(s::LINKED_URL_PLACEHOLDER, url)
+            .size(13)
+            .padding(7);
+        let mut description = iced::widget::text_input(s::LINKED_ALT_PLACEHOLDER, alt)
+            .size(13)
+            .padding(7);
+        let mut check = iced::widget::checkbox(*preview)
+            .label(s::LINKED_PREVIEW)
+            .size(15);
+        if !*busy {
+            address = address
+                .on_input(Message::LinkedUrl)
+                .on_submit(Message::LinkedInsert);
+            description = description
+                .on_input(Message::LinkedAlt)
+                .on_submit(Message::LinkedInsert);
+            check = check.on_toggle(Message::LinkedPreview);
+        }
+        let cancel = button(text(s::CANCEL).size(13))
+            .padding([6, 16])
+            .style(move |_, status| flat(t, status))
+            .on_press_maybe((!*busy).then_some(Message::CloseLinkedMedia));
+        let insert = button(text(s::LINKED_INSERT).size(13))
+            .padding([6, 18])
+            .style(move |_, _| button::Style {
+                background: Some(t.accent.into()),
+                text_color: t.on_accent,
+                border: border::rounded(6),
+                ..button::Style::default()
+            })
+            .on_press_maybe((!*busy).then_some(Message::LinkedInsert));
+        let mut card = column![
+            text(s::LINKED_TITLE)
+                .size(15)
+                .font(controls::bold())
+                .color(t.text),
+            kind,
+            address,
+            description,
+            check,
+            controls::caption(t, s::LINKED_HINT),
+        ]
+        .spacing(10);
+        if *busy {
+            card = card.push(text(s::LINKED_DOWNLOADING).size(12).color(t.text_secondary));
+        }
+        if let Some(error) = error {
+            card = card.push(text(error.as_str()).size(12).color(t.accent));
+        }
+        card = card.push(row![space::horizontal(), cancel, insert].spacing(8));
+        let card = container(card)
+            .padding(18)
+            .width(Length::Fixed(440.0))
+            .style(move |_| container::Style {
+                background: Some(t.inspector.into()),
+                border: border::rounded(12),
+                shadow: iced::Shadow {
+                    color: t.shadow,
+                    offset: iced::Vector::new(0.0, 8.0),
+                    blur_radius: 24.0,
+                },
+                ..container::Style::default()
+            });
+        stack![
+            mouse_area(space().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::CloseLinkedMedia),
             container(card)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -8884,6 +9490,9 @@ impl App {
         if let Modal::DateTime { updated, format } = modal {
             return self.date_time_layer(*updated, *format, t);
         }
+        if let Modal::LinkedMedia { .. } = modal {
+            return self.linked_media_layer(modal, t);
+        }
         if let Modal::UpdateAvailable { release, stage } = modal {
             return self.update_layer(release, stage, t);
         }
@@ -8910,6 +9519,7 @@ impl App {
             Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
             Modal::Library { .. } | Modal::History { .. } => (String::new(), String::new()),
             Modal::DateTime { .. } => (s::DATE_TIME_TITLE.to_owned(), String::new()),
+            Modal::LinkedMedia { .. } => (String::new(), String::new()),
             Modal::Ao3Chapter { .. } => (String::new(), String::new()),
             Modal::UpdateAvailable { .. } => (String::new(), String::new()),
             Modal::Recovery => {
@@ -8983,6 +9593,7 @@ impl App {
             | Modal::Library { .. }
             | Modal::History { .. }
             | Modal::DateTime { .. }
+            | Modal::LinkedMedia { .. }
             | Modal::Ao3Chapter { .. }
             | Modal::UpdateAvailable { .. } => Vec::new(),
             Modal::Recovery => vec![
@@ -10316,6 +10927,40 @@ mod tests {
         let _ = app.update(Message::Format(FormatMsg::ListKind(ListKind::None)));
         assert_eq!(app.state.format.list_kind, Mixed::Value(ListKind::None));
         assert_eq!(app.doc().markers_on(0), ["1.", "2."]);
+    }
+
+    #[test]
+    fn tab_with_a_selection_indents_instead_of_replacing_it() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("one\ntwo".into())));
+        app.doc_mut().move_caret(|ed| ed.select_all());
+        let text_of = |app: &App, i: usize| {
+            app.doc()
+                .editor()
+                .document()
+                .paragraph_at(i)
+                .expect("p")
+                .text()
+                .to_owned()
+        };
+        let indent_of = |app: &App, i: usize| {
+            let doc = app.doc().editor().document();
+            let p = doc.paragraph_at(i).expect("p");
+            doc.styles.resolve_props(&p.props).indent_left_pt
+        };
+        let _ = app.update(named(keyboard::key::Named::Tab));
+        assert_eq!(text_of(&app, 0), "one", "the text is kept");
+        assert_eq!(text_of(&app, 1), "two");
+        assert!(indent_of(&app, 0) > 0.0 && indent_of(&app, 1) > 0.0);
+        let _ = app.update(key_press(
+            keyboard::Key::Named(keyboard::key::Named::Tab),
+            None,
+            keyboard::Modifiers::SHIFT,
+        ));
+        assert_eq!(indent_of(&app, 0), 0.0);
+        assert_eq!(indent_of(&app, 1), 0.0);
     }
 
     #[test]
@@ -13529,6 +14174,725 @@ mod tests {
         let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
         let _ = app.update(Message::ModalChoice(ModalChoice::Discard));
         assert!(app.doc.is_none(), "Discard closes it");
+    }
+
+    #[test]
+    fn ctrl_n_goes_home_to_pick_a_template() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert!(app.doc.is_some());
+        let _ = app.update(Message::Shortcut(Shortcut::NewDocument));
+        assert!(app.doc.is_none(), "a clean document goes straight home");
+
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("edited".into())));
+        let _ = app.update(Message::Shortcut(Shortcut::NewDocument));
+        assert!(matches!(app.modal, Some(Modal::Unsaved { .. })));
+        assert!(app.doc.is_some(), "unsaved work is never dropped silently");
+
+        // On the home screen itself it does nothing.
+        let mut app = home();
+        let _ = app.update(Message::Shortcut(Shortcut::NewDocument));
+        assert!(app.doc.is_none());
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn ctrl_alt_digits_set_heading_styles() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        for (level, style) in [
+            (1, ParagraphStyle::Heading1),
+            (2, ParagraphStyle::Heading2),
+            (4, ParagraphStyle::Heading4),
+            (0, ParagraphStyle::Body),
+        ] {
+            let _ = app.update(Message::Shortcut(Shortcut::Heading(level)));
+            assert_eq!(app.state.format.paragraph_style, Mixed::Value(style));
+        }
+    }
+
+    #[test]
+    fn page_colour_and_watermark_follow_the_format_a_save_would_use() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let both = |app: &App| (app.state.keeps_page_colour, app.state.keeps_watermark);
+        for (format, expected) in [
+            (DefaultFormat::Docx, (true, true)),
+            (DefaultFormat::Odt, (true, true)),
+            (DefaultFormat::Native, (true, true)),
+            (DefaultFormat::Rtf, (false, false)),
+            (DefaultFormat::Markdown, (false, false)),
+        ] {
+            let _ = app.update(Message::SetDefaultFormat(format));
+            assert_eq!(both(&app), expected, "new document, default {format:?}");
+        }
+        // A saved file's own format wins over the Settings default.
+        let _ = app.update(Message::SetDefaultFormat(DefaultFormat::Rtf));
+        for (name, expected) in [
+            ("a.docx", (true, true)),
+            ("a.odt", (true, true)),
+            ("a.lbtd", (true, true)),
+            ("a.html", (true, false)),
+            ("a.rtf", (false, false)),
+            ("a.md", (false, false)),
+        ] {
+            app.file = Some(std::path::PathBuf::from(name));
+            app.refresh_format();
+            assert_eq!(both(&app), expected, "{name}");
+        }
+    }
+
+    fn language_temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("libertum-language-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the folder");
+        dir.join(name)
+    }
+
+    #[test]
+    fn each_document_keeps_its_own_language() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        // A new document is stamped with the Settings default, so the file keeps it.
+        assert_eq!(app.spell_language(), Some(spell::Language::British));
+        assert_eq!(app.doc().editor().language(), Some("en-GB"));
+
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::American,
+        )));
+        assert_eq!(app.spell_language(), Some(spell::Language::American));
+        assert_eq!(app.state.document.language, DocLanguage::American);
+        assert_eq!(app.doc().editor().language(), Some("en-US"));
+        assert_eq!(
+            app.settings.spellcheck_language,
+            spell::Language::British,
+            "the choice belongs to the document, not to Settings"
+        );
+        assert!(app.dirty, "the file now differs from what is on disk");
+
+        // Another document starts from the default again.
+        let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        let _ = app.update(Message::ModalChoice(ModalChoice::Discard));
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert_eq!(app.spell_language(), Some(spell::Language::British));
+
+        // The Settings default only touches documents that do not say.
+        let _ = app.update(Message::SetSpellLanguage(spell::Language::American));
+        assert_eq!(
+            app.spell_language(),
+            Some(spell::Language::British),
+            "this document already says British"
+        );
+        app.doc_mut()
+            .edit(|ed| ed.set_language(None))
+            .expect("clear");
+        assert_eq!(
+            app.spell_language(),
+            Some(spell::Language::American),
+            "a document with no language follows the default"
+        );
+    }
+
+    #[test]
+    fn a_second_language_widens_the_dictionaries_and_is_kept_with_the_file() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert_eq!(app.spell_languages(), [spell::Language::British]);
+        let _ = app.update(Message::Document(DocumentMsg::Language2(Some(
+            DocLanguage::Ukrainian,
+        ))));
+        assert_eq!(app.doc().editor().language2(), Some("uk-UA"));
+        assert_eq!(
+            app.spell_languages(),
+            [spell::Language::British, spell::Language::Ukrainian]
+        );
+        assert_eq!(app.state.document.language2, Some(DocLanguage::Ukrainian));
+        // The same language twice is one dictionary, and the second drops out of the file.
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::Ukrainian,
+        )));
+        assert_eq!(app.spell_languages(), [spell::Language::Ukrainian]);
+        // A language with no dictionary adds none.
+        let _ = app.update(Message::Document(DocumentMsg::Language2(Some(
+            DocLanguage::Japanese,
+        ))));
+        assert_eq!(app.spell_languages(), [spell::Language::Ukrainian]);
+        let _ = app.update(Message::Document(DocumentMsg::Language2(None)));
+        assert_eq!(app.doc().editor().language2(), None);
+        // A file that cannot hold it gets the pair back from the app's memory by path.
+        let path = language_temp("pair.rtf");
+        let _ = app.update(Message::Document(DocumentMsg::Language2(Some(
+            DocLanguage::British,
+        ))));
+        app.file = Some(path.clone());
+        app.remember_language_for_path(&path);
+        assert_eq!(
+            app.settings.language_for(&path),
+            Some(DocLanguage::Ukrainian)
+        );
+        assert_eq!(
+            app.settings.second_language_for(&path),
+            Some(DocLanguage::British)
+        );
+    }
+
+    #[test]
+    fn a_language_the_file_names_wins_and_one_without_a_dictionary_falls_back() {
+        for (tag, expected) in [
+            ("en-US", spell::Language::American),
+            ("en-AU", spell::Language::British),
+            ("fr-FR", spell::Language::British),
+            ("en", spell::Language::British),
+        ] {
+            let mut document =
+                libertum_model::Document::from_paragraphs(vec![libertum_model::Paragraph::new(
+                    libertum_model::BlockId(1),
+                    "Text",
+                )]);
+            document.sections[0].language = Some(tag.to_owned());
+            let path = language_temp(&format!("{tag}.html"));
+            Html::new(document).save(&path).expect("write");
+            let mut app = app();
+            let _ = app.open_path(path);
+            assert_eq!(app.spell_language(), Some(expected), "{tag}");
+            assert_eq!(
+                app.doc().editor().language(),
+                Some(tag),
+                "{tag}: opening does not rewrite the file's own tag"
+            );
+            assert!(!app.dirty);
+        }
+    }
+
+    #[test]
+    fn a_language_change_is_an_unsaved_change_only_if_the_file_can_hold_it() {
+        for (format, holds) in [
+            (DefaultFormat::Docx, true),
+            (DefaultFormat::Odt, true),
+            (DefaultFormat::Native, true),
+            (DefaultFormat::Rtf, false),
+            (DefaultFormat::Markdown, false),
+        ] {
+            let mut app = home();
+            let _ = app.update(Message::SetDefaultFormat(format));
+            let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+            assert!(!app.dirty);
+            let _ = app.update(Message::Document(DocumentMsg::Language(
+                DocLanguage::American,
+            )));
+            assert_eq!(app.dirty, holds, "{format:?}");
+            assert_eq!(app.spell_language(), Some(spell::Language::American));
+        }
+    }
+
+    #[test]
+    fn rtf_and_markdown_remember_their_language_by_path() {
+        for (name, content) in [
+            ("remembered.rtf", "{\\rtf1\\ansi Hello\\par}"),
+            ("remembered.md", "# Hello\n\nA paragraph.\n"),
+        ] {
+            let path = language_temp(name);
+            std::fs::write(&path, content).expect("write");
+            let other = language_temp(&format!("other-{name}"));
+            std::fs::write(&other, content).expect("write");
+            let mut app = home();
+            let _ = app.open_path(path.clone());
+            assert_eq!(
+                app.spell_language(),
+                Some(spell::Language::British),
+                "{name}"
+            );
+            let _ = app.update(Message::Document(DocumentMsg::Language(
+                DocLanguage::American,
+            )));
+            assert!(!app.dirty, "{name}: nothing in the file changed");
+            assert_eq!(
+                app.settings.language_for(&path),
+                Some(DocLanguage::American),
+                "{name}: remembered at once"
+            );
+            assert_eq!(app.settings.language_for(&other), None);
+
+            // Reopened, it is American; a different file is not.
+            let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+            let _ = app.open_path(path.clone());
+            assert_eq!(
+                app.spell_language(),
+                Some(spell::Language::American),
+                "{name}"
+            );
+            assert!(!app.dirty);
+            let _ = app.open_path(other);
+            assert_eq!(
+                app.spell_language(),
+                Some(spell::Language::British),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn saving_into_rtf_remembers_the_language_and_into_docx_does_not_need_to() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::American,
+        )));
+        let rtf = language_temp("saved-as.rtf");
+        let _ = app.update(Message::Saved {
+            path: rtf.clone(),
+            result: Ok(()),
+        });
+        assert_eq!(app.settings.language_for(&rtf), Some(DocLanguage::American));
+        let docx = language_temp("saved-as.docx");
+        let _ = app.update(Message::Saved {
+            path: docx.clone(),
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.settings.language_for(&docx),
+            None,
+            "a Word file carries its own language"
+        );
+    }
+
+    #[test]
+    fn east_asian_languages_can_be_chosen_and_turn_spell_checking_off() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert_eq!(app.doc_language(), DocLanguage::British);
+        assert!(app.spell_language().is_some());
+        for (language, tag) in [
+            (DocLanguage::Japanese, "ja-JP"),
+            (DocLanguage::Korean, "ko-KR"),
+            (DocLanguage::ChineseSimplified, "zh-CN"),
+            (DocLanguage::ChineseTraditional, "zh-TW"),
+        ] {
+            let _ = app.update(Message::Document(DocumentMsg::Language(language)));
+            assert_eq!(app.doc_language(), language);
+            assert_eq!(app.state.document.language, language);
+            assert_eq!(app.doc().editor().language(), Some(tag));
+            assert_eq!(app.spell_language(), None, "{language:?} has no dictionary");
+            assert!(app.spell_errors.is_empty());
+        }
+        // Back to English brings the dictionary back, and the Settings default is untouched.
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::American,
+        )));
+        assert_eq!(app.spell_language(), Some(spell::Language::American));
+        assert_eq!(app.settings.spellcheck_language, spell::Language::British);
+    }
+
+    #[test]
+    fn ukrainian_and_russian_documents_are_checked_with_their_own_dictionaries() {
+        let mut app = home();
+        let _ = app.update(Message::SetDefaultFormat(DefaultFormat::Docx));
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        for (language, tag, dictionary) in [
+            (DocLanguage::Ukrainian, "uk-UA", spell::Language::Ukrainian),
+            (DocLanguage::Russian, "ru-RU", spell::Language::Russian),
+        ] {
+            let _ = app.update(Message::Document(DocumentMsg::Language(language)));
+            assert_eq!(app.doc().editor().language(), Some(tag));
+            assert_eq!(app.spell_language(), Some(dictionary));
+            // The tag survives a Word file, and a Ukrainian reader on another machine uses it.
+            let path = language_temp(&format!("{tag}.docx"));
+            FileContext::new(Format::Docx, app.doc().document().clone())
+                .save(&path)
+                .expect("save");
+            let mut elsewhere = home();
+            let _ = elsewhere.open_path(path);
+            assert_eq!(elsewhere.doc_language(), language);
+            assert_eq!(elsewhere.spell_language(), Some(dictionary));
+        }
+    }
+
+    #[test]
+    fn east_asian_text_is_counted_by_character_and_typed_in_by_the_input_method() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        // A composition shows as it is typed, and nothing reaches the document until commit.
+        let _ = app.update(Message::Ime(input_method::Event::Preedit(
+            "ニホン".into(),
+            None,
+        )));
+        assert_eq!(app.ime_preedit.as_deref(), Some("ニホン"));
+        assert_eq!(app.state.word_count, 0);
+        let _ = app.update(Message::Ime(input_method::Event::Commit("日本語".into())));
+        assert_eq!(app.ime_preedit, None);
+        assert_eq!(
+            app.doc().document().paragraph_at(0).expect("p").text(),
+            "日本語"
+        );
+        assert_eq!(app.state.word_count, 3);
+        // Chinese, Korean and a mix, committed one after another, land in order.
+        for text in ["，你好", " 안녕하세요 ", "Hello"] {
+            let _ = app.update(Message::Ime(input_method::Event::Commit(text.into())));
+        }
+        assert_eq!(
+            app.doc().document().paragraph_at(0).expect("p").text(),
+            "日本語，你好 안녕하세요 Hello"
+        );
+        // 日本語 (3) + 你好 (2) + one Korean word + Hello.
+        assert_eq!(app.state.word_count, 3 + 2 + 1 + 1);
+        // The caret sits after the committed text, so more typing continues from there.
+        let _ = app.update(Message::Ime(input_method::Event::Commit("!".into())));
+        assert!(
+            app.doc()
+                .document()
+                .paragraph_at(0)
+                .expect("p")
+                .text()
+                .ends_with("Hello!")
+        );
+    }
+
+    #[test]
+    fn deleting_and_moving_over_east_asian_text_works_a_character_at_a_time() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::Ime(input_method::Event::Commit(
+            "你好한국어こんにちは".into(),
+        )));
+        let text = |app: &App| {
+            app.doc()
+                .document()
+                .paragraph_at(0)
+                .expect("p")
+                .text()
+                .to_owned()
+        };
+        let backspace = || {
+            key_press(
+                keyboard::Key::Named(keyboard::key::Named::Backspace),
+                None,
+                keyboard::Modifiers::default(),
+            )
+        };
+        // Each Backspace removes one character, never half of one.
+        let _ = app.update(backspace());
+        assert_eq!(text(&app), "你好한국어こんにち");
+        let left = key_press(
+            keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
+            None,
+            keyboard::Modifiers::default(),
+        );
+        for _ in 0..3 {
+            let _ = app.update(left.clone());
+        }
+        let _ = app.update(backspace());
+        assert_eq!(
+            text(&app),
+            "你好한국어んにち",
+            "three steps left, then the one before the caret"
+        );
+        let _ = app.update(Message::Ime(input_method::Event::Commit("漢".into())));
+        assert_eq!(text(&app), "你好한국어漢んにち");
+    }
+
+    #[test]
+    fn rtf_remembers_a_korean_document_by_path_and_a_docx_carries_japanese() {
+        let rtf = language_temp("korean.rtf");
+        std::fs::write(&rtf, "{\\rtf1\\ansi Hello\\par}").expect("write");
+        let mut app = home();
+        let _ = app.open_path(rtf.clone());
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::Korean,
+        )));
+        assert_eq!(app.settings.language_for(&rtf), Some(DocLanguage::Korean));
+        assert!(!app.dirty);
+        let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        let _ = app.open_path(rtf);
+        assert_eq!(app.doc_language(), DocLanguage::Korean);
+
+        let mut app = home();
+        let _ = app.update(Message::SetDefaultFormat(DefaultFormat::Docx));
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::Japanese,
+        )));
+        let docx = language_temp("japanese.docx");
+        FileContext::new(Format::Docx, app.doc().document().clone())
+            .save(&docx)
+            .expect("save");
+        let mut elsewhere = home();
+        let _ = elsewhere.open_path(docx);
+        assert_eq!(elsewhere.doc_language(), DocLanguage::Japanese);
+        assert_eq!(elsewhere.spell_language(), None);
+    }
+
+    #[test]
+    fn the_language_travels_inside_a_word_file() {
+        let mut app = home();
+        let _ = app.update(Message::SetDefaultFormat(DefaultFormat::Docx));
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::Document(DocumentMsg::Language(
+            DocLanguage::American,
+        )));
+        let path = language_temp("travels.docx");
+        FileContext::new(Format::Docx, app.doc().document().clone())
+            .save(&path)
+            .expect("save");
+        // A different app (another machine) whose default is British opens it.
+        let mut elsewhere = home();
+        let _ = elsewhere.open_path(path.clone());
+        assert_eq!(elsewhere.spell_language(), Some(spell::Language::American));
+        assert!(elsewhere.settings.document_languages.is_empty());
+    }
+
+    /// A key press on the given physical key of a non-Latin layout: the layout's own letter
+    /// as the logical key, as the platform reports it.
+    fn layout_key(
+        letter: &str,
+        code: keyboard::key::Code,
+        modifiers: keyboard::Modifiers,
+        text: Option<&str>,
+    ) -> Message {
+        Message::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(letter.into()),
+            modified_key: keyboard::Key::Character(letter.into()),
+            physical_key: keyboard::key::Physical::Code(code),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: text.map(Into::into),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn cyrillic_text_types_and_the_editing_shortcuts_work_on_a_cyrillic_layout() {
+        use keyboard::key::Code;
+        let ctrl = if cfg!(target_os = "macos") {
+            keyboard::Modifiers::LOGO
+        } else {
+            keyboard::Modifiers::CTRL
+        };
+        let none = keyboard::Modifiers::default();
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        // Typing Ukrainian letters, including ones English has no key for.
+        for (letter, code) in [
+            ("П", Code::KeyG),
+            ("р", Code::KeyH),
+            ("и", Code::KeyB),
+            ("в", Code::KeyD),
+            ("і", Code::KeyS),
+            ("т", Code::KeyN),
+            ("ї", Code::BracketRight),
+            ("є", Code::Quote),
+            ("ґ", Code::Backslash),
+        ] {
+            let _ = app.update(layout_key(letter, code, none, Some(letter)));
+        }
+        assert_eq!(first_text(&app), "Привітїєґ");
+
+        // Ctrl+A, then Ctrl+X, on the keys that are "ф" and "ч" on this layout.
+        let _ = app.update(layout_key("ф", Code::KeyA, ctrl, None));
+        assert_eq!(
+            app.doc().editor().selected_text().as_deref(),
+            Some("Привітїєґ")
+        );
+        let _ = app.update(layout_key("ч", Code::KeyX, ctrl, None));
+        assert_eq!(first_text(&app), "", "Ctrl+X cut the selection");
+        // Ctrl+Z (the key that is "я") brings it back.
+        let _ = app.update(layout_key("я", Code::KeyZ, ctrl, None));
+        assert_eq!(first_text(&app), "Привітїєґ");
+        // Ctrl+Shift+Z or Ctrl+Y (the key that is "н") redoes the cut.
+        let _ = app.update(layout_key("н", Code::KeyY, ctrl, None));
+        assert_eq!(first_text(&app), "");
+    }
+
+    #[test]
+    fn other_shortcuts_follow_the_key_position_on_a_cyrillic_layout() {
+        use keyboard::key::Code;
+        let ctrl = if cfg!(target_os = "macos") {
+            keyboard::Modifiers::LOGO
+        } else {
+            keyboard::Modifiers::CTRL
+        };
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        // Ctrl+N on a Ukrainian layout ("т") goes home.
+        let _ = app.update(Message::Shortcut(
+            crate::shortcuts::from_event(&keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character("т".into()),
+                modified_key: keyboard::Key::Character("т".into()),
+                physical_key: keyboard::key::Physical::Code(Code::KeyN),
+                location: keyboard::Location::Standard,
+                modifiers: ctrl,
+                text: None,
+                repeat: false,
+            })
+            .expect("Ctrl+N is a shortcut by position"),
+        ));
+        assert!(app.doc.is_none());
+    }
+
+    #[test]
+    fn text_direction_is_a_document_setting_kept_by_word_odt_and_libertum_files_only() {
+        let mut app = home();
+        for (format, keeps) in [
+            (DefaultFormat::Docx, true),
+            (DefaultFormat::Odt, true),
+            (DefaultFormat::Native, true),
+            (DefaultFormat::Rtf, false),
+            (DefaultFormat::Markdown, false),
+        ] {
+            let _ = app.update(Message::SetDefaultFormat(format));
+            let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+            assert_eq!(app.state.keeps_vertical, keeps, "{format:?}");
+            let _ = app.update(Message::Shortcut(Shortcut::CloseDocument));
+        }
+        let _ = app.update(Message::SetDefaultFormat(DefaultFormat::Docx));
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        assert!(!app.doc().is_vertical());
+        let _ = app.update(Message::Document(DocumentMsg::Vertical(true)));
+        assert!(app.doc().is_vertical());
+        assert!(app.state.document.vertical);
+        assert!(app.dirty, "the file now differs from what is on disk");
+        // It survives a Word file and is read back as vertical text.
+        let path = language_temp("vertical.docx");
+        FileContext::new(Format::Docx, app.doc().document().clone())
+            .save(&path)
+            .expect("save");
+        let mut elsewhere = home();
+        let _ = elsewhere.open_path(path);
+        assert!(elsewhere.doc().is_vertical());
+        assert!(elsewhere.state.document.vertical);
+        // And turns off again.
+        let _ = app.update(Message::Document(DocumentMsg::Vertical(false)));
+        assert!(!app.doc().is_vertical());
+    }
+
+    #[test]
+    fn in_vertical_text_the_arrow_keys_follow_the_columns() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("縦書き日本語".repeat(60))));
+        let _ = app.update(Message::Document(DocumentMsg::Vertical(true)));
+        // Back in the page, as a click on it would leave things.
+        app.canvas_focused = true;
+        app.doc_mut().paginate_everything();
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        let none = keyboard::Modifiers::default();
+        let arrow = |name: keyboard::key::Named| key_press(keyboard::Key::Named(name), None, none);
+        let offset = |app: &App| app.doc().editor().caret().offset;
+        use keyboard::key::Named;
+        // Down steps along the column, one character (three bytes) at a time; Up goes back.
+        let _ = app.update(arrow(Named::ArrowDown));
+        assert_eq!(offset(&app), 3);
+        let _ = app.update(arrow(Named::ArrowDown));
+        assert_eq!(offset(&app), 6);
+        let _ = app.update(arrow(Named::ArrowUp));
+        assert_eq!(offset(&app), 3);
+        // Left goes to the next column, the one on the left: further into the paragraph.
+        let _ = app.update(arrow(Named::ArrowLeft));
+        assert!(
+            offset(&app) > 30,
+            "the next column starts a column's length on: {}",
+            offset(&app)
+        );
+        // Right returns to the column on the right.
+        let _ = app.update(arrow(Named::ArrowRight));
+        assert!(offset(&app) < 30, "{}", offset(&app));
+    }
+
+    #[test]
+    fn a_linked_picture_or_video_is_inserted_with_a_placeholder() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        let _ = app.update(Message::OpenLinkedMedia);
+        assert!(matches!(app.modal, Some(Modal::LinkedMedia { .. })));
+        // A bad address is refused with a message and nothing is inserted.
+        let _ = app.update(Message::LinkedUrl("not an address".into()));
+        let _ = app.update(Message::LinkedInsert);
+        assert!(matches!(
+            app.modal,
+            Some(Modal::LinkedMedia { error: Some(_), .. })
+        ));
+        // A video address is recognised as a video; with no preview wanted it inserts at once.
+        let _ = app.update(Message::LinkedUrl("https://example.com/clip.mp4".into()));
+        let _ = app.update(Message::LinkedAlt("A clip".into()));
+        let _ = app.update(Message::LinkedPreview(false));
+        let _ = app.update(Message::LinkedInsert);
+        assert!(app.modal.is_none(), "{:?}", app.modal.is_some());
+        let (_, images) = app.doc().editor().caret_images();
+        assert_eq!(images.len(), 1);
+        let link = images[0].link().expect("a link");
+        assert_eq!(link.url, "https://example.com/clip.mp4");
+        assert_eq!(link.kind, libertum_model::MediaKind::Video);
+        assert_eq!(images[0].alt, "A clip");
+        assert_eq!(app.state.images[0].link, Some(link));
+        // A video file has no picture to download.
+        assert!(!app.state.images[0].previewable);
+        // A failed preview download still inserts the link and says why.
+        let _ = app.update(Message::LinkedInserted {
+            link: libertum_model::MediaLink {
+                url: "https://example.com/a.png".into(),
+                kind: libertum_model::MediaKind::Image,
+            },
+            alt: String::new(),
+            preview: Err("offline".into()),
+        });
+        assert!(matches!(app.modal, Some(Modal::Error(_))));
+        let (_, images) = app.doc().editor().caret_images();
+        assert_eq!(images.len(), 2);
+        assert!(app.state.images.iter().any(|image| image.previewable));
+    }
+
+    #[test]
+    fn the_ruby_field_sets_a_reading_over_the_selection() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("漢字を読む".into())));
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        app.doc_mut().move_caret(|ed| {
+            for _ in 0..2 {
+                ed.move_right(true);
+            }
+        });
+        let _ = app.update(Message::RubyEdit("かんじ".into()));
+        let doc = app.doc();
+        let paragraph = doc.editor().document().paragraph_at(0).expect("paragraph");
+        assert_eq!(paragraph.ruby().len(), 1);
+        assert_eq!(paragraph.ruby()[0].range, 0..6);
+        assert_eq!(app.state.ruby.as_deref(), Some("かんじ"));
+        // Word, OpenDocument, HTML and Libertum files keep it; RTF and Markdown do not.
+        assert!(Format::Docx.keeps_ruby() && Format::Native.keeps_ruby());
+        assert!(!Format::Rtf.keeps_ruby() && !Format::Markdown.keeps_ruby());
+        // Clearing the reading removes it.
+        let _ = app.update(Message::RubyEdit(String::new()));
+        let paragraph = app
+            .doc()
+            .editor()
+            .document()
+            .paragraph_at(0)
+            .expect("paragraph");
+        assert!(paragraph.ruby().is_empty());
+    }
+
+    #[test]
+    fn in_horizontal_text_the_arrow_keys_are_unchanged() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.canvas_focused = true;
+        let _ = app.update(Message::PasteText(Some("abcdef".into())));
+        app.doc_mut().move_caret(|ed| ed.move_doc_start(false));
+        let none = keyboard::Modifiers::default();
+        let _ = app.update(key_press(
+            keyboard::Key::Named(keyboard::key::Named::ArrowRight),
+            None,
+            none,
+        ));
+        assert_eq!(app.doc().editor().caret().offset, 1);
     }
 
     #[test]

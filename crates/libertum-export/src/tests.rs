@@ -281,3 +281,60 @@ fn the_epub_keeps_what_comes_before_the_first_chapter() {
         "{nav}"
     );
 }
+
+#[test]
+fn ao3_fragment_points_linked_pictures_and_videos_at_their_addresses() {
+    use libertum_model::{InlineImage, MediaKind, MediaLink, test_png_header};
+    let mut document = Document::default();
+    let png = libertum_model::Media::new(test_png_header(4, 4)).expect("png");
+    let mut paragraph = Paragraph::new(document.alloc_id(), "See: ");
+    let image = |offset: usize, link: MediaLink, alt: &str| {
+        let mut image = InlineImage::fitted(offset, std::sync::Arc::new(png.clone()), 100.0);
+        image.name = link.name();
+        image.alt = alt.to_owned();
+        image
+    };
+    let link = |url: &str, kind| MediaLink {
+        url: url.to_owned(),
+        kind,
+    };
+    paragraph.set_images(vec![
+        image(
+            5,
+            link("https://a.example/p.png?x=1&y=2", MediaKind::Image),
+            "A \"pic\"",
+        ),
+        image(5, link("https://a.example/clip.MP4", MediaKind::Video), ""),
+        image(
+            5,
+            link("https://www.youtube.com/watch?v=abc", MediaKind::Video),
+            "Trailer",
+        ),
+        // An ordinary picture is left out of an AO3 chapter, as before.
+        InlineImage::fitted(5, std::sync::Arc::new(png), 100.0),
+    ]);
+    document.append_blocks(vec![Block::Paragraph(paragraph)]);
+    let levels = ChapterLevels {
+        h1: false,
+        h2: false,
+        h3: false,
+        h4: false,
+    };
+    let chapter = &chapters(&document, levels)[0];
+    let html = ao3_fragment(&document, chapter);
+    assert!(
+        html.contains(
+            "<img src=\"https://a.example/p.png?x=1&amp;y=2\" alt=\"A &quot;pic&quot;\" />"
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("<video controls src=\"https://a.example/clip.MP4\"></video>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<a href=\"https://www.youtube.com/watch?v=abc\">Trailer</a>"),
+        "{html}"
+    );
+    assert_eq!(html.matches("<img").count(), 1, "{html}");
+}

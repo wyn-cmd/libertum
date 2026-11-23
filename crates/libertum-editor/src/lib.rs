@@ -1589,6 +1589,102 @@ impl Editor {
         Ok(b.dirty)
     }
 
+    /// The document's language tag (the first section's; the app sets them all together).
+    pub fn language(&self) -> Option<&str> {
+        self.doc
+            .sections
+            .first()
+            .and_then(|s| s.language.as_deref())
+    }
+
+    /// The document's second language tag, if it has one.
+    pub fn language2(&self) -> Option<&str> {
+        self.doc
+            .sections
+            .first()
+            .and_then(|s| s.language2.as_deref())
+    }
+
+    /// Sets (or, with `None`, clears) the language on every section, as one undoable step.
+    /// A tag [`libertum_model::language_tag`] rejects clears it. The second language stays,
+    /// unless it is now the same as the first.
+    pub fn set_language(&mut self, tag: Option<&str>) -> Result<ChangeSet, EditorError> {
+        let second = self.language2().map(str::to_owned);
+        self.set_languages(tag, second.as_deref())
+    }
+
+    /// Sets the first and second language on every section, as one undoable step. A second
+    /// that equals the first, or is not a tag, is dropped.
+    pub fn set_languages(
+        &mut self,
+        first: Option<&str>,
+        second: Option<&str>,
+    ) -> Result<ChangeSet, EditorError> {
+        let tag = first.and_then(libertum_model::language_tag);
+        let second = second
+            .and_then(libertum_model::language_tag)
+            .filter(|s| tag.as_ref() != Some(s));
+        if self
+            .doc
+            .sections
+            .iter()
+            .all(|s| s.language == tag && s.language2 == second)
+        {
+            return Ok(ChangeSet::default());
+        }
+        let sections: Vec<Section> = self
+            .doc
+            .sections
+            .iter()
+            .cloned()
+            .map(|mut section| {
+                section.language = tag.clone();
+                section.language2 = second.clone();
+                section
+            })
+            .collect();
+        let mut b = EditBuilder::default();
+        for (index, section) in sections.into_iter().enumerate() {
+            b.apply(&mut self.doc, Operation::SetSection { index, section })?;
+        }
+        // The language picks the regional font for Chinese, Japanese and Korean text, so
+        // every paragraph is laid out again.
+        b.dirty.all_styles = true;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
+    /// Whether the document's text runs vertically (the first section's; the app sets them
+    /// all together).
+    pub fn vertical_text(&self) -> bool {
+        self.doc.sections.first().is_some_and(|s| s.vertical)
+    }
+
+    /// Turns vertical text on or off for every section, as one undoable step. The page is
+    /// laid out again, since the text flows along the page's other axis.
+    pub fn set_vertical_text(&mut self, on: bool) -> Result<ChangeSet, EditorError> {
+        if self.doc.sections.iter().all(|s| s.vertical == on) {
+            return Ok(ChangeSet::default());
+        }
+        let sections: Vec<Section> = self
+            .doc
+            .sections
+            .iter()
+            .cloned()
+            .map(|mut section| {
+                section.vertical = on;
+                section
+            })
+            .collect();
+        let mut b = EditBuilder::default();
+        for (index, section) in sections.into_iter().enumerate() {
+            b.apply(&mut self.doc, Operation::SetSection { index, section })?;
+        }
+        b.dirty.all_styles = true;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        Ok(b.dirty)
+    }
+
     /// The document's page colour (the first section's; the app sets them all together).
     pub fn page_colour(&self) -> Option<[u8; 4]> {
         self.doc.sections.first().and_then(|s| s.page_colour)
@@ -3328,11 +3424,30 @@ pub fn next_grapheme(text: &str, offset: usize) -> usize {
         .map_or(offset, |g| offset + g.len())
 }
 
+/// The byte offsets where a word, a space or a stretch of punctuation starts. The Unicode word
+/// rules are enough for most scripts, but Chinese and Japanese have no spaces: by those rules
+/// every ideograph is a word of its own, so double-clicking 世界 would select one character.
+/// Text with ideographs or kana is segmented with ICU4X's dictionary (cjdict) instead, which
+/// finds the words, and the same rules for the Latin text around them.
+fn word_starts(text: &str) -> Vec<usize> {
+    if text.chars().any(libertum_model::is_ideograph_or_kana) {
+        let segmenter = icu_segmenter::WordSegmenter::new_dictionary(
+            icu_segmenter::options::WordBreakInvariantOptions::default(),
+        );
+        let mut breaks: Vec<usize> = segmenter.segment_str(text).collect();
+        // The iterator ends with the text's length, which is not a start.
+        breaks.pop();
+        breaks
+    } else {
+        text.split_word_bound_indices().map(|(i, _)| i).collect()
+    }
+}
+
 /// The previous word boundary at or before `offset` (`offset` itself when already on one).
 pub fn prev_word_boundary(text: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(text, offset.min(text.len()));
     let mut prev = 0;
-    for (i, _) in text.split_word_bound_indices() {
+    for i in word_starts(text) {
         if i >= offset {
             break;
         }
@@ -3344,7 +3459,7 @@ pub fn prev_word_boundary(text: &str, offset: usize) -> usize {
 /// The next word boundary after `offset` (`offset` itself when already on the last one).
 pub fn next_word_boundary(text: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(text, offset.min(text.len()));
-    for (i, _) in text.split_word_bound_indices() {
+    for i in word_starts(text) {
         if i > offset {
             return i;
         }
