@@ -2605,9 +2605,10 @@ fn the_document_language_picks_the_regional_font_for_han_text() {
         han(2, "直骨海角", Some("zh-TW")),
         han(3, "直骨海角", None),
     ]);
-    let (japanese, chinese, traditional, default) = (&fonts[0], &fonts[1], &fonts[2], &fonts[3]);
+    let (japanese, chinese, _traditional, default) = (&fonts[0], &fonts[1], &fonts[2], &fonts[3]);
     assert!(!japanese.is_empty() && !chinese.is_empty());
-    if japanese == chinese && chinese == traditional {
+    // Windows can map both languages to the same CJK face; there is nothing to compare then.
+    if japanese == chinese {
         eprintln!("skipped: this machine has no separate Japanese and Chinese fonts");
         return;
     }

@@ -16,6 +16,23 @@ fn has_fonts(s: &LayoutState) -> bool {
     s.font_report().family_count > 0
 }
 
+/// Whether the first paragraph's text actually has glyphs: a machine with no CJK font shapes
+/// these tests' Japanese text to nothing, so there is no ink to measure.
+fn has_glyphs(s: &LayoutState) -> bool {
+    let Some(layout) = s.paragraph_layout(0) else {
+        return false;
+    };
+    layout.layout.lines().any(|line| {
+        line.items().any(|item| {
+            matches!(
+                item,
+                parley::PositionedLayoutItem::GlyphRun(run)
+                    if run.positioned_glyphs().any(|glyph| glyph.id != 0)
+            )
+        })
+    })
+}
+
 #[test]
 fn renders_ink_inside_margins_only() {
     let s = state();
@@ -443,7 +460,7 @@ fn ink_box(pm: &tiny_skia::Pixmap) -> Option<(u32, u32, u32, u32)> {
 #[test]
 fn vertical_text_is_painted_on_the_real_sheet_from_the_top_right() {
     let (state, sheet) = vertical_state("縦書きの日本語です。");
-    if !has_fonts(&state) {
+    if !has_glyphs(&state) {
         return;
     }
     let scale = 1.0;
@@ -487,7 +504,7 @@ fn vertical_text_is_painted_on_the_real_sheet_from_the_top_right() {
 fn horizontal_and_vertical_pages_of_the_same_text_differ_and_both_have_ink() {
     let text = "縦書きの日本語です。";
     let (vertical, _) = vertical_state(text);
-    if !has_fonts(&vertical) {
+    if !has_glyphs(&vertical) {
         return;
     }
     let mut document =
@@ -742,7 +759,7 @@ fn vertical_picture_beside_text() -> LayoutState {
 #[test]
 fn a_picture_in_a_column_is_centred_on_the_text_not_hung_from_its_left() {
     let state = vertical_picture_beside_text();
-    if !has_fonts(&state) {
+    if !has_glyphs(&state) {
         return;
     }
     let pm = libertum_render::render_page(&state, 0, 2.0).expect("page");

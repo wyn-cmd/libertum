@@ -2950,6 +2950,7 @@ dependencies = [
  "libertum-model",
  "lopdf",
  "memory-stats",
+ "parley",
  "pollster 0.4.0",
  "printpdf",
  "swash",
