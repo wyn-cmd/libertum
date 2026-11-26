@@ -3,7 +3,10 @@
 //! No I/O, no UI, no layout. Paragraphs own their own text; every mutation goes through an
 //! [`Operation`] whose inverse restores the previous state exactly.
 
+mod audio;
 mod bookmark;
+mod characters;
+mod checklist;
 mod document;
 mod field;
 mod format;
@@ -18,7 +21,17 @@ mod paragraph;
 mod ruby;
 mod table;
 
+pub use audio::{
+    AudioCopy, AudioError, AudioFormat, MAX_AUDIO_BYTES, Soundtrack, Track, TrackError, audio_hash,
+};
 pub use bookmark::Bookmark;
+pub use characters::{
+    Character, CharacterError, Characters, FandomTag, FandomTagKind, fandom_of, short_name,
+};
+pub use checklist::{
+    ChapterProfile, ChapterRef, Checklist, ChecklistItem, ChecklistOrder, Ranked, Scope, Score,
+    rank, score,
+};
 pub use document::{
     BlockList, ChangeSet, DEFAULT_COLUMN_GUTTER_PT, DEFAULT_HEADER_FOOTER_DISTANCE_PT, Document,
     MAX_COLUMNS, ModelError, PageNumberHorizontal, PageNumberPos, PageNumberVertical,

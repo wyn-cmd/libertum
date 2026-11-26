@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -25,6 +25,8 @@ libertum-export = { path = "crates/libertum-export" }
 libertum-mcp = { path = "crates/libertum-mcp" }
 libertum-diff = { path = "crates/libertum-diff" }
 libertum-html = { path = "crates/libertum-html" }
+libertum-wiki = { path = "crates/libertum-wiki" }
+libertum-audio = { path = "crates/libertum-audio" }
 
 # UI
 iced = "0.14"
@@ -73,7 +75,7 @@ printpdf = { version = "0.12", default-features = false }
 lopdf = "0.44"
 # macOS only: the Dock icon (crates/libertum-app/src/macos_icon.rs). MIT.
 objc2 = "0.6"
-libc = "0.2"  # Linux glibc only: caps malloc arenas at start-up (docs/decisions.md, 2026-11-20)
+libc = "0.2"  # Linux and macOS: lower-priority background threads; glibc: caps malloc arenas at start-up (docs/decisions.md, 2026-11-20)
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 tracing = "0.1"

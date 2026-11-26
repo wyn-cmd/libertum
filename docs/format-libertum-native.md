@@ -65,7 +65,21 @@ task).
 mimetype                     "application/vnd.libertum.document" (stored, first entry)
 manifest.json                format version, generator, feature flags, part list
 document.json                the model: metadata, styles, sections, body blocks
-view.json                    view state: pageless, zoom, inspector, scroll anchor
+view.json                    view state: pageless, zoom, caret (block id and offset), inspector, scroll anchor
+checklist.json               the story checklist (optional; written only when it has items,
+                             a damaged one is ignored on read; other formats keep it in a sidecar
+                             at .libertum-history/<file name>/checklist.json)
+characters.json              the saved characters (name, age, details, linked checklist point ids) and the
+                             story's fandoms (optional; written only when there is something in it, a
+                             damaged one is ignored on read; other formats keep it in a sidecar at
+                             .libertum-history/<file name>/characters.json)
+audio.json                   the story's music and audio tracks (title, https link, credit, the chapters each
+                             belongs to) (optional; written only when there are tracks, a damaged one is
+                             ignored on read; other formats keep the links, without any copy, in a sidecar at
+                             .libertum-history/<file name>/audio.json)
+audio/<hash>.<ext>           one entry per distinct audio copy the writer chose to keep (mp3, ogg, wav, flac
+                             or m4a, at most 30 MB), stored not deflated and named by a FNV-1a hash of the
+                             bytes; a copy that is missing or fails its hash leaves the track as a link
 media/<hash>.<ext>           one entry per distinct image, named by the model's media hash
 extensions/<name>            opaque entries a newer build wrote; kept byte for byte
 ```

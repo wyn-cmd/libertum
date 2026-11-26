@@ -112,6 +112,17 @@ pub struct Settings {
     /// Also suggest characters, pairings and keywords found in the chapter's own text, with no
     /// vocabulary needed (`libertum_export::auto_suggestions`). On by default; local only.
     pub auto_suggest_tags: bool,
+    /// Whether the writer agreed to look up characters on wiki websites (the Characters tab's
+    /// Import). `None`: not asked yet. Nothing is fetched unless this is `Some(true)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wiki_consent: Option<bool>,
+    /// Whether character lookups try AO3 before the wikis. Only offered in Settings once the
+    /// writer has agreed to online lookups; on by default.
+    pub ao3_first: bool,
+    /// Wiki sites the writer added (the built-in ones are not stored).
+    pub wiki_sites: Vec<libertum_wiki::Site>,
+    /// Ids of sites, built-in or added, the writer switched off.
+    pub wiki_sites_off: Vec<String>,
     /// Also suggest from the bundled starter list of common AO3 additional tags
     /// (`libertum_export::starter_tags`). On by default; local only.
     pub use_starter_tags: bool,
@@ -374,6 +385,10 @@ impl Default for Settings {
             chapter_headings: libertum_export::ChapterLevels::default(),
             tags: Vec::new(),
             auto_suggest_tags: true,
+            wiki_consent: None,
+            ao3_first: true,
+            wiki_sites: Vec::new(),
+            wiki_sites_off: Vec::new(),
             use_starter_tags: true,
             check_for_updates: true,
             spellcheck: true,
@@ -595,6 +610,12 @@ mod tests {
                 ),
             ],
             auto_suggest_tags: false,
+            wiki_consent: Some(true),
+            ao3_first: false,
+            wiki_sites: vec![
+                libertum_wiki::parse_custom("https://wiki.example.org").expect("site"),
+            ],
+            wiki_sites_off: vec!["shoutwiki".to_owned()],
             use_starter_tags: false,
             check_for_updates: false,
             spellcheck: false,

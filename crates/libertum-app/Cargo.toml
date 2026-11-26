@@ -24,6 +24,8 @@ libertum-native = { workspace = true }
 libertum-library = { workspace = true }
 libertum-diff = { workspace = true }
 libertum-html = { workspace = true }
+libertum-wiki = { workspace = true }
+libertum-audio = { workspace = true }
 libertum-formats-common = { workspace = true }
 libertum-mcp = { workspace = true }
 rfd = { workspace = true }
@@ -43,8 +45,9 @@ thiserror = { workspace = true }
 [target.'cfg(windows)'.build-dependencies]
 winresource = { workspace = true }
 
-# Linux with glibc only: caps the malloc arenas at start-up (see `limit_malloc_arenas` in main.rs).
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+# Linux and macOS: lowers the priority of background threads (see src/power.rs). On glibc it also
+# caps the malloc arenas at start-up (see `limit_malloc_arenas` in main.rs).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 
 # macOS only: sets the Dock icon at startup (see src/macos_icon.rs).

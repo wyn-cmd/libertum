@@ -164,6 +164,9 @@ pub struct LayoutOptions {
     /// [`DEFAULT_LAYOUT_THREADS`]), 1 keeps everything on the calling thread, and an explicit
     /// count is honoured up to [`MAX_LAYOUT_THREADS`].
     pub threads: usize,
+    /// Run first on every thread the engine starts for shaping ahead of pagination, so the host
+    /// can lower their priority. `None` leaves them as they are.
+    pub worker_init: Option<fn()>,
 }
 
 /// Most threads the engine uses to lay out paragraphs ahead of pagination, however many are asked
@@ -196,6 +199,7 @@ impl Default for LayoutOptions {
             max_cached_layouts: 4_000,
             max_image_height_pt: 600.0,
             threads: 0,
+            worker_init: None,
         }
     }
 }
@@ -1259,7 +1263,11 @@ impl Engine {
                 .iter_mut()
                 .map(|fork| {
                     let next = &next;
+                    let init = self.opts.worker_init;
                     scope.spawn(move || {
+                        if let Some(init) = init {
+                            init();
+                        }
                         let mut out = Vec::new();
                         loop {
                             let from = next.fetch_add(CLAIM, Ordering::Relaxed);

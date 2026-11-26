@@ -100,6 +100,10 @@ the same licence in this tree.
   hand-written from general knowledge for this release, not copied from AO3 or a tag dataset.
   It carries no third-party data and no notice; it still needs the writer's review.
 
+## Audio decoding (2026-11-26, approved by the maintainer the same day)
+
+`libertum-audio` uses **`symphonia` 0.5.5, which is MPL-2.0**, not on the approved list (CONTRIBUTING.md rule 4), like `spellbook` above; the maintainer approved it on 2026-11-26. It is the only pure-Rust decoder that covers MP3, Ogg Vorbis, FLAC, WAV and M4A/AAC in one dependency; its other dependencies (`arrayvec`, `bytemuck`, `extended`, `log`, `lazy_static`, `smallvec`) are MIT or Apache-2.0. MPL-2.0 is file-level: Symphonia's own files stay MPL and their source must stay available; Libertum's files are unaffected unless a Symphonia file is modified (none is). Features enabled: `mp3`, `ogg`, `vorbis`, `flac`, `wav`, `pcm`, `isomp4`, `aac`. The MPL text must ship with the binary (still to be added to the installer's notices).
+
 ## AO3 rating and warning names
 
 `libertum-export` (`AO3_RATINGS`, `AO3_WARNINGS`) carries the names of the ratings and archive warnings that AO3's posting form offers, so the writer picks them instead of typing them. They are short factual labels, not AO3 code or text, and no AO3 content is bundled beyond them. They were taken from AO3's own pages (the Terms of Service FAQ, the Tags FAQ and the Posting a Work tutorial) through a web search on 2026-11-21; the live form was not read because AO3 rate-limited the request. "Underage Sex" is the name a 2024 AO3 guide gives; the older Tags FAQ says "Underage". Re-check both lists against the live form when the rate limit allows.

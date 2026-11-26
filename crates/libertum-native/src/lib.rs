@@ -8,6 +8,10 @@
 //! manifest.json            format, version, generator, feature list, part list
 //! document.json            the model, one-to-one
 //! view.json                pageless and zoom (the interchange formats have nowhere for it)
+//! checklist.json           the story checklist; only written when it has items
+//! characters.json          the saved characters and the story's fandoms; only written when there are some
+//! audio.json               the story's music and audio links; only written when there are some
+//! audio/<hash>.<ext>       one entry per distinct audio copy the writer chose to keep
 //! media/<hash>.<ext>       one entry per distinct image, named by the model's media hash
 //! extensions/<name>        opaque entries a newer build wrote, kept byte for byte
 //! ```
@@ -22,7 +26,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use libertum_model::{Document, Media};
+use libertum_model::{AudioCopy, AudioFormat, Characters, Checklist, Document, Media, Soundtrack};
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
@@ -36,7 +40,7 @@ pub const VERSION: u32 = 1;
 /// File extension, without the dot.
 pub const EXTENSION: &str = "lbtd";
 /// What the writer lists in the manifest: the features this build actually carries.
-pub const FEATURES: [&str; 7] = [
+pub const FEATURES: [&str; 10] = [
     "pageless",
     "images",
     "notes",
@@ -44,6 +48,9 @@ pub const FEATURES: [&str; 7] = [
     "cross-references",
     "table-styles",
     "view-state",
+    "checklist",
+    "characters",
+    "audio",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +82,16 @@ pub struct ViewState {
     pub pageless: bool,
     /// Last zoom, as a percentage (100 is actual size).
     pub zoom_percent: u16,
+    /// Where the caret was, so the writer can carry on from there. `None` for a file from before
+    /// this was kept, or one whose position no longer exists.
+    pub caret: Option<Caret>,
+}
+
+/// A caret position: a paragraph's id and a byte offset into its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caret {
+    pub block: u64,
+    pub offset: usize,
 }
 
 impl Default for ViewState {
@@ -82,6 +99,7 @@ impl Default for ViewState {
         Self {
             pageless: false,
             zoom_percent: 100,
+            caret: None,
         }
     }
 }
@@ -102,6 +120,12 @@ struct Manifest {
 pub struct Native {
     document: Document,
     view: ViewState,
+    /// The story checklist. Empty for a document that has none, and then not written.
+    checklist: Checklist,
+    /// The saved characters. Empty for a document that has none, and then not written.
+    characters: Characters,
+    /// The music and audio links, with any copies kept. Empty for a document with none.
+    audio: Soundtrack,
     /// Entries under `extensions/`, kept byte for byte so a save never drops them.
     extensions: BTreeMap<String, Vec<u8>>,
 }
@@ -112,6 +136,9 @@ impl Native {
         Self {
             document,
             view: ViewState::default(),
+            checklist: Checklist::default(),
+            characters: Characters::default(),
+            audio: Soundtrack::default(),
             extensions: BTreeMap::new(),
         }
     }
@@ -120,6 +147,9 @@ impl Native {
         Self {
             document,
             view,
+            checklist: Checklist::default(),
+            characters: Characters::default(),
+            audio: Soundtrack::default(),
             extensions: BTreeMap::new(),
         }
     }
@@ -138,6 +168,30 @@ impl Native {
 
     pub fn set_view(&mut self, view: ViewState) {
         self.view = view;
+    }
+
+    pub fn checklist(&self) -> &Checklist {
+        &self.checklist
+    }
+
+    pub fn set_checklist(&mut self, checklist: Checklist) {
+        self.checklist = checklist;
+    }
+
+    pub fn characters(&self) -> &Characters {
+        &self.characters
+    }
+
+    pub fn set_characters(&mut self, characters: Characters) {
+        self.characters = characters;
+    }
+
+    pub fn audio(&self) -> &Soundtrack {
+        &self.audio
+    }
+
+    pub fn set_audio(&mut self, audio: Soundtrack) {
+        self.audio = audio;
     }
 
     /// Keeps an opaque entry a newer build wrote (also the hook a test uses).
@@ -177,6 +231,21 @@ impl Native {
             "view.json".to_owned(),
             "manifest.json".to_owned(),
         ];
+        if !self.checklist.is_empty() {
+            parts.push("checklist.json".to_owned());
+        }
+        if !self.characters.is_empty() {
+            parts.push("characters.json".to_owned());
+        }
+        let copies = self.audio.copies();
+        if !self.audio.is_empty() {
+            parts.push("audio.json".to_owned());
+        }
+        parts.extend(
+            copies
+                .values()
+                .map(|copy| format!("audio/{:016x}.{}", copy.hash(), copy.format.extension())),
+        );
         parts.extend(
             media
                 .values()
@@ -216,6 +285,26 @@ impl Native {
             zip.write_all(&serde_json::to_vec(&self.document)?)?;
             zip.start_file("view.json", deflated)?;
             zip.write_all(&serde_json::to_vec(&self.view)?)?;
+            if !self.checklist.is_empty() {
+                zip.start_file("checklist.json", deflated)?;
+                zip.write_all(&serde_json::to_vec(&self.checklist)?)?;
+            }
+            if !self.characters.is_empty() {
+                zip.start_file("characters.json", deflated)?;
+                zip.write_all(&serde_json::to_vec(&self.characters)?)?;
+            }
+            if !self.audio.is_empty() {
+                zip.start_file("audio.json", deflated)?;
+                zip.write_all(&self.audio.to_json())?;
+            }
+            for copy in copies.values() {
+                // Already compressed audio gains nothing from deflate.
+                zip.start_file(
+                    format!("audio/{:016x}.{}", copy.hash(), copy.format.extension()),
+                    stored,
+                )?;
+                zip.write_all(&copy.bytes)?;
+            }
             for media in media.values() {
                 zip.start_file(
                     format!("media/{:016x}.{}", media.hash(), media.format().extension()),
@@ -256,12 +345,39 @@ impl Native {
             Err(error) => return Err(error),
         };
 
+        // Optional too, and a damaged list never costs the writer the document.
+        let checklist = match read_entry(&mut archive, "checklist.json") {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Checklist::default(),
+        };
+        let characters = match read_entry(&mut archive, "characters.json") {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Characters::default(),
+        };
+
+        let audio_json = read_entry(&mut archive, "audio.json").ok();
+        let mut audio_copies: BTreeMap<u64, AudioCopy> = BTreeMap::new();
         let mut media: BTreeMap<u64, Arc<Media>> = BTreeMap::new();
         let mut extensions: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for index in 0..archive.len() {
             let mut file = archive.by_index(index)?;
             let name = file.name()?.to_string();
-            if let Some(rest) = name.strip_prefix("media/") {
+            if let Some(rest) = name.strip_prefix("audio/") {
+                // A copy that cannot be read is skipped: the track keeps its link.
+                let mut parts = rest.split('.');
+                let hash = parts
+                    .next()
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+                let format = parts.next().and_then(AudioFormat::from_extension);
+                let mut bytes = Vec::new();
+                if let (Some(hash), Some(_)) = (hash, format)
+                    && file.read_to_end(&mut bytes).is_ok()
+                    && let Ok(copy) = AudioCopy::new(bytes)
+                    && copy.hash() == hash
+                {
+                    audio_copies.insert(hash, copy);
+                }
+            } else if let Some(rest) = name.strip_prefix("media/") {
                 let hash = rest
                     .split('.')
                     .next()
@@ -294,9 +410,17 @@ impl Native {
                 other => NativeError::Damaged(other.to_string()),
             })?;
 
+        let audio = match audio_json {
+            Some(bytes) => Soundtrack::from_json(&bytes, |hash| audio_copies.get(&hash).cloned()),
+            None => Soundtrack::default(),
+        };
+
         Ok(Self {
             document,
             view,
+            checklist,
+            characters,
+            audio,
             extensions,
         })
     }

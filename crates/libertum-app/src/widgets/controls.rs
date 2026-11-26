@@ -99,7 +99,7 @@ where
 
 pub fn checkbox_row<'a, M: Clone + 'a>(
     t: Tokens,
-    label: &'a str,
+    label: &str,
     checked: bool,
     mixed: bool,
     on_toggle: impl Fn(bool) -> M + 'a,

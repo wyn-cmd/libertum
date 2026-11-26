@@ -372,7 +372,7 @@ impl Writer<'_> {
     fn image(&mut self, image: &InlineImage, wrap_link: bool) -> String {
         // A linked video has no Markdown form of its own: a link to it.
         if let Some(link) = image.link()
-            && link.kind == libertum_model::MediaKind::Video
+            && link.kind != libertum_model::MediaKind::Image
         {
             let label = if image.alt.is_empty() {
                 link.url.clone()
