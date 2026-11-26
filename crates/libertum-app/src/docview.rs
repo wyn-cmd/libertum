@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,7 @@ use libertum_model::{BlockId, ChangeSet, Document};
 use libertum_render::{PageRenderer, page_pixel_size};
 
 use crate::perf;
+use crate::power;
 
 /// Pages the paginator thread adds per write-lock hold (about 12 ms of work on the dev box):
 /// the longest another thread waits for the layout, under one frame.
@@ -153,6 +154,54 @@ pub fn pageless_geometry(document: &Document) -> PageGeometry {
     geometry
 }
 
+/// How long after the visible pages last changed the background paginator holds back (when it
+/// is already well ahead of the reader), so a scroll or fling gets the CPU for rastering.
+const PACE_QUIET: Duration = Duration::from_millis(400);
+/// How many pages beyond the furthest one the view has asked for the paginator keeps ready
+/// before it will hold back for a scroll. Asking for a page beyond this runs it flat out.
+const PACE_LOOKAHEAD: usize = 60;
+/// How often a held-back paginator looks again.
+const PACE_POLL: Duration = Duration::from_millis(50);
+
+/// What the background paginator needs to know about the reader, shared with the view. See
+/// [`PACE_QUIET`].
+#[derive(Default)]
+pub struct Pace {
+    /// One past the highest page the view asked for last.
+    demand: AtomicUsize,
+    /// When the visible pages last changed, in milliseconds on [`pace_clock`] (0: never).
+    moved: AtomicU64,
+}
+
+/// Milliseconds since the first call, plus one so that 0 can mean "never".
+fn pace_clock() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+impl Pace {
+    fn want(&self, end: usize) {
+        self.demand.store(end, Ordering::Relaxed);
+    }
+
+    fn moved(&self) {
+        self.moved.store(pace_clock(), Ordering::Relaxed);
+    }
+
+    /// True when the paginator, holding `have` pages, should wait: the reader is moving and
+    /// nothing they asked for is anywhere near the end of what is paginated.
+    fn should_wait(&self, have: usize) -> bool {
+        let moved = self.moved.load(Ordering::Relaxed);
+        moved != 0
+            && pace_clock().saturating_sub(moved) < PACE_QUIET.as_millis() as u64
+            && have
+                >= self
+                    .demand
+                    .load(Ordering::Relaxed)
+                    .saturating_add(PACE_LOOKAHEAD)
+    }
+}
+
 /// Layout options for a document opened in the app. `LIBERTUM_LAYOUT_THREADS=<n>` sets how
 /// many threads shape paragraphs ahead of pagination (0 or unset: one per core, up to 4; 1:
 /// none), for measuring.
@@ -163,6 +212,7 @@ fn layout_options() -> LayoutOptions {
         .unwrap_or(0);
     LayoutOptions {
         threads,
+        worker_init: Some(power::background),
         ..LayoutOptions::default()
     }
 }
@@ -386,6 +436,24 @@ struct Entry {
     tick: u64,
 }
 
+/// A music player is drawn on a 440 by 40 design and fills the line, so it is always this many
+/// times as wide as it is high, whatever the width of the line.
+pub const PLAYER_ASPECT: f32 = 11.0;
+/// The height of the player's design, points. Everything in it is placed on this scale.
+pub const PLAYER_DESIGN_HEIGHT: f32 = 40.0;
+
+/// A music player in the document: where it is on its page, and what it plays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerSpot {
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub url: String,
+    pub title: String,
+}
+
 /// LRU cache of strip image handles (PLAN §4.4 bitmap cache, per strip).
 pub struct HandleCache {
     map: HashMap<BandKey, Entry>,
@@ -493,6 +561,10 @@ impl Plans {
 struct Queue {
     /// (page index, device pixels per point), most urgent first.
     wanted: Vec<(usize, f32)>,
+    /// The first and last page of the previous request, to see which way the view is moving.
+    span: Option<(usize, usize)>,
+    /// Which way the view last moved: 1 towards later pages, -1 towards earlier, 0 not yet.
+    dir: i8,
     shutdown: bool,
 }
 
@@ -511,6 +583,7 @@ pub struct PageSource {
     cache: Arc<Mutex<HandleCache>>,
     plans: Arc<Mutex<Plans>>,
     queue: Arc<RenderQueue>,
+    pace: Arc<Pace>,
 }
 
 /// One strip to draw: its image and its vertical extent as fractions of the page height.
@@ -605,24 +678,50 @@ impl PageSource {
     /// user scrolls fast the visible range moves every frame, and restarting the queue each
     /// time meant the worker rendered roughly one page per frame and the pages entering the
     /// viewport stayed blank (the white "flicker" of fast scrolling).
+    ///
+    /// The queue also follows the direction of travel. Pending pages the view has already
+    /// passed (on the side it came from) are dropped: rastering them would only delay the pages
+    /// it is heading for, and it would be wasted work if the page is not looked at again.
+    /// Pages in the new request are never dropped, and at equal distance the page ahead is
+    /// rendered before the page behind.
     pub fn request(&self, pages: &[usize], scale: f32) {
         if pages.is_empty() {
-            return;
-        }
-        let wanted: Vec<(usize, f32)> = pages
-            .iter()
-            .copied()
-            .filter(|&p| self.pages.hash(p).is_some() && !self.has_exact(p, scale))
-            .map(|p| (p, scale))
-            .collect();
-        let mut q = lock(&self.queue.inner);
-        if q.wanted == wanted {
             return;
         }
         let (lo, hi) = pages
             .iter()
             .copied()
             .fold((usize::MAX, 0), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        // The most urgent page (the current one) is first.
+        let centre = pages[0];
+        let mut q = lock(&self.queue.inner);
+        if q.span != Some((lo, hi)) {
+            if let Some((old_lo, old_hi)) = q.span {
+                match (lo + hi).cmp(&(old_lo + old_hi)) {
+                    std::cmp::Ordering::Greater => q.dir = 1,
+                    std::cmp::Ordering::Less => q.dir = -1,
+                    std::cmp::Ordering::Equal => {}
+                }
+            }
+            q.span = Some((lo, hi));
+            self.pace.moved();
+        }
+        self.pace.want(hi + 1);
+        let dir = q.dir;
+        let behind = |p: usize| (dir > 0 && p < lo) || (dir < 0 && p > hi);
+        let mut wanted: Vec<(usize, f32)> = pages
+            .iter()
+            .copied()
+            .filter(|&p| self.pages.hash(p).is_some() && !self.has_exact(p, scale))
+            .map(|p| (p, scale))
+            .collect();
+        if dir != 0 {
+            let behind_centre = |p: usize| (dir > 0 && p < centre) || (dir < 0 && p > centre);
+            wanted.sort_by_key(|&(p, _)| (p.abs_diff(centre), behind_centre(p)));
+        }
+        if q.wanted == wanted {
+            return;
+        }
         let lo = lo.saturating_sub(PENDING_MARGIN);
         let hi = hi.saturating_add(PENDING_MARGIN);
         // Drop plans for pages far from the viewport. Done before the queue is updated, so
@@ -636,7 +735,11 @@ impl PageSource {
             if merged.len() >= PENDING_MAX {
                 break;
             }
-            if s == scale && (lo..=hi).contains(&page) && !merged.iter().any(|&(p, _)| p == page) {
+            if s == scale
+                && (lo..=hi).contains(&page)
+                && !behind(page)
+                && !merged.iter().any(|&(p, _)| p == page)
+            {
                 merged.push((page, s));
             }
         }
@@ -830,6 +933,7 @@ impl DocView {
         let cache = Arc::new(Mutex::new(HandleCache::new(HANDLE_CACHE_BYTES)));
         let plans = Arc::new(Mutex::new(Plans::default()));
         let queue = Arc::new(RenderQueue::default());
+        let pace = Arc::new(Pace::default());
         let paginate_epoch = Arc::new(AtomicU64::new(0));
         let (tx, rx) = unbounded();
 
@@ -838,6 +942,7 @@ impl DocView {
             page_map.clone(),
             tx.clone(),
             paginate_epoch.clone(),
+            pace.clone(),
         );
         spawn_render_worker(
             layout.clone(),
@@ -853,6 +958,7 @@ impl DocView {
             cache,
             plans: plans.clone(),
             queue: queue.clone(),
+            pace,
         };
         (
             Self {
@@ -1375,6 +1481,7 @@ impl DocView {
             self.source.pages.clone(),
             self.events.clone(),
             self.paginate_epoch.clone(),
+            self.source.pace.clone(),
         );
     }
 
@@ -1535,6 +1642,73 @@ impl DocView {
                 .position(|image| image.media.hash() == hash)
         })?;
         Some((block, index))
+    }
+
+    /// The music players on `pages`, in page points on the sheet. A player is a picture one
+    /// text line wide and [`PLAYER_ASPECT`] times as wide as high whose paragraph holds an audio link.
+    pub fn players_on(&self, pages: std::ops::Range<usize>) -> Vec<PlayerSpot> {
+        /// A picture that is shaped like a player: its page, rectangle and image hash.
+        type Candidate = (usize, (f32, f32, f32, f32), u64);
+        let candidates: Vec<Candidate> = {
+            let layout = self.layout.read().unwrap_or_else(|e| e.into_inner());
+            pages
+                .flat_map(|page| {
+                    layout
+                        .page_decorations(page)
+                        .into_iter()
+                        .filter_map(|decoration| match decoration {
+                            libertum_layout::Decoration::Image {
+                                media,
+                                x,
+                                y,
+                                width,
+                                height,
+                            } if height > 1.0 && (width / height - PLAYER_ASPECT).abs() < 0.25 => {
+                                Some((
+                                    page,
+                                    rect_on_sheet(&layout, page, (x, y, width, height)),
+                                    media.hash(),
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        candidates
+            .into_iter()
+            .filter_map(|(page, (x, y, width, height), hash)| {
+                let (block, _) = self.hit_test(page, x + width / 2.0, y + height / 2.0)?;
+                let paragraph = self.editor.document().paragraph(block)?;
+                let image = paragraph.images().iter().find(|image| {
+                    image.media.hash() == hash
+                        && image
+                            .link()
+                            .is_some_and(|link| link.kind == libertum_model::MediaKind::Audio)
+                })?;
+                let link = image.link()?;
+                Some(PlayerSpot {
+                    page,
+                    x,
+                    y,
+                    width,
+                    height,
+                    url: link.url,
+                    title: image.alt.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// The player under a page point, if any.
+    pub fn player_at(&self, page: usize, x_pt: f32, y_pt: f32) -> Option<PlayerSpot> {
+        self.players_on(page..page + 1).into_iter().find(|spot| {
+            x_pt >= spot.x
+                && x_pt <= spot.x + spot.width
+                && y_pt >= spot.y
+                && y_pt <= spot.y + spot.height
+        })
     }
 
     /// Caret rectangle in page coordinates, for the canvas overlay.
@@ -1859,11 +2033,14 @@ fn spawn_paginator(
     map: PageMap,
     tx: UnboundedSender<DocEvent>,
     epoch: Arc<AtomicU64>,
+    pace: Arc<Pace>,
 ) {
     let mine = epoch.load(Ordering::Acquire);
     let spawned = std::thread::Builder::new()
         .name("libertum-paginate".into())
         .spawn(move || {
+            // Finishing the page count is work nobody is waiting for.
+            power::lower_current_thread(power::Level::Background);
             let started = Instant::now();
             // Time spent waiting for readers (the UI, the page renderer) and doing the work,
             // for the completion log: the gap between them and `elapsed_ms` is the rest.
@@ -1875,6 +2052,12 @@ fn spawn_paginator(
                 // A page-setup change bumped the epoch: this thread's document is gone.
                 if epoch.load(Ordering::Acquire) != mine {
                     return;
+                }
+                // While the reader scrolls and the pages they can reach are already built,
+                // leave the cores to the rastering; carry on once they stop.
+                if pace.should_wait(lock(&map.0).hashes.len()) {
+                    std::thread::sleep(PACE_POLL);
+                    continue;
                 }
                 let (pages, complete, built) = {
                     let asked = Instant::now();
@@ -1942,6 +2125,7 @@ fn spawn_render_worker(
     let spawned = std::thread::Builder::new()
         .name("libertum-render".into())
         .spawn(move || {
+            power::lower_current_thread(power::Level::Utility);
             let mut renderer = PageRenderer::default();
             loop {
                 let (page, scale) = {
@@ -2662,6 +2846,49 @@ mod tests {
         assert!(view.image_at(0, 5.0, 5.0).is_none());
     }
 
+    #[test]
+    fn a_player_line_is_found_with_its_link_and_title_and_a_picture_is_not() {
+        use libertum_model::{
+            BlockId, Document, InlineImage, Media, MediaKind, MediaLink, Paragraph,
+        };
+        let media =
+            std::sync::Arc::new(Media::new(libertum_model::test_png_header(88, 8)).expect("png"));
+        let mut player = Paragraph::new(BlockId(1), "");
+        let mut image = InlineImage::fitted(0, media.clone(), 400.0);
+        image.width_pt = 440.0;
+        image.height_pt = 40.0;
+        image.alt = "Theme".into();
+        image.name = MediaLink {
+            url: "https://a.example/t.mp3".into(),
+            kind: MediaKind::Audio,
+        }
+        .name();
+        player.set_images(vec![image]);
+        // An ordinary picture the same height is not a player.
+        let mut picture = Paragraph::new(BlockId(2), "");
+        let mut plain = InlineImage::fitted(0, media, 400.0);
+        plain.width_pt = 400.0;
+        plain.height_pt = 40.0;
+        picture.set_images(vec![plain]);
+        let (view, _events) = DocView::open(Document::from_paragraphs(vec![player, picture]));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let spots = view.players_on(0..1);
+        assert_eq!(spots.len(), 1, "{spots:?}");
+        assert_eq!(spots[0].url, "https://a.example/t.mp3");
+        assert_eq!(spots[0].title, "Theme");
+        assert!((spots[0].width - 440.0).abs() < 0.5);
+        let (cx, cy) = (
+            spots[0].x + spots[0].width / 2.0,
+            spots[0].y + spots[0].height / 2.0,
+        );
+        assert_eq!(
+            view.player_at(0, cx, cy).map(|s| s.url),
+            Some("https://a.example/t.mp3".into())
+        );
+        assert!(view.player_at(0, 1.0, 1.0).is_none());
+    }
+
     /// Select All then Bold touches every paragraph: the layout is swapped in at once, the
     /// pages are rebuilt afterwards, and the result matches a layout built from scratch.
     #[test]
@@ -2726,6 +2953,7 @@ mod tests {
             cache: Arc::new(Mutex::new(HandleCache::new(1024))),
             plans: Arc::new(Mutex::new(Plans::default())),
             queue: Arc::new(RenderQueue::default()),
+            pace: Arc::new(Pace::default()),
         };
         let plan = || BandPlan {
             page_hash: 1,
@@ -2748,6 +2976,94 @@ mod tests {
         assert!(plans.current(163, 1.0, 1).is_none(), "far behind");
         assert!(plans.current(164, 1.0, 1).is_some(), "margin kept");
         assert!(plans.current(399, 1.0, 1).is_some());
+    }
+
+    /// A source with `count` pages and nothing cached, for queue tests.
+    fn queue_source(count: usize) -> PageSource {
+        let pages = PageMap::default();
+        {
+            let mut map = lock(&pages.0);
+            map.hashes = vec![1; count];
+            map.complete = true;
+        }
+        PageSource {
+            pages,
+            cache: Arc::new(Mutex::new(HandleCache::new(1024))),
+            plans: Arc::new(Mutex::new(Plans::default())),
+            queue: Arc::new(RenderQueue::default()),
+            pace: Arc::new(Pace::default()),
+        }
+    }
+
+    fn queued(source: &PageSource) -> Vec<usize> {
+        lock(&source.queue.inner)
+            .wanted
+            .iter()
+            .map(|&(p, _)| p)
+            .collect()
+    }
+
+    #[test]
+    fn a_fast_scroll_drops_pending_pages_it_has_passed_but_keeps_the_ones_ahead() {
+        let source = queue_source(400);
+        source.request(&[50, 49, 51, 48, 52], 1.0);
+        source.request(&[60, 59, 61, 58, 62], 1.0);
+        let q = queued(&source);
+        for page in [60, 59, 61, 58, 62] {
+            assert!(q.contains(&page), "the new range is queued: {q:?}");
+        }
+        assert!(
+            q.iter().all(|&p| p >= 58),
+            "pages the view left behind are not rendered: {q:?}"
+        );
+        // Scrolling back reverses the rule: what is now behind (the higher pages) is dropped.
+        source.request(&[55, 54, 56, 53, 57], 1.0);
+        let q = queued(&source);
+        assert!(q.iter().all(|&p| p <= 57), "{q:?}");
+        assert!(q.contains(&55) && q.contains(&57));
+    }
+
+    #[test]
+    fn when_moving_the_page_ahead_is_rendered_before_the_page_behind_at_equal_distance() {
+        let source = queue_source(400);
+        source.request(&[10, 9, 11], 1.0);
+        source.request(&[20, 19, 21, 18, 22], 1.0);
+        let q = queued(&source);
+        assert_eq!(&q[..5], &[20, 21, 19, 22, 18], "{q:?}");
+    }
+
+    #[test]
+    fn the_first_request_keeps_the_callers_order_and_drops_nothing() {
+        let source = queue_source(400);
+        source.request(&[5, 4, 6, 3, 7], 1.0);
+        assert_eq!(queued(&source), vec![5, 4, 6, 3, 7]);
+    }
+
+    #[test]
+    fn the_paginator_holds_back_only_while_the_reader_moves_and_is_well_covered() {
+        let pace = Pace::default();
+        assert!(!pace.should_wait(500), "never moved: run");
+        pace.want(10);
+        pace.moved();
+        assert!(
+            pace.should_wait(10 + PACE_LOOKAHEAD),
+            "moving, well ahead: wait"
+        );
+        assert!(
+            !pace.should_wait(10 + PACE_LOOKAHEAD - 1),
+            "moving but near the end of what is built: run"
+        );
+        pace.want(1_000);
+        assert!(
+            !pace.should_wait(500),
+            "a jump past what is built: run flat out"
+        );
+        pace.want(10);
+        pace.moved.store(
+            pace_clock() - PACE_QUIET.as_millis() as u64 - 1,
+            Ordering::Relaxed,
+        );
+        assert!(!pace.should_wait(10_000), "quiet again: run");
     }
 
     #[test]

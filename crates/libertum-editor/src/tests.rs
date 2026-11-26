@@ -2980,3 +2980,80 @@ fn two_languages_are_set_together_and_the_second_never_equals_the_first() {
     ed.undo().expect("undo");
     assert_eq!(ed.language2(), Some("uk-UA"));
 }
+
+fn player_link() -> libertum_model::MediaLink {
+    libertum_model::MediaLink {
+        url: "https://a.example/theme.mp3".into(),
+        kind: libertum_model::MediaKind::Audio,
+    }
+}
+
+fn is_player(ed: &Editor, index: usize) -> bool {
+    ed.document().paragraph_at(index).is_some_and(|p| {
+        p.text().is_empty()
+            && p.images().len() == 1
+            && p.images()[0]
+                .link()
+                .is_some_and(|l| l.kind == libertum_model::MediaKind::Audio)
+    })
+}
+
+#[test]
+fn a_player_is_its_own_line_between_the_halves_of_the_paragraph_and_undo_restores_it() {
+    let mut ed = editor(&["abcd"]);
+    let before = ed.document().clone();
+    ed.set_caret(pos(&ed, 0, 2), false);
+    ed.insert_player(png(10, 10), 400.0, 40.0, &player_link(), "Theme")
+        .expect("insert");
+    assert_eq!(ed.document().paragraph_count(), 3);
+    assert_eq!(text_at(&ed, 0), "ab");
+    assert!(is_player(&ed, 1));
+    assert_eq!(text_at(&ed, 2), "cd");
+    let image = &ed.document().paragraph_at(1).unwrap().images()[0];
+    assert_eq!((image.width_pt, image.height_pt), (400.0, 40.0));
+    assert_eq!(image.alt, "Theme");
+    // The caret is on the text after the player.
+    assert_eq!(ed.caret(), pos(&ed, 2, 0));
+    ed.undo().unwrap();
+    assert!(ed.document().content_eq(&before));
+}
+
+#[test]
+fn a_player_at_the_end_or_start_of_a_paragraph_adds_no_empty_halves() {
+    let mut ed = editor(&["abcd", "next"]);
+    ed.set_caret(pos(&ed, 0, 4), false);
+    ed.insert_player(png(10, 10), 400.0, 40.0, &player_link(), "T")
+        .unwrap();
+    assert_eq!(ed.document().paragraph_count(), 3);
+    assert_eq!(text_at(&ed, 0), "abcd");
+    assert!(is_player(&ed, 1));
+    assert_eq!(ed.caret(), pos(&ed, 2, 0));
+
+    let mut ed = editor(&["abcd"]);
+    ed.set_caret(pos(&ed, 0, 0), false);
+    ed.insert_player(png(10, 10), 400.0, 40.0, &player_link(), "T")
+        .unwrap();
+    assert!(is_player(&ed, 0));
+    assert_eq!(text_at(&ed, 1), "abcd");
+    assert_eq!(ed.caret(), pos(&ed, 1, 0));
+}
+
+#[test]
+fn a_player_on_an_empty_line_uses_it_and_leaves_a_line_to_keep_typing_on() {
+    let mut ed = editor(&[""]);
+    ed.set_caret(pos(&ed, 0, 0), false);
+    ed.insert_player(png(10, 10), 400.0, 40.0, &player_link(), "T")
+        .unwrap();
+    assert!(is_player(&ed, 0));
+    assert_eq!(ed.document().paragraph_count(), 2);
+    assert_eq!(ed.caret(), pos(&ed, 1, 0));
+
+    // At the end of the last paragraph there is still a line to type on afterwards.
+    let mut ed = editor(&["abcd"]);
+    ed.set_caret(pos(&ed, 0, 4), false);
+    ed.insert_player(png(10, 10), 400.0, 40.0, &player_link(), "T")
+        .unwrap();
+    assert_eq!(ed.document().paragraph_count(), 3);
+    assert_eq!(text_at(&ed, 2), "");
+    assert_eq!(ed.caret(), pos(&ed, 2, 0));
+}

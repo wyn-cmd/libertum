@@ -42,7 +42,8 @@ pub enum LossKind {
     /// Plain only: fonts, sizes, colours, highlighting, letter spacing and ligatures. Per
     /// run.
     CharacterFormatting,
-    /// Plain only: alignment, indents, spacing, line spacing and borders. Per paragraph.
+    /// Plain only: indents, spacing, line spacing and borders (alignment is kept). Per
+    /// paragraph.
     ParagraphFormatting,
     /// Plain only: page breaks. Per break.
     PageBreak,
@@ -70,7 +71,7 @@ impl LossKind {
             LossKind::TableRowHeights => "Table row heights",
             LossKind::DeepHeadings => "Heading levels below 6",
             LossKind::CharacterFormatting => "Fonts, sizes and colours",
-            LossKind::ParagraphFormatting => "Alignment, indents and spacing",
+            LossKind::ParagraphFormatting => "Indents and spacing",
             LossKind::PageBreak => "Page breaks",
             LossKind::PageColour => "Page colour",
             LossKind::PageSetup => "Paper size and margins",
@@ -153,7 +154,10 @@ pub fn loss_report(document: &Document, flavour: HtmlFlavour) -> Vec<Loss> {
         }
         if plain {
             add(LossKind::PageBreak, usize::from(p.props.page_break_before));
-            if !p.props.format.is_empty() {
+            // Alignment is kept (as the `align` attribute); the rest of the format is not.
+            let mut rest = p.props.format;
+            rest.align = None;
+            if !rest.is_empty() {
                 add(LossKind::ParagraphFormatting, 1);
             }
             let style = document.styles.resolve_char(p.props.style);

@@ -615,6 +615,7 @@ fn entries(menu: Menu, state: &AppState) -> Vec<Entry> {
                 item(InsertAction::Table),
                 item(InsertAction::Image),
                 Entry::item(s::INSERT_LINKED_MEDIA, Message::OpenLinkedMedia),
+                Entry::item(s::INSERT_MUSIC, Message::MusicAdd),
                 Entry::Separator,
                 item(InsertAction::Footnote),
                 item(InsertAction::Endnote),
@@ -806,6 +807,10 @@ pub enum ContextMenuTarget {
         block: libertum_model::BlockId,
         index: usize,
     },
+    /// A story checklist point in the Notes pane.
+    ChecklistPoint {
+        id: u64,
+    },
 }
 
 /// The right-click menu, anchored at `x`/`y` in window logical pixels.
@@ -815,7 +820,17 @@ pub fn context_layer<'a>(
     y: f32,
     t: Tokens,
 ) -> Element<'a, Message> {
-    let panel = panel(context_entries(target), t);
+    let panel = match target {
+        // One command: a menu just wide enough for its word, not the full-width panel.
+        ContextMenuTarget::ChecklistPoint { id } => compact_panel(
+            vec![
+                (s::CHECKLIST_EDIT, Message::ChecklistEditOpen(*id)),
+                (s::CHECKLIST_REMOVE, Message::ChecklistRemove(*id)),
+            ],
+            t,
+        ),
+        _ => panel(context_entries(target), t),
+    };
     container(panel)
         .padding(Padding {
             top: y.max(8.0),
@@ -931,7 +946,63 @@ fn context_entries(target: &ContextMenuTarget) -> Vec<Entry> {
             Entry::Separator,
             Entry::item(s::IMAGE_REMOVE, Message::ImageRemove(*block, *index)),
         ],
+        ContextMenuTarget::ChecklistPoint { id } => vec![
+            Entry::item(s::CHECKLIST_EDIT, Message::ChecklistEditOpen(*id)),
+            Entry::item(s::CHECKLIST_REMOVE, Message::ChecklistRemove(*id)),
+        ],
     }
+}
+
+/// An upper bound on the width of the one-command menu [`compact_panel`] draws, so the app can
+/// keep it on screen near the window's right edge.
+pub const CONTEXT_COMPACT_WIDTH: f32 = 96.0;
+
+/// A short menu of a few commands, each row as wide as the longest word plus a little
+/// padding rather than the full-width panel the menu bar uses.
+fn compact_panel<'a>(entries: Vec<(&'static str, Message)>, t: Tokens) -> Element<'a, Message> {
+    // About 7.5 logical pixels a letter at 13 px, plus the row's padding.
+    let widest = entries
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0) as f32;
+    let width = widest * 7.5 + 24.0;
+    let rows = entries.into_iter().map(|(label, message)| {
+        button(text(label).size(13))
+            .width(Length::Fixed(width))
+            .padding([4, 12])
+            .style(move |_, status| {
+                let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hot.then(|| t.menu_hover.into()),
+                    text_color: if hot { t.on_accent } else { t.text },
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+            .on_press(message)
+            .into()
+    });
+    container(column(rows.collect::<Vec<Element<'a, Message>>>()))
+        .padding(3)
+        .style(move |_| container::Style {
+            background: Some(t.menu.into()),
+            border: Border {
+                color: t.menu_border,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            shadow: Shadow {
+                color: t.shadow,
+                offset: Vector::new(0.0, 6.0),
+                blur_radius: 18.0,
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Roughly how tall the menu's contents are. A row is about 24 logical pixels (13 px text
@@ -1062,6 +1133,18 @@ fn menu_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checklist_points_menu_offers_edit_above_delete() {
+        let labels: Vec<String> = context_entries(&ContextMenuTarget::ChecklistPoint { id: 3 })
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Item { label, .. } => Some(label),
+                Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(labels, [s::CHECKLIST_EDIT, s::CHECKLIST_REMOVE]);
+    }
 
     #[test]
     fn left_buttons_are_ordered_view_page_break_zoom() {

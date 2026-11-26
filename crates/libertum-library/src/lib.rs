@@ -24,9 +24,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod posted;
+mod sidecar;
 pub use posted::{
     ChapterKey, POSTED_DIR, PostedCopy, list_posted, load_posted, posted_dir, save_posted,
 };
+pub use sidecar::{load_sidecar, save_sidecar};
 
 /// The hidden folder, beside a document, that holds its earlier versions.
 pub const HISTORY_DIR: &str = ".libertum-history";

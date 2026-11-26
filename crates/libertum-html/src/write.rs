@@ -286,6 +286,12 @@ impl Writer<'_> {
     fn open_paragraph(&mut self, p: &Paragraph, tag: &str, base: StyleId, named: Option<&str>) {
         let _ = write!(self.out, "<{tag}");
         if !self.full {
+            // Plain keeps no styles, but alignment travels as the `align` attribute, which the
+            // reader understands and AO3 accepts.
+            let align = self.document.styles.resolve_props(&p.props).align;
+            if let Some(value) = align.html_value() {
+                let _ = write!(self.out, " align=\"{value}\"");
+            }
             self.out.push('>');
             return;
         }

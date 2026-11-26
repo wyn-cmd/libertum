@@ -37,6 +37,7 @@ pub fn header<'a>(t: Tokens) -> Element<'a, Message> {
 pub fn body<'a>(
     headings: &'a [HeadingEntry],
     collapsed: &std::collections::HashSet<libertum_model::BlockId>,
+    sidebar_width: f32,
     t: Tokens,
 ) -> Element<'a, Message> {
     if headings.is_empty() {
@@ -74,11 +75,17 @@ pub fn body<'a>(
         } else {
             space().width(Length::Fixed(16.0)).into()
         };
-        let label = text(truncated(&heading.text, level))
-            .size(if level == 1 { 13.0 } else { 12.0 })
-            .width(Length::Fill)
-            .wrapping(Wrapping::None)
-            .color(if level == 1 { t.text } else { t.text_secondary });
+        let size = if level == 1 { 13.0 } else { 12.0 };
+        let budget = label_budget(sidebar_width, indent);
+        // Clipped to its own box as well, so a misjudged glyph can never reach the page number.
+        let label = container(
+            text(fit(&heading.text, size, budget))
+                .size(size)
+                .wrapping(Wrapping::None)
+                .color(if level == 1 { t.text } else { t.text_secondary }),
+        )
+        .width(Length::Fill)
+        .clip(true);
         let page = container(
             text(
                 heading
@@ -89,7 +96,7 @@ pub fn body<'a>(
             .size(11.0)
             .color(t.text_secondary),
         )
-        .width(Length::Fixed(30.0))
+        .width(Length::Fixed(PAGE_COLUMN))
         .align_x(iced::alignment::Horizontal::Right);
         list = list.push(
             button(
@@ -114,30 +121,130 @@ pub fn body<'a>(
     column![list,].into()
 }
 
-/// Sidebar headings have one line; a long chapter title gets an ellipsis before the page
-/// number rather than pushing it out of place.
-fn truncated(text: &str, level: u8) -> String {
-    let level = usize::from(level.max(1));
-    let max = 26usize.saturating_sub(level.saturating_sub(1) * 2).max(12);
-    if text.chars().count() <= max {
-        return text.to_owned();
+/// Width of the page-number column.
+const PAGE_COLUMN: f32 = 30.0;
+/// Width of the expand arrow beside each row.
+const ARROW: f32 = 16.0;
+/// Right padding of a row, inside its button.
+const ROW_RIGHT: f32 = 14.0;
+/// Clear space kept between a title and the page number.
+const GAP: f32 = 8.0;
+/// Room the scroll bar takes (its width plus margins), so a title never runs under it.
+const SCROLL_BAR: f32 = 10.0;
+/// The panel's 1px edge, which the sidebar width includes.
+const EDGE: f32 = 1.0;
+
+/// The width in pixels a row's title may use: the sidebar's width less everything else on
+/// the row (the indent, arrow, page column, padding, scroll bar and a gap before the page).
+fn label_budget(sidebar_width: f32, indent: f32) -> f32 {
+    let taken = EDGE + SCROLL_BAR + indent + ARROW + GAP + PAGE_COLUMN + ROW_RIGHT;
+    (sidebar_width - taken).max(0.0)
+}
+
+/// The width of `c` in ems, deliberately on the wide side: the sidebar font's real metrics
+/// are not measured here, and a title that is cut a little early costs less than one that
+/// reaches the page number.
+fn glyph_em(c: char) -> f32 {
+    match c {
+        ' ' | 'i' | 'j' | 'l' | 'I' | '.' | ',' | ':' | ';' | '\'' | '!' | '|' | '`' => 0.34,
+        'f' | 't' | 'r' | '(' | ')' | '[' | ']' | '-' | '"' | '/' | '\\' => 0.42,
+        'm' | 'w' | 'M' | 'W' | '@' | '%' | '\u{2014}' => 0.95,
+        c if c.is_ascii_uppercase() => 0.72,
+        c if c.is_ascii() => 0.58,
+        // CJK, full-width forms and most symbols fill the em.
+        c if ('\u{2e80}'..='\u{ffef}').contains(&c) => 1.05,
+        _ => 0.72,
     }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+}
+
+/// An estimate of `text`'s width at `size` px.
+fn estimate(text: &str, size: f32) -> f32 {
+    text.chars().map(glyph_em).sum::<f32>() * size
+}
+
+/// Sidebar headings have one line. A title that would not fit in `budget` px gets an
+/// ellipsis, cut where the budget runs out, so it follows the sidebar's width.
+fn fit(text: &str, size: f32, budget: f32) -> String {
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if estimate(&text, size) <= budget {
+        return text;
+    }
+    let ellipsis = estimate("\u{2026}", size).max(size);
+    let mut used = 0.0;
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = used + glyph_em(c) * size;
+        if next + ellipsis > budget {
+            break;
+        }
+        used = next;
+        out.push(c);
+    }
+    let kept = out.trim_end().len();
+    out.truncate(kept);
     out.push('\u{2026}');
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncated;
+    use super::{PAGE_COLUMN, estimate, fit, label_budget};
+
+    const LONG: &str = "A very long chapter title that cannot fit in the sidebar at all";
 
     #[test]
-    fn long_headings_get_an_ellipsis() {
-        assert_eq!(truncated("Short", 1), "Short");
-        let long = "A very long chapter title that cannot fit in the sidebar at all";
-        let cut = truncated(long, 1);
-        assert!(cut.ends_with('\u{2026}'));
-        assert!(cut.chars().count() <= 34);
-        assert!(truncated(long, 3).chars().count() < cut.chars().count());
+    fn short_titles_are_left_alone() {
+        assert_eq!(fit("Short", 13.0, label_budget(320.0, 14.0)), "Short");
+    }
+
+    #[test]
+    fn the_cut_follows_the_sidebar_width() {
+        let narrow = fit(LONG, 13.0, label_budget(260.0, 14.0));
+        let wide = fit(LONG, 13.0, label_budget(480.0, 14.0));
+        assert!(narrow.ends_with('\u{2026}'));
+        assert!(wide.chars().count() > narrow.chars().count());
+        assert!(
+            fit(LONG, 13.0, label_budget(2000.0, 14.0)) == LONG,
+            "a very wide sidebar shows it whole"
+        );
+    }
+
+    #[test]
+    fn deeper_headings_get_less_room() {
+        let top = fit(LONG, 12.0, label_budget(320.0, 14.0));
+        let deep = fit(LONG, 12.0, label_budget(320.0, 14.0 + 3.0 * 14.0));
+        assert!(deep.chars().count() < top.chars().count());
+    }
+
+    #[test]
+    fn a_title_never_exceeds_its_budget() {
+        let titles = [
+            LONG,
+            "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",
+            "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+            "第一章 很长很长很长很长很长很长很长很长的标题",
+            "Tab\tand\nnewline in a heading that goes on and on",
+        ];
+        for width in [120.0, 200.0, 260.0, 320.0, 480.0, 800.0] {
+            for indent in [14.0, 28.0, 56.0] {
+                let budget = label_budget(width, indent);
+                for title in titles {
+                    let cut = fit(title, 13.0, budget);
+                    let fits = estimate(&cut, 13.0) <= budget;
+                    // Below one ellipsis wide, the ellipsis alone is all that can be shown.
+                    assert!(fits || cut == "\u{2026}", "{title:?} at {width}: {cut:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_collapsed_sidebar_does_not_panic() {
+        assert_eq!(label_budget(0.0, 56.0), 0.0);
+        assert_eq!(fit(LONG, 13.0, 0.0), "\u{2026}");
+        const { assert!(PAGE_COLUMN > 0.0) };
     }
 }

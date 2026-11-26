@@ -96,6 +96,10 @@ fn a_rich_document_round_trips() {
     let view = ViewState {
         pageless: true,
         zoom_percent: 125,
+        caret: Some(Caret {
+            block: 7,
+            offset: 3,
+        }),
     };
     let native = Native::with_view(original.clone(), view.clone());
     let bytes = native.to_bytes().expect("save");
@@ -340,6 +344,7 @@ proptest! {
             ViewState {
                 pageless,
                 zoom_percent: zoom,
+                caret: None,
             },
         );
         let bytes = native.to_bytes().expect("save");
@@ -412,4 +417,104 @@ fn a_second_language_survives_a_round_trip() {
     let section = &read.document().sections[0];
     assert_eq!(section.language.as_deref(), Some("en-GB"));
     assert_eq!(section.language2.as_deref(), Some("ja"));
+}
+
+#[test]
+fn saved_characters_survive_a_round_trip_and_are_left_out_when_there_are_none() {
+    let mut cast = libertum_model::Characters::default();
+    cast.set_fandoms(["Tides".to_owned()]);
+    cast.add("Mara Voss (Tides)", "29", "Smuggler", vec![0])
+        .expect("a character");
+    let mut native = Native::new(Document::new());
+    native.set_characters(cast.clone());
+    let reopened = Native::parse(&native.to_bytes().expect("bytes")).expect("parse");
+    assert_eq!(reopened.characters(), &cast);
+
+    let plain = Native::new(Document::new()).to_bytes().expect("bytes");
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(plain)).expect("zip");
+    assert!(
+        !archive
+            .file_names()
+            .any(|name| name.as_ref().is_ok_and(|n| n == "characters.json"))
+    );
+
+    // A fandom chosen with no characters yet is still kept.
+    let mut only_fandom = libertum_model::Characters::default();
+    only_fandom.set_fandoms(["Tides".to_owned()]);
+    let mut native = Native::new(Document::new());
+    native.set_characters(only_fandom.clone());
+    let reopened = Native::parse(&native.to_bytes().expect("bytes")).expect("parse");
+    assert_eq!(reopened.characters(), &only_fandom);
+}
+
+#[test]
+fn audio_links_and_kept_copies_survive_a_round_trip_and_are_left_out_when_there_are_none() {
+    use libertum_model::{AudioCopy, Soundtrack};
+    let mut audio = Soundtrack::default();
+    let song = audio
+        .upsert("Theme", "https://a.example/theme.mp3", "Ana")
+        .expect("a track");
+    audio
+        .upsert("Other", "https://a.example/two.mp3", "")
+        .expect("a track");
+    let mut bytes = b"ID3\x04\0\0\0\0\0\0".to_vec();
+    bytes.extend_from_slice(&[7; 200]);
+    audio.set_copy(song, Some(AudioCopy::new(bytes).expect("audio")));
+    let mut native = Native::new(Document::new());
+    native.set_audio(audio.clone());
+    let saved = native.to_bytes().expect("bytes");
+    assert_eq!(
+        native.to_bytes().expect("again"),
+        saved,
+        "saving is deterministic"
+    );
+    let reopened = Native::parse(&saved).expect("parse");
+    assert_eq!(reopened.audio(), &audio);
+    assert!(reopened.audio().get(song).expect("track").copy.is_some());
+
+    let plain = Native::new(Document::new()).to_bytes().expect("bytes");
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(plain)).expect("zip");
+    assert!(!archive.file_names().any(|name| {
+        name.as_ref()
+            .is_ok_and(|n| n == "audio.json" || n.starts_with("audio/"))
+    }));
+}
+
+#[test]
+fn the_story_checklist_survives_a_round_trip_and_is_left_out_when_empty() {
+    let mut list = libertum_model::Checklist::default();
+    let id = list.add("Mara hides the ledger").expect("an item");
+    list.set_aliases(id, "book".into());
+    list.set_done(id, &libertum_model::ChapterRef::new(0, "One"), true);
+    let mut native = Native::new(Document::new());
+    native.set_checklist(list.clone());
+    let reopened = Native::parse(&native.to_bytes().expect("bytes")).expect("parse");
+    assert_eq!(reopened.checklist(), &list);
+
+    // A document with no list writes no part, so its bytes carry nothing extra.
+    let plain = Native::new(Document::new()).to_bytes().expect("bytes");
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(plain)).expect("zip");
+    assert!(
+        !archive
+            .file_names()
+            .any(|name| name.as_ref().is_ok_and(|n| n == "checklist.json"))
+    );
+
+    // A damaged list is dropped; the document still opens.
+    let damaged = Native::new(Document::new()).to_bytes().expect("bytes");
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(damaged)).expect("zip");
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).expect("entry");
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).expect("read");
+        entries.push((file.name().expect("name").to_string(), bytes));
+    }
+    entries.push(("checklist.json".into(), b"not json".to_vec()));
+    let refs: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let opened = Native::parse(&zip_with(&refs)).expect("still opens");
+    assert!(opened.checklist().is_empty());
 }

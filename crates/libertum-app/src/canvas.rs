@@ -573,6 +573,8 @@ pub struct CanvasProps {
     pub find: Vec<SelectionRect>,
     /// Misspelling underline rectangles, page coordinates.
     pub spell: Vec<SelectionRect>,
+    /// The music players on the pages in view, drawn over the picture that stands for each.
+    pub players: Vec<PlayerOverlay>,
     /// Compare mode: text added since the chapter was posted, page coordinates.
     pub compare_added: Vec<SelectionRect>,
     /// Compare mode: thin bars where posted text was removed, page coordinates.
@@ -603,6 +605,222 @@ pub struct CanvasProps {
     /// Shared cache for the page-strip metrics, so a draw or a pointer event does not
     /// rebuild the document's page-sized vectors.
     pub metrics_cache: Arc<MetricsCache>,
+}
+
+/// Where a music player stands.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlayerStatus {
+    /// Not playing and not started.
+    Idle,
+    /// Fetching the audio to play it.
+    Loading,
+    Playing,
+    Paused,
+    /// It could not be played; the text says why.
+    Failed(String),
+}
+
+/// A music player to draw: its place on the page (points) and what to show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerOverlay {
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub title: String,
+    pub status: PlayerStatus,
+    /// How far through, 0 to 1, when the length is known.
+    pub fraction: Option<f32>,
+    /// `1:07` and, when known, `3:45`.
+    pub elapsed: String,
+    pub total: Option<String>,
+}
+
+const PLAYER_BACKGROUND: Color = Color::from_rgb(0.933, 0.941, 0.957);
+const PLAYER_BORDER: Color = Color::from_rgb(0.78, 0.80, 0.83);
+const PLAYER_INK: Color = Color::from_rgb(0.235, 0.26, 0.31);
+const PLAYER_MUTED: Color = Color::from_rgb(0.42, 0.45, 0.50);
+const PLAYER_TRACK: Color = Color::from_rgb(0.80, 0.82, 0.85);
+const PLAYER_ACCENT: Color = Color::from_rgb(0.84, 0.31, 0.17);
+
+fn player_quad<R: iced::advanced::Renderer>(
+    renderer: &mut R,
+    bounds: Rectangle,
+    colour: Color,
+    radius: f32,
+    border: Option<Color>,
+) {
+    renderer.fill_quad(
+        Quad {
+            bounds,
+            border: Border {
+                color: border.unwrap_or(Color::TRANSPARENT),
+                width: if border.is_some() { 1.0 } else { 0.0 },
+                radius: radius.into(),
+            },
+            ..Quad::default()
+        },
+        colour,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn player_text<R: iced::advanced::text::Renderer>(
+    renderer: &mut R,
+    clip: Rectangle,
+    content: &str,
+    at: Point,
+    width: f32,
+    size: f32,
+    colour: Color,
+    align: text::Alignment,
+) {
+    renderer.fill_text(
+        Text {
+            content: content.to_owned(),
+            bounds: Size::new(width.max(1.0), size * 1.4),
+            size: Pixels(size),
+            line_height: text::LineHeight::Relative(1.0),
+            font: renderer.default_font(),
+            align_x: align,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: text::Shaping::Advanced,
+            wrapping: text::Wrapping::None,
+        },
+        at,
+        colour,
+        clip,
+    );
+}
+
+/// Draws one player inside `rect` (window pixels). Everything is in points scaled by `f`, so it
+/// grows and shrinks with the zoom like the picture under it.
+fn draw_player<R: iced::advanced::text::Renderer>(
+    renderer: &mut R,
+    clip: Rectangle,
+    rect: Rectangle,
+    player: &PlayerOverlay,
+) {
+    // Laid out on a 440 by 40 design and scaled to the line it fills.
+    let f = rect.height / 40.0;
+    let design_width = rect.width / f.max(0.001);
+    let at = |x: f32, y: f32| Point::new(rect.x + x * f, rect.y + y * f);
+    let boxed = |x: f32, y: f32, w: f32, h: f32| Rectangle::new(at(x, y), Size::new(w * f, h * f));
+
+    player_quad(
+        renderer,
+        rect,
+        PLAYER_BACKGROUND,
+        8.0 * f,
+        Some(PLAYER_BORDER),
+    );
+
+    // The button: a disc with a play triangle or two pause bars.
+    player_quad(
+        renderer,
+        boxed(6.0, 6.0, 28.0, 28.0),
+        PLAYER_ACCENT,
+        14.0 * f,
+        None,
+    );
+    let playing = player.status == PlayerStatus::Playing;
+    if playing {
+        for left in [14.0, 21.0] {
+            player_quad(
+                renderer,
+                boxed(left, 12.0, 5.0, 16.0),
+                Color::WHITE,
+                0.0,
+                None,
+            );
+        }
+    } else if player.status == PlayerStatus::Loading {
+        for left in [13.0, 18.5, 24.0] {
+            player_quad(
+                renderer,
+                boxed(left, 18.0, 3.0, 4.0),
+                Color::WHITE,
+                1.0 * f,
+                None,
+            );
+        }
+    } else {
+        // A triangle drawn as one-point columns that shrink towards the tip.
+        for column in 0..11 {
+            let height = 16.0 * (1.0 - column as f32 / 11.0);
+            player_quad(
+                renderer,
+                boxed(15.0 + column as f32, 20.0 - height / 2.0, 1.1, height),
+                Color::WHITE,
+                0.0,
+                None,
+            );
+        }
+    }
+
+    // The title, and the time (or what went wrong) on the right.
+    let inner = (design_width - 52.0 - 14.0).max(10.0);
+    let right_text = match &player.status {
+        PlayerStatus::Failed(why) => why.clone(),
+        PlayerStatus::Loading => "Fetching\u{2026}".to_owned(),
+        _ => match &player.total {
+            Some(total) => format!("{} / {total}", player.elapsed),
+            None => player.elapsed.clone(),
+        },
+    };
+    let right_width = if matches!(player.status, PlayerStatus::Failed(_)) {
+        inner * 0.6
+    } else {
+        92.0
+    };
+    player_text(
+        renderer,
+        clip,
+        &player.title,
+        at(52.0, 5.0),
+        (inner - right_width - 6.0) * f,
+        12.0 * f,
+        PLAYER_INK,
+        text::Alignment::Left,
+    );
+    player_text(
+        renderer,
+        clip,
+        &right_text,
+        at(52.0 + inner - right_width, 6.0),
+        right_width * f,
+        11.0 * f,
+        PLAYER_MUTED,
+        text::Alignment::Right,
+    );
+
+    // The progress bar.
+    let top = 40.0 - 15.0;
+    player_quad(
+        renderer,
+        boxed(52.0, top, inner, 4.0),
+        PLAYER_TRACK,
+        2.0 * f,
+        None,
+    );
+    if let Some(fraction) = player.fraction {
+        let fraction = fraction.clamp(0.0, 1.0);
+        player_quad(
+            renderer,
+            boxed(52.0, top, inner * fraction, 4.0),
+            PLAYER_ACCENT,
+            2.0 * f,
+            None,
+        );
+        player_quad(
+            renderer,
+            boxed(52.0 + inner * fraction - 5.0, top - 3.0, 10.0, 10.0),
+            PLAYER_ACCENT,
+            5.0 * f,
+            None,
+        );
+    }
 }
 
 /// IME pre-edit text positioned in page coordinates.
@@ -1415,6 +1633,25 @@ where
                 }
             }
 
+            // Music players: drawn over the picture that stands for each.
+            for player in &self.props.players {
+                if let Some(rect) = page_point_rect(
+                    &m,
+                    viewport,
+                    bounds,
+                    sx,
+                    sy,
+                    player.page,
+                    player.x,
+                    player.y,
+                    player.width,
+                    player.height,
+                ) && rect.intersects(&bounds)
+                {
+                    draw_player(renderer, bounds, rect, player);
+                }
+            }
+
             if let Some(caret) = self.props.caret
                 && let Some(rect) = page_point_rect(
                     &m,
@@ -1754,6 +1991,7 @@ mod tests {
             selection: Vec::new(),
             find: Vec::new(),
             spell: Vec::new(),
+            players: Vec::new(),
             compare_added: Vec::new(),
             compare_removed: Vec::new(),
             preedit: None,

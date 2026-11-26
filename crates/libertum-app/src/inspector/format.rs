@@ -188,6 +188,7 @@ fn linked_row<'a>(image: &'a crate::state::ImageEntry, t: Tokens) -> Element<'a,
     let kind = match link.kind {
         libertum_model::MediaKind::Image => s::LINKED_IMAGE_NOTE,
         libertum_model::MediaKind::Video => s::LINKED_VIDEO_NOTE,
+        libertum_model::MediaKind::Audio => s::LINKED_AUDIO_NOTE,
     };
     let (block, index) = (image.block, image.index);
     column![

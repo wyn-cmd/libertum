@@ -23,6 +23,7 @@ mod mcp;
 mod mcp_runner;
 mod palm;
 mod perf;
+mod power;
 mod recovery;
 mod script;
 
@@ -40,6 +41,7 @@ mod theme;
 mod toolbar;
 mod update;
 mod widgets;
+mod wiki_fetch;
 
 use iced::{Font, Size, window};
 

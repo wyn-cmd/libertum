@@ -940,3 +940,42 @@ fn a_second_language_goes_into_a_meta_tag_and_comes_back() {
     assert_eq!(section.language.as_deref(), Some("en-GB"));
     assert_eq!(section.language2.as_deref(), Some("uk-UA"));
 }
+
+#[test]
+fn plain_html_keeps_alignment_as_the_align_attribute() {
+    let mut doc = Document::new();
+    let id = doc.alloc_id();
+    let mut p = Paragraph::new(id, "~~~");
+    p.props.format.align = Some(Align::Centre);
+    let id = doc.alloc_id();
+    let mut q = Paragraph::new(id, "Justified text");
+    q.props.format.align = Some(Align::Justify);
+    doc.append_blocks(vec![Block::Paragraph(p), Block::Paragraph(q)]);
+    let mut html = Html::new(doc.clone());
+    html.set_flavour(HtmlFlavour::Plain);
+    let text = String::from_utf8(html.to_bytes()).expect("utf-8");
+    assert!(text.contains("<p align=\"center\">~~~</p>"), "{text}");
+    assert!(
+        text.contains("<p align=\"justify\">Justified text</p>"),
+        "{text}"
+    );
+    assert!(!text.contains("style="), "{text}");
+    let back = Html::parse(&text, None);
+    let back = back.document();
+    assert_eq!(
+        back.styles.resolve_props(&para(back, "~~~").props).align,
+        Align::Centre
+    );
+    assert_eq!(
+        back.styles
+            .resolve_props(&para(back, "Justified text").props)
+            .align,
+        Align::Justify
+    );
+    assert!(
+        !loss_report(&doc, HtmlFlavour::Plain)
+            .iter()
+            .any(|l| l.kind == LossKind::ParagraphFormatting),
+        "alignment alone is not a loss"
+    );
+}

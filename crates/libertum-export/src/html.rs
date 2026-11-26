@@ -4,6 +4,10 @@
 //! `sup`, `sub`, `blockquote`, `ul`/`ol`/`li`, `table`/`tr`/`td` and `br`. No classes, ids,
 //! styles or page furniture. Everything else (fonts, colours, spacing) is dropped, because
 //! AO3 would strip it anyway.
+//!
+//! The one paragraph property kept in the AO3 fragment is alignment, written as the `align`
+//! attribute (`<p align="center">`), which AO3 is understood to accept where it strips
+//! `style`. The EPUB chapters leave it out: `align` is not valid in EPUB's XHTML.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -37,7 +41,20 @@ pub struct ChapterHtml {
 /// The AO3 fragment for one chapter: its body only, with the chapter heading left out (AO3
 /// has a separate title field). Pastes into AO3's HTML editor as-is.
 pub fn ao3_fragment(document: &Document, chapter: &Chapter) -> String {
-    chapter_html(document, chapter, None).body
+    render(document, chapter, None, true).body
+}
+
+/// The words in the chapter text the AO3 fragment carries: the same blocks, so the chapter's
+/// own heading and generated contents entries are left out, and counted the way the status
+/// bar counts.
+pub fn ao3_word_count(document: &Document, chapter: &Chapter) -> usize {
+    let blocks = chapter_blocks(document, chapter);
+    let skip = usize::from(chapter.level.is_some());
+    blocks[skip.min(blocks.len())..]
+        .iter()
+        .filter(|block| !matches!(block, Block::Paragraph(p) if p.props.toc_target.is_some()))
+        .map(|block| block.word_count())
+        .sum()
 }
 
 /// Renders `chapter` as a fragment. `image_prefix` is the URL prefix an `<img>` needs, or
@@ -47,6 +64,15 @@ pub fn chapter_html(
     chapter: &Chapter,
     image_prefix: Option<&str>,
 ) -> ChapterHtml {
+    render(document, chapter, image_prefix, false)
+}
+
+fn render(
+    document: &Document,
+    chapter: &Chapter,
+    image_prefix: Option<&str>,
+    align_attr: bool,
+) -> ChapterHtml {
     let blocks = chapter_blocks(document, chapter);
     // The chapter's own heading is its title: AO3 shows the title separately and EPUB
     // writes its own `<h1>` from it.
@@ -54,6 +80,7 @@ pub fn chapter_html(
     let mut renderer = Renderer {
         document,
         image_prefix,
+        align_attr,
         images: Vec::new(),
         image_names: HashMap::new(),
     };
@@ -83,6 +110,12 @@ fn linked_media(link: &libertum_model::MediaLink, alt: &str, out: &mut String) {
             }
             out.push_str(" />");
         }
+        // The file is the writer's own link; AO3 plays it with the browser's own controls.
+        libertum_model::MediaKind::Audio => {
+            out.push_str("<audio controls src=\"");
+            escape_attr_into(&link.url, out);
+            out.push_str("\"></audio>");
+        }
         libertum_model::MediaKind::Video => {
             let path = link
                 .url
@@ -108,11 +141,31 @@ fn linked_media(link: &libertum_model::MediaLink, alt: &str, out: &mut String) {
 struct Renderer<'a> {
     document: &'a Document,
     image_prefix: Option<&'a str>,
+    /// Write `align="..."` on paragraphs and headings (AO3 only).
+    align_attr: bool,
     images: Vec<ImageAsset>,
     image_names: HashMap<u64, String>,
 }
 
 impl Renderer<'_> {
+    /// `<tag>`, or `<tag align="...">` when the paragraph is aligned and the output takes it.
+    fn open(&self, tag: &str, p: &Paragraph) -> String {
+        let align = self
+            .align_attr
+            .then(|| {
+                self.document
+                    .styles
+                    .resolve_props(&p.props)
+                    .align
+                    .html_value()
+            })
+            .flatten();
+        match align {
+            Some(value) => format!("<{tag} align=\"{value}\">"),
+            None => format!("<{tag}>"),
+        }
+    }
+
     fn blocks(&mut self, blocks: &[&Block], out: &mut String) {
         let mut i = 0;
         let mut wrote_anything = false;
@@ -136,7 +189,7 @@ impl Renderer<'_> {
                         if q.props.style != StyleId::QUOTE || q.props.toc_target.is_some() {
                             break;
                         }
-                        out.push_str("<p>");
+                        out.push_str(&self.open("p", q));
                         let inner = self.paragraph_inner(q);
                         out.push_str(&inner);
                         out.push_str("</p>\n");
@@ -174,14 +227,14 @@ impl Renderer<'_> {
                     let heading = p.props.outline_level;
                     if let Some(level) = heading {
                         let tag = level.clamp(1, 6);
-                        out.push_str(&format!("<h{tag}>"));
+                        out.push_str(&self.open(&format!("h{tag}"), p));
                         let inner = self.paragraph_inner(p);
                         out.push_str(&inner);
                         out.push_str(&format!("</h{tag}>\n"));
                     } else if p.text().is_empty() && p.images().is_empty() {
                         out.push_str("<p><br /></p>\n");
                     } else {
-                        out.push_str("<p>");
+                        out.push_str(&self.open("p", p));
                         let inner = self.paragraph_inner(p);
                         out.push_str(&inner);
                         out.push_str("</p>\n");
@@ -281,7 +334,7 @@ impl Renderer<'_> {
         // A linked video is always a link to it; a linked picture points at its address in
         // an AO3 chapter, which cannot host files (an EPUB keeps the preview it holds).
         if let Some(link) = image.link()
-            && (link.kind == libertum_model::MediaKind::Video || self.image_prefix.is_none())
+            && (link.kind != libertum_model::MediaKind::Image || self.image_prefix.is_none())
         {
             linked_media(&link, &image.alt, out);
             return;

@@ -13,10 +13,11 @@ mod text;
 
 pub use autotags::{
     MAX_CHARACTERS, MAX_KEYWORDS, MAX_RELATIONSHIPS, NameBook, auto_suggestions,
-    auto_suggestions_with, merge_suggestions,
+    auto_suggestions_with, fandom_tag_suggestions, is_saved_character, merge_suggestions,
+    saved_fandom_suggestions, saved_suggestions,
 };
 pub use epub::{EpubError, build_epub};
-pub use html::{AO3_WHITELIST, ao3_fragment, chapter_html};
+pub use html::{AO3_WHITELIST, ao3_fragment, ao3_word_count, chapter_html};
 pub use tag_cache::{
     CacheSource, CachedTag, MAX_CACHED_TAGS, STARTER_LIST, TagCache, parse_tag_import, starter_tags,
 };

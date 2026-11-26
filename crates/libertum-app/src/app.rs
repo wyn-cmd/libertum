@@ -21,7 +21,7 @@ use libertum_model::{
     Align, BlockId, CharFormat, DateTimeContent, DateTimeFormat, DateTimeSource, Document, HfKind,
     HfVariant, Ligatures, LineSpacing, PageNumbering, PageSetup, ParaFormat, Section,
 };
-use libertum_native::{Native, ViewState};
+use libertum_native::{Caret, Native, ViewState};
 use libertum_odt::Odt;
 use libertum_rtf::Rtf;
 
@@ -30,8 +30,10 @@ use crate::docview::{DocEvent, DocView};
 use crate::home;
 use crate::inspector;
 use crate::inspector::bookmarks::BookmarkEntry;
+use crate::inspector::characters::CharactersView;
+use crate::inspector::checklist::ChecklistView;
 use crate::inspector::headers::HeadingEntry;
-use crate::inspector::notes::NoteEntry;
+use crate::inspector::notes::{NoteEntry, NotesPane, NotesTab};
 use crate::language::DocLanguage;
 use crate::mcp;
 use crate::perf;
@@ -55,8 +57,14 @@ use crate::widgets::segmented::{self, Content, Look};
 
 mod ao3_post;
 mod bench_run;
+mod character_import;
+pub(crate) use character_import::ImportMsg;
+mod character_popups;
+mod checklist_popups;
 mod compare;
 mod macro_run;
+mod music_player;
+mod music_popups;
 mod runner;
 mod work_tags;
 pub use ao3_post::Ao3PostMsg;
@@ -351,6 +359,53 @@ impl FileContext {
         }
     }
 
+    /// The story checklist stored with a document: inside a native file, in a sidecar beside
+    /// any other format.
+    fn checklist(&self, path: &std::path::Path) -> libertum_model::Checklist {
+        match self {
+            Self::Native(native) => native.checklist().clone(),
+            _ => read_checklist_sidecar(path),
+        }
+    }
+
+    /// The saved characters of a document: inside a native file, in a sidecar beside any other.
+    fn characters(&self, path: &std::path::Path) -> libertum_model::Characters {
+        match self {
+            Self::Native(native) => native.characters().clone(),
+            _ => read_characters_sidecar(path),
+        }
+    }
+
+    /// The music of a document: inside a native file, links only in a sidecar beside any other.
+    fn audio(&self, path: &std::path::Path) -> libertum_model::Soundtrack {
+        match self {
+            Self::Native(native) => native.audio().clone(),
+            _ => read_audio_sidecar(path),
+        }
+    }
+
+    /// Hands a native save the music to store inside the file.
+    fn set_audio(&mut self, audio: libertum_model::Soundtrack) {
+        if let Self::Native(native) = self {
+            native.set_audio(audio);
+        }
+    }
+
+    /// Hands a native save the characters to store inside the file.
+    fn set_characters(&mut self, characters: libertum_model::Characters) {
+        if let Self::Native(native) = self {
+            native.set_characters(characters);
+        }
+    }
+
+    /// Hands a native save the checklist to store inside the file. The other formats get theirs
+    /// from [`write_checklist_sidecar`] after the save.
+    fn set_checklist(&mut self, checklist: libertum_model::Checklist) {
+        if let Self::Native(native) = self {
+            native.set_checklist(checklist);
+        }
+    }
+
     /// Records the view state before a native save; a no-op for the other formats.
     fn set_view(&mut self, view: ViewState) {
         if let Self::Native(native) = self {
@@ -420,6 +475,66 @@ impl FileContext {
             Format::Native => Self::Native(Native::new(document)),
             Format::Html | Format::Epub => Self::Html(Html::new(document)),
         }
+    }
+}
+
+/// The sidecar the checklist of a non-native document is kept in.
+const CHECKLIST_SIDECAR: &str = "checklist.json";
+
+/// The checklist kept beside the document at `path`; empty when there is none or it is damaged.
+fn read_checklist_sidecar(path: &std::path::Path) -> libertum_model::Checklist {
+    libertum_library::load_sidecar(path, CHECKLIST_SIDECAR)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps the checklist beside the document at `path`, or removes the sidecar when the list is
+/// empty. A failure is logged, not reported: the document itself saved.
+fn write_checklist_sidecar(path: &std::path::Path, checklist: &libertum_model::Checklist) {
+    let bytes = (!checklist.is_empty())
+        .then(|| serde_json::to_vec(checklist).ok())
+        .flatten();
+    if let Err(error) = libertum_library::save_sidecar(path, CHECKLIST_SIDECAR, bytes.as_deref()) {
+        tracing::warn!(%error, path = %path.display(), "could not save the story checklist");
+    }
+}
+
+/// The sidecar the characters of a non-native document are kept in.
+const CHARACTERS_SIDECAR: &str = "characters.json";
+
+/// The characters kept beside the document at `path`; empty when there are none or the file is
+/// damaged.
+fn read_characters_sidecar(path: &std::path::Path) -> libertum_model::Characters {
+    libertum_library::load_sidecar(path, CHARACTERS_SIDECAR)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps the characters beside the document at `path`, or removes the sidecar when there is
+/// nothing to keep. A failure is logged, not reported: the document itself saved.
+fn write_characters_sidecar(path: &std::path::Path, characters: &libertum_model::Characters) {
+    let bytes = (!characters.is_empty())
+        .then(|| serde_json::to_vec(characters).ok())
+        .flatten();
+    if let Err(error) = libertum_library::save_sidecar(path, CHARACTERS_SIDECAR, bytes.as_deref()) {
+        tracing::warn!(%error, path = %path.display(), "could not save the characters");
+    }
+}
+
+/// The sidecar the music links of a non-native document are kept in. Only the links: a kept
+/// copy of the audio lives inside a native file.
+const AUDIO_SIDECAR: &str = "audio.json";
+
+fn read_audio_sidecar(path: &std::path::Path) -> libertum_model::Soundtrack {
+    libertum_library::load_sidecar(path, AUDIO_SIDECAR)
+        .map(|bytes| libertum_model::Soundtrack::from_json(&bytes, |_| None))
+        .unwrap_or_default()
+}
+
+fn write_audio_sidecar(path: &std::path::Path, audio: &libertum_model::Soundtrack) {
+    let bytes = (!audio.is_empty()).then(|| audio.to_json());
+    if let Err(error) = libertum_library::save_sidecar(path, AUDIO_SIDECAR, bytes.as_deref()) {
+        tracing::warn!(%error, path = %path.display(), "could not save the music links");
     }
 }
 
@@ -543,6 +658,16 @@ enum Modal {
         versions: Vec<libertum_library::Version>,
         from_library: bool,
     },
+    /// Choosing which chapters a new checklist point is for.
+    ChecklistScope(checklist_popups::ScopeDraft),
+    /// Editing a checklist point's wording and extra words.
+    ChecklistEdit(checklist_popups::EditDraft),
+    /// Adding or editing one saved character.
+    CharacterEdit(character_popups::CharacterDraft),
+    /// Adding or editing one track of music, and keeping a copy of it.
+    MusicEdit(music_popups::MusicDraft),
+    /// Importing characters from a wiki or a typed list.
+    CharacterImport(character_import::ImportState),
     /// Adding an online picture or video by its address.
     LinkedMedia {
         url: String,
@@ -576,6 +701,8 @@ enum Modal {
         /// does not: its name is a label, not a title).
         has_title: bool,
         title_copied: bool,
+        /// Words in the chapter text being copied (its heading left out).
+        words: usize,
     },
 }
 
@@ -809,6 +936,90 @@ pub enum Message {
     NoteText(libertum_model::BlockId, usize, String),
     /// Jump the caret to a note from the Notes pane.
     GoToNote(libertum_model::BlockId, usize),
+    /// Switch the Notes pane between footnotes, endnotes and the story checklist.
+    NotesTab(NotesTab),
+    /// The text of a new checklist point being typed.
+    ChecklistDraft(String),
+    /// Add the typed point: opens the pop-up that asks which chapters it is for.
+    ChecklistAdd,
+    /// The pop-up's choice between This Chapter, Story and Chapters.
+    ChecklistScopeKind(checklist_popups::ScopeKind),
+    /// Tick or untick one chapter in the pop-up's list.
+    ChecklistScopeToggle(usize),
+    /// Whether the point also covers every chapter after the last one ticked.
+    ChecklistScopeOnward(bool),
+    ChecklistScopeConfirm,
+    ChecklistScopeCancel,
+    /// Open the pop-up for editing a point (from its right-click menu).
+    ChecklistEditOpen(u64),
+    ChecklistEditText(String),
+    ChecklistEditAliases(String),
+    ChecklistEditSave,
+    ChecklistEditCancel,
+    ChecklistRemove(u64),
+    /// Tick a point off for the chapter being written, or untick it.
+    ChecklistDone(u64, bool),
+    /// Least covered first, or most relevant first.
+    ChecklistOrder(libertum_model::ChecklistOrder),
+    /// Right-click on a point: open its Delete menu at the pointer.
+    ChecklistContext(u64),
+    /// The document has been quiet: score the chapter again.
+    ChecklistTick,
+    /// The Characters tab's Import pop-up.
+    Import(character_import::ImportMsg),
+    /// Insert > Music: open the pop-up for a player.
+    MusicAdd,
+    MusicTitle(String),
+    MusicUrl(String),
+    MusicCredit(String),
+    /// The writer says they may keep a copy.
+    MusicPermission,
+    /// Fetch the audio once and keep a copy in the document.
+    MusicKeep,
+    /// The fetch for this link finished.
+    MusicFetched(
+        String,
+        Result<libertum_model::AudioCopy, crate::wiki_fetch::AudioFetchError>,
+    ),
+    /// Stop a fetch in progress.
+    MusicStop,
+    /// Drop the copy but keep the link.
+    MusicDropCopy,
+    /// Insert the player at the caret.
+    MusicSave,
+    MusicCancel,
+    /// A click on a player's button or bar (page points inside the player).
+    PlayerClick {
+        url: String,
+        title: String,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+    /// A player's audio was fetched to play it.
+    MusicLoaded(
+        String,
+        Result<libertum_model::AudioCopy, crate::wiki_fetch::AudioFetchError>,
+    ),
+    /// Refresh the players while one plays.
+    MusicTick,
+    /// The Characters tab's search box.
+    CharactersSearch(String),
+    /// Open or close a character's plot points.
+    CharacterToggle(u64),
+    /// Open the pop-up to add a character.
+    CharacterAdd,
+    /// Open the pop-up to edit a character.
+    CharacterEditOpen(u64),
+    CharacterName(String),
+    CharacterAge(String),
+    CharacterDetails(String),
+    /// Link or unlink a plot point in the pop-up.
+    CharacterPoint(u64),
+    CharacterSave,
+    CharacterCancel,
+    CharacterRemove(u64),
     /// Add a bookmark at the caret from the Bookmarks pane.
     AddBookmark,
     /// A bookmark name being typed in the Bookmarks pane.
@@ -913,6 +1124,8 @@ pub enum Message {
     ShowHiddenTags,
     /// Turn the suggestions drawn from the chapter's own text on or off.
     SetAutoTags(bool),
+    /// Settings: try AO3 before the wikis (`true`) or use the wikis only.
+    SetAo3First(bool),
     /// Open the local AO3 tag vocabulary window.
     OpenTagVocabulary,
     CloseTagVocabulary,
@@ -1011,6 +1224,9 @@ const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530
 /// The caret blinks this long after the last keystroke, click or edit, then stays solid and
 /// the timer stops, so an idle document costs no CPU (PLAN §2; the Windows caret does the
 /// same). Agreed 2026-11-09.
+/// An autosave tick that falls within this long of the last keystroke or click waits for the
+/// next tick (once), so a snapshot is not taken mid-sentence.
+const AUTOSAVE_QUIET: Duration = Duration::from_secs(2);
 const BLINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A stream of ticks every [`BLINK_INTERVAL`] from a sleeping thread. iced's
@@ -1032,6 +1248,19 @@ fn blink_ticks() -> UnboundedReceiver<Instant> {
         // The caret simply stays solid.
         tracing::warn!(%error, "could not start the caret blink timer");
     }
+    rx
+}
+
+/// One tick, [`CHECKLIST_QUIET`] after a rescore of the checklist was put off, and then the
+/// thread ends: nothing wakes the machine up again until the next edit.
+fn checklist_ticks() -> UnboundedReceiver<()> {
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    let _ = std::thread::Builder::new()
+        .name("libertum-checklist".into())
+        .spawn(move || {
+            std::thread::sleep(CHECKLIST_QUIET);
+            let _ = tx.unbounded_send(());
+        });
     rx
 }
 
@@ -1197,6 +1426,84 @@ fn autosave_ticks(seconds: &u64) -> UnboundedReceiver<()> {
 /// Settling time after pagination completes before the scripted scroll starts.
 const AUTOSCROLL_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// The story checklist, the chapter it is being scored against and the ranked result.
+///
+/// Scoring is split so typing stays cheap: the chapter is summarised into a word profile only
+/// when the document or the caret's chapter changed (and, while typing, at most once per
+/// [`CHECKLIST_QUIET`]); ranking the list against that profile is a handful of lookups and runs
+/// whenever the list, the order or the profile changes.
+#[derive(Default)]
+struct ChecklistPane {
+    list: libertum_model::Checklist,
+    tab: NotesTab,
+    order: libertum_model::ChecklistOrder,
+    /// A new point being typed.
+    draft: String,
+    chapter: Option<libertum_model::ChapterRef>,
+    profile: libertum_model::ChapterProfile,
+    /// What the profile was built from: revision, chapter start, chapter end, chapter index.
+    stamp: Option<(u64, usize, usize, usize)>,
+    rows: Vec<libertum_model::Ranked>,
+    /// The document changed after the profile was built and a rescore is waiting for quiet.
+    waiting: bool,
+    /// The revision the waiting rescore was deferred at, so a scroll or caret move that does
+    /// not change it need not look again.
+    pending: Option<u64>,
+    last_profile: Option<Instant>,
+}
+
+/// The saved characters and what the Characters tab is showing of them.
+#[derive(Default)]
+struct CharactersPane {
+    list: libertum_model::Characters,
+    search: String,
+    /// The characters whose plot points are open.
+    expanded: HashSet<u64>,
+}
+
+/// The music of the story: what is known about each linked track, and the one player that
+/// plays them (one clip at a time, on its own thread, with the sound device open only while
+/// a clip is actually playing).
+#[derive(Default)]
+struct MusicPane {
+    list: libertum_model::Soundtrack,
+    player: libertum_audio::Player,
+    /// What the player last reported. Refreshed by a timer that runs only while a clip plays.
+    snap: libertum_audio::Snapshot,
+    /// Audio fetched to be played (not kept in the document), by link, for this session.
+    fetched: std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>,
+    /// The link being fetched so it can be played.
+    loading: Option<String>,
+    /// Keep refreshing until then, so a click's effect shows before the first tick is due.
+    watch_until: Option<Instant>,
+}
+
+/// How often the players redraw while one plays.
+const MUSIC_TICK: Duration = Duration::from_millis(250);
+
+/// The number a link goes by in the player.
+fn clip_id(url: &str) -> u64 {
+    libertum_model::audio_hash(url.trim().as_bytes())
+}
+
+/// One tick of [`MUSIC_TICK`], then the thread ends: the subscription is only alive while a
+/// clip plays, so nothing wakes the machine otherwise.
+fn music_ticks() -> UnboundedReceiver<()> {
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    let _ = std::thread::Builder::new()
+        .name("libertum-music-tick".into())
+        .spawn(move || {
+            std::thread::sleep(MUSIC_TICK);
+            let _ = tx.unbounded_send(());
+        });
+    rx
+}
+
+/// While the writer types in a chapter, it is scored again at most this often. Rescoring is
+/// cheap, but each one redraws the pane and costs a wake-up, and a ranking that shifts under the
+/// writer's eyes every fraction of a second is more distracting than useful.
+const CHECKLIST_QUIET: std::time::Duration = std::time::Duration::from_millis(1500);
+
 pub struct App {
     /// A downloaded update, installed as Libertum quits.
     staged_update: Option<crate::install::Staged>,
@@ -1299,6 +1606,9 @@ pub struct App {
     autoscroll: Option<AutoScroll>,
     /// Last keystroke, click or edit: the caret blinks for [`BLINK_TIMEOUT`] after it.
     caret_activity: Instant,
+    /// The last autosave tick fell while the writer was typing and was put off to the next one.
+    /// A second tick saves regardless, so nonstop typing still gets a snapshot every two periods.
+    autosave_deferred: bool,
     /// Caret drawn in this blink phase.
     caret_on: bool,
     /// File the document was opened from or last saved to.
@@ -1332,6 +1642,12 @@ pub struct App {
     collapsed_headings: HashSet<BlockId>,
     /// Cached notes for the Notes pane.
     notes: Vec<NoteEntry>,
+    /// The story checklist and what it is scored against.
+    checklist: ChecklistPane,
+    /// The saved characters.
+    characters: CharactersPane,
+    /// The music linked to the story.
+    music: MusicPane,
     /// Cached bookmarks for the Bookmarks pane.
     bookmarks: Vec<BookmarkEntry>,
     /// A bookmark name being typed in the pane; committed on Return.
@@ -1341,6 +1657,12 @@ pub struct App {
     /// What the open file looked like when it was opened or last saved, to notice a change made
     /// by another device or program (a synced folder).
     disk_stamp: Option<libertum_library::DiskStamp>,
+    /// How the open `.lbtd` file says it was last read (pageless or not, and zoom). A view
+    /// that differs when the document is left is written back quietly; see
+    /// [`App::persist_view`].
+    saved_view: Option<ViewState>,
+    /// The caret was restored on opening and the view has yet to scroll to it.
+    reveal_caret_pending: bool,
     /// A snapshot waiting for the user's Restore or Discard choice.
     pending_recovery: Option<(libertum_model::Document, recovery::Meta)>,
     /// The Settings window is over the document.
@@ -1493,6 +1815,7 @@ impl App {
             preedit_hook: None,
             autoscroll: AutoScroll::from_env(),
             caret_activity: Instant::now(),
+            autosave_deferred: false,
             caret_on: true,
             file: None,
             file_context: None,
@@ -1509,6 +1832,9 @@ impl App {
             headings: Vec::new(),
             collapsed_headings: HashSet::new(),
             notes: Vec::new(),
+            checklist: ChecklistPane::default(),
+            characters: CharactersPane::default(),
+            music: MusicPane::default(),
             bookmarks: Vec::new(),
             bookmark_draft: None,
             thumb_cache: std::collections::HashMap::new(),
@@ -1516,6 +1842,8 @@ impl App {
             thumb_scroll: (0.0, 0.0),
             recovery_dir: recovery::data_dir().unwrap_or_else(std::env::temp_dir),
             disk_stamp: None,
+            saved_view: None,
+            reveal_caret_pending: false,
             pending_recovery: None,
             settings_open: false,
             bench: None,
@@ -1747,7 +2075,7 @@ impl App {
                         .iter()
                         .any(|w| w == libertum_formats_common::toc::TOC_REBUILT_WARNING);
                     let view = context.view();
-                    let (doc, events) = match context.format() {
+                    let (mut doc, events) = match context.format() {
                         Format::Markdown => DocView::open_markdown(document),
                         // RTF has no reliable page model of its own, so it reads pageless.
                         Format::Rtf => DocView::open_pageless(document),
@@ -1759,12 +2087,21 @@ impl App {
                         Format::Native | Format::Odt | Format::Docx => DocView::open(document),
                     };
                     tasks.push(Task::run(events, Message::Doc));
+                    let restored = Self::restore_caret(&mut doc, view.as_ref());
                     let mut app = Self::with_doc(settings, path, Some(doc));
+                    app.reveal_caret_pending = restored;
                     if let Some(view) = &view {
                         app.state.zoom = Zoom::Percent(view.zoom_percent.clamp(1, 800));
                     }
+                    let checklist = context.checklist(&open);
+                    let characters = context.characters(&open);
+                    let audio = context.audio(&open);
+                    app.saved_view = app.opened_view(view.as_ref());
                     app.file = Some(open);
                     app.file_context = Some(context);
+                    app.set_checklist(checklist);
+                    app.set_characters(characters);
+                    app.set_audio(audio);
                     app.dirty = false;
                     if let Some(doc) = app.doc.as_mut() {
                         let _ = doc.edit(|ed| ed.refresh_table_of_contents());
@@ -1900,6 +2237,55 @@ impl App {
                 _ => {}
             }
         }
+        // `LIBERTUM_IMPORT=consent|sources|pick|typed` opens the Characters tab with the Import
+        // pop-up at that step (for screenshots; `pick` fills it with made-up names).
+        if let Ok(step) = std::env::var("LIBERTUM_IMPORT")
+            && self.doc.is_some()
+        {
+            self.state.inspector = Inspector::Notes;
+            self.state.sidebar_visible = true;
+            self.checklist.tab = NotesTab::Characters;
+            let _ = self.update(Message::Import(ImportMsg::Open));
+            if let Some(Modal::CharacterImport(state)) = &mut self.modal {
+                state.fandoms = vec!["Harry Potter".to_owned()];
+                state.stage = match step.as_str() {
+                    "consent" => character_import::Stage::Consent,
+                    "typed" => character_import::Stage::Offline,
+                    "pick" => {
+                        state.found = (1..=80)
+                            .map(|i| libertum_wiki::Candidate {
+                                name: format!("Example Person {i:02} (Harry Potter)"),
+                                fandom: "Harry Potter".to_owned(),
+                                site: "Fandom".to_owned(),
+                                title: String::new(),
+                                uses: 80 - i,
+                            })
+                            .collect();
+                        state.report =
+                            vec!["Harry Potter, Miraheze: no wiki by that name".to_owned()];
+                        character_import::Stage::Pick
+                    }
+                    _ => character_import::Stage::Sources,
+                };
+            }
+        }
+        // `LIBERTUM_MUSIC=player|popup` inserts a player at the start of the document (or opens
+        // the Insert music pop-up filled in), for screenshots.
+        if let Ok(step) = std::env::var("LIBERTUM_MUSIC")
+            && self.doc.is_some()
+        {
+            let _ = self.update(Message::MusicAdd);
+            let _ = self.update(Message::MusicTitle("Harbour theme".into()));
+            let _ = self.update(Message::MusicUrl(
+                "https://example.org/audio/harbour.mp3".into(),
+            ));
+            let _ = self.update(Message::MusicCredit("Ana Reyes".into()));
+            if step == "player" {
+                let _ = self.update(Message::MusicSave);
+            } else {
+                let _ = self.update(Message::MusicPermission);
+            }
+        }
         // `LIBERTUM_PREEDIT=<text>` shows that text as an input-method composition at the
         // caret (for screenshots; a real composition comes from the platform's input method,
         // which this hook does not depend on).
@@ -1971,6 +2357,9 @@ impl App {
     /// Replaces the home screen with a new document built from `template`. The caret starts
     /// at the end of the document (the empty body paragraph), ready to type.
     fn create_document(&mut self, template: TemplateId) -> Task<Message> {
+        self.persist_view();
+        self.saved_view = None;
+        self.reveal_caret_pending = false;
         let mut new = template.build(self.state.units);
         self.stamp_default_language(&mut new.document);
         let (mut doc, events) = DocView::open_with(new.document, new.options);
@@ -1982,6 +2371,9 @@ impl App {
         self.doc = Some(doc);
         self.file = None;
         self.file_context = None;
+        self.set_checklist(libertum_model::Checklist::default());
+        self.set_characters(libertum_model::Characters::default());
+        self.set_audio(libertum_model::Soundtrack::default());
         self.dirty = false;
         self.autosave_pending = None;
         self.autosave_done = None;
@@ -2551,6 +2943,193 @@ impl App {
     }
 
     /// Every footnote and endnote in document order, for the Notes pane.
+    /// Every plot point (checklist item), for choosing which ones a character is linked to.
+    fn plot_point_choices(&self) -> Vec<(u64, String)> {
+        self.checklist
+            .list
+            .items()
+            .iter()
+            .map(|item| (item.id, item.text.clone()))
+            .collect()
+    }
+
+    /// The checklist changed: it needs saving with the document, and the order may differ.
+    fn checklist_changed(&mut self) {
+        self.dirty = true;
+        self.rank_checklist();
+    }
+
+    /// A character linked to a point lends it their name as a keyword, so the list is scored
+    /// as a copy that carries those names; the writer's own list is not changed.
+    fn rank_checklist(&mut self) {
+        let scored = self.characters.list.lend_names(&self.checklist.list);
+        let pane = &mut self.checklist;
+        pane.rows = match &pane.chapter {
+            Some(chapter) => libertum_model::rank(&scored, &pane.profile, chapter, pane.order),
+            None => libertum_model::rank(
+                &scored,
+                &pane.profile,
+                &libertum_model::ChapterRef::new(0, ""),
+                pane.order,
+            ),
+        };
+    }
+
+    /// The position of the chapter the caret is in. Text before the first heading belongs to
+    /// the first chapter.
+    fn caret_chapter(doc: &DocView, chapters: &[libertum_export::Chapter]) -> usize {
+        let caret_block = doc
+            .document()
+            .location_of(doc.editor().caret().block)
+            .map_or(0, |location| location.block);
+        chapters
+            .iter()
+            .rposition(|chapter| chapter.start <= caret_block)
+            .unwrap_or(0)
+    }
+
+    /// Every chapter of the document and the position of the one the caret is in.
+    fn checklist_chapters(&self) -> Option<(Vec<libertum_model::ChapterRef>, usize)> {
+        let doc = self.doc.as_ref()?;
+        let chapters = libertum_export::chapters(doc.document(), self.settings.chapter_headings);
+        let current = Self::caret_chapter(doc, &chapters);
+        let refs = chapters
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| libertum_model::ChapterRef::new(index, chapter.title.clone()))
+            .collect();
+        Some((refs, current))
+    }
+
+    /// Scores the chapter the caret is in against every checklist point.
+    ///
+    /// This runs after every edit, caret move and scroll while the Story tab is showing, so it
+    /// is built to cost almost nothing when nothing relevant changed:
+    ///
+    /// - If the document has not changed and the caret is still inside the chapter last scored
+    ///   (a scroll, a click, an arrow key), it returns after a lookup and a comparison.
+    /// - If the caret has gone to another chapter, the new chapter is counted at once.
+    /// - While the writer types in the same chapter it rescores at most once per
+    ///   [`CHECKLIST_QUIET`]: the scores stay as they were and one wake-up, scheduled for when
+    ///   the quiet period is over, catches the last edit. Nothing is polled while idle.
+    /// - A rescore only reads the paragraphs whose text changed
+    ///   ([`ChapterProfile::sync`](libertum_model::ChapterProfile::sync)) and only re-ranks if
+    ///   the word counts moved.
+    ///
+    /// `force` skips the shortcuts (the tab was just opened or the sidebar shown).
+    fn refresh_checklist(&mut self, force: bool) {
+        let shown = self.state.sidebar_visible
+            && self.state.inspector == Inspector::Notes
+            && self.checklist.tab == NotesTab::Checklist;
+        let Some(doc) = self.doc.as_ref().filter(|_| shown) else {
+            // Nothing to draw: no rescore is owed, and the timer can stop.
+            self.checklist.waiting = false;
+            return;
+        };
+        let document = doc.document();
+        let revision = document.revision();
+        let caret_block = document
+            .location_of(doc.editor().caret().block)
+            .map_or(0, |location| location.block);
+
+        if !force && let Some((scored, start, end, _)) = self.checklist.stamp {
+            let in_chapter = (start..end).contains(&caret_block);
+            let pending = self.checklist.waiting && self.checklist.pending == Some(revision);
+            if in_chapter && (scored == revision || pending) {
+                if scored == revision {
+                    self.checklist.waiting = false;
+                }
+                return;
+            }
+        }
+
+        let chapters = libertum_export::chapters(document, self.settings.chapter_headings);
+        let index = Self::caret_chapter(doc, &chapters);
+        let Some(chapter) = chapters.get(index) else {
+            return;
+        };
+        let stamp = (revision, chapter.start, chapter.end, index);
+        let reference = libertum_model::ChapterRef::new(index, chapter.title.clone());
+        let pane = &mut self.checklist;
+        let same_chapter = pane.chapter.as_ref() == Some(&reference)
+            && pane
+                .stamp
+                .is_some_and(|(_, start, end, i)| (start, end, i) == (stamp.1, stamp.2, stamp.3));
+        if !force && same_chapter && pane.stamp == Some(stamp) {
+            pane.waiting = false;
+            return;
+        }
+        let now = Instant::now();
+        let recent = pane
+            .last_profile
+            .is_some_and(|at| now.saturating_duration_since(at) < CHECKLIST_QUIET);
+        if !force && same_chapter && recent {
+            // Typing in the same chapter: leave the last scores up and rescore once quiet.
+            pane.waiting = true;
+            pane.pending = Some(revision);
+            return;
+        }
+        if !same_chapter {
+            pane.profile = libertum_model::ChapterProfile::default();
+        }
+        let paragraphs = document
+            .body()
+            .iter()
+            .skip(chapter.start)
+            .take(chapter.end.saturating_sub(chapter.start))
+            .filter_map(|block| block.as_paragraph())
+            .map(|paragraph| (paragraph.id.0, paragraph.text()));
+        let changed = pane.profile.sync(paragraphs);
+        pane.stamp = Some(stamp);
+        pane.chapter = Some(reference);
+        pane.last_profile = Some(now);
+        pane.waiting = false;
+        pane.pending = None;
+        if changed || !same_chapter || force {
+            self.rank_checklist();
+        }
+    }
+
+    /// The characters changed: they need saving with the document, and the points they are
+    /// linked to are scored with their names.
+    fn characters_changed(&mut self) {
+        self.dirty = true;
+        self.rank_checklist();
+    }
+
+    /// Replaces the music when a document is opened or closed. Whatever was playing stops with
+    /// the old document, and the sound device is let go.
+    fn set_audio(&mut self, list: libertum_model::Soundtrack) {
+        self.music.player.stop();
+        self.music.snap = libertum_audio::Snapshot::default();
+        self.music.fetched.clear();
+        self.music.loading = None;
+        self.music.watch_until = None;
+        self.music.list = list;
+    }
+
+    /// Replaces the saved characters when a document is opened or closed.
+    fn set_characters(&mut self, list: libertum_model::Characters) {
+        self.characters = CharactersPane {
+            list,
+            ..CharactersPane::default()
+        };
+        self.rank_checklist();
+    }
+
+    /// Replaces the checklist when a document is opened or closed.
+    fn set_checklist(&mut self, list: libertum_model::Checklist) {
+        let tab = self.checklist.tab;
+        let order = self.checklist.order;
+        self.checklist = ChecklistPane {
+            list,
+            tab,
+            order,
+            ..ChecklistPane::default()
+        };
+        self.rank_checklist();
+    }
+
     pub fn notes(&self) -> Vec<NoteEntry> {
         let Some(doc) = &self.doc else {
             return Vec::new();
@@ -2627,6 +3206,7 @@ impl App {
         if self.doc.is_none() {
             return;
         }
+        self.reveal_restored_caret(false);
         // A scroll, resize or layout pass moves what is near the view: recheck once quiet.
         note_spell_edit();
         self.state.selection_words = self.selection_word_count();
@@ -2636,6 +3216,7 @@ impl App {
         }
         if self.state.inspector == Inspector::Notes {
             self.notes = self.notes();
+            self.refresh_checklist(false);
         }
         if self.state.inspector == Inspector::Bookmarks {
             self.bookmarks = self.bookmarks();
@@ -2721,6 +3302,26 @@ impl App {
                 extend,
                 clicks,
             } => {
+                // A click on a player's button or bar plays, pauses or seeks; it does not move
+                // the caret.
+                if clicks == 1
+                    && !extend
+                    && let Some(spot) = self
+                        .doc
+                        .as_ref()
+                        .and_then(|doc| doc.player_at(page, x_pt, y_pt))
+                    && music_player::zone(x_pt - spot.x, y_pt - spot.y, spot.width, spot.height)
+                        != music_player::Zone::Elsewhere
+                {
+                    return self.update(Message::PlayerClick {
+                        url: spot.url,
+                        title: spot.title,
+                        x: x_pt - spot.x,
+                        y: y_pt - spot.y,
+                        width: spot.width,
+                        height: spot.height,
+                    });
+                }
                 let Some(doc) = self.doc.as_mut() else {
                     return Task::none();
                 };
@@ -3315,6 +3916,7 @@ impl App {
                     tracing::info!(pages, "pagination complete; scroll extent is now exact");
                 }
                 self.refresh_view();
+                self.reveal_restored_caret(complete);
             }
             DocEvent::PageReady => {} // the canvas draws from the shared cache
         }
@@ -3717,6 +4319,7 @@ impl App {
     /// an ODT or DOCX opens in well under a second (the budget is in PLAN §2) and the dialog
     /// is already modal.
     fn open_path(&mut self, path: PathBuf) -> Task<Message> {
+        self.persist_view();
         let (context, document, warnings) = match FileContext::open(&path) {
             Ok(opened) => opened,
             Err(error) => {
@@ -3752,16 +4355,28 @@ impl App {
         // A table of contents another program wrote comes in as a placeholder; fill it from
         // the headings now, without an undo step, so it is right before the first edit.
         let _ = doc.edit(|ed| ed.refresh_table_of_contents());
-        doc.move_caret(|ed| ed.move_doc_start(false));
+        // A native file remembers where the writer was; anything else starts at the top.
+        let restored = Self::restore_caret(&mut doc, view.as_ref());
+        if !restored {
+            doc.move_caret(|ed| ed.move_doc_start(false));
+        }
         self.state.fonts = installed_fonts(&doc);
         self.state.word_count = doc.word_count();
         self.state.page_count = doc.page_total();
         self.state.current_page = 1;
         self.doc = Some(doc);
+        self.reveal_caret_pending = restored;
         self.remember_recent(&path);
         self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
+        let checklist = context.checklist(&path);
+        let characters = context.characters(&path);
+        let audio = context.audio(&path);
+        self.saved_view = self.opened_view(view.as_ref());
         self.file = Some(path);
         self.file_context = Some(context);
+        self.set_checklist(checklist);
+        self.set_characters(characters);
+        self.set_audio(audio);
         self.dirty = false;
         self.autosave_pending = None;
         self.autosave_done = None;
@@ -3774,6 +4389,10 @@ impl App {
             self.file = None;
             self.disk_stamp = None;
             self.file_context = None;
+            self.saved_view = None;
+            self.set_checklist(libertum_model::Checklist::default());
+            self.set_characters(libertum_model::Characters::default());
+            self.set_audio(libertum_model::Soundtrack::default());
             self.modal = Some(Modal::Notice {
                 title: s::IMPORTED_TITLE.to_owned(),
                 detail: s::IMPORTED_DETAIL.to_owned(),
@@ -3950,9 +4569,15 @@ impl App {
 
     /// Closes the document and shows the home screen with its templates and recent files.
     fn go_home(&mut self) {
+        self.persist_view();
+        self.saved_view = None;
+        self.reveal_caret_pending = false;
         self.doc = None;
         self.file = None;
         self.file_context = None;
+        self.set_checklist(libertum_model::Checklist::default());
+        self.set_characters(libertum_model::Characters::default());
+        self.set_audio(libertum_model::Soundtrack::default());
         self.dirty = false;
         self.autosave_pending = None;
         self.autosave_done = None;
@@ -3980,6 +4605,9 @@ impl App {
             self.modal = Some(Modal::Stitch);
             return Task::none();
         }
+        self.persist_view();
+        self.saved_view = None;
+        self.reveal_caret_pending = false;
         let documents = sources.into_iter().map(|source| source.document).collect();
         let stitched = match crate::stitch::stitch(documents) {
             Ok(document) => document,
@@ -3998,6 +4626,9 @@ impl App {
         self.doc = Some(doc);
         self.file = None;
         self.file_context = None;
+        self.set_checklist(libertum_model::Checklist::default());
+        self.set_characters(libertum_model::Characters::default());
+        self.set_audio(libertum_model::Soundtrack::default());
         self.dirty = true;
         self.modal = None;
         self.scroll = (0.0, 0.0);
@@ -4055,7 +4686,25 @@ impl App {
             .as_deref()
             .and_then(|path| FileContext::open(path).ok())
             .map(|(context, _, _)| context);
+        // The snapshot holds the text only: the checklist comes back as it was last saved.
+        let checklist = match (&self.file_context, &meta.path) {
+            (Some(context), Some(path)) => context.checklist(path),
+            _ => libertum_model::Checklist::default(),
+        };
+        let characters = match (&self.file_context, &meta.path) {
+            (Some(context), Some(path)) => context.characters(path),
+            _ => libertum_model::Characters::default(),
+        };
+        let audio = match (&self.file_context, &meta.path) {
+            (Some(context), Some(path)) => context.audio(path),
+            _ => libertum_model::Soundtrack::default(),
+        };
         self.file = meta.path;
+        self.saved_view = None;
+        self.reveal_caret_pending = false;
+        self.set_checklist(checklist);
+        self.set_characters(characters);
+        self.set_audio(audio);
         self.dirty = true;
         self.modal = None;
         self.after_save = None;
@@ -4436,14 +5085,28 @@ impl App {
         };
         writer.set_document(document);
         writer.set_toc_pages(self.toc_pages());
+        let checklist = self.checklist.list.clone();
+        writer.set_checklist(checklist.clone());
+        let characters = self.characters.list.clone();
+        writer.set_characters(characters.clone());
+        // A player that was deleted takes its audio out of the file with it.
+        let mut audio = self.music.list.clone();
+        audio.retain_urls(&self.player_urls());
+        writer.set_audio(audio.clone());
         // A native save also records how the document was being read.
         writer.set_view(ViewState {
             pageless: self.state.pageless,
             zoom_percent: self.metrics().percent(),
+            caret: self.current_caret(),
         });
         Task::perform(
             async move {
                 let result = writer.save(&path);
+                if result.is_ok() && target != Format::Native {
+                    write_checklist_sidecar(&path, &checklist);
+                    write_characters_sidecar(&path, &characters);
+                    write_audio_sidecar(&path, &audio);
+                }
                 (path, result)
             },
             |(path, result)| Message::Saved { path, result },
@@ -4471,6 +5134,8 @@ impl App {
                 self.remember_recent(&path);
                 self.remember_language_for_path(&path);
                 self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
+                // The view a native save recorded is the one being used now.
+                self.saved_view = (format == Format::Native).then(|| self.current_view());
                 self.file = Some(path);
                 self.dirty = false;
                 self.autosave_pending = None;
@@ -4503,8 +5168,146 @@ impl App {
         self.exit_app()
     }
 
+    /// The view the open document is being read in, as a native file records it. A fit-to-width
+    /// or fit-to-page zoom follows the window, so it keeps the zoom the file already has instead
+    /// of counting every window size as a change.
+    fn current_view(&self) -> ViewState {
+        let zoom_percent = match (self.state.zoom, &self.saved_view) {
+            (Zoom::Percent(percent), _) => percent,
+            (_, Some(saved)) => saved.zoom_percent,
+            _ => self.metrics().percent(),
+        };
+        ViewState {
+            pageless: self.state.pageless,
+            zoom_percent,
+            caret: self.current_caret(),
+        }
+    }
+
+    /// The view a native file was opened with, as the baseline for noticing a change. A file with
+    /// no caret recorded (or an unusable one) opens at the start, and that counts as where the
+    /// file says it is, so opening and closing an old file does not rewrite it.
+    fn opened_view(&self, view: Option<&ViewState>) -> Option<ViewState> {
+        view.map(|view| ViewState {
+            caret: self.current_caret(),
+            ..view.clone()
+        })
+    }
+
+    /// Where the caret is, as a native file records it.
+    fn current_caret(&self) -> Option<Caret> {
+        let caret = self.doc.as_ref()?.editor().caret();
+        Some(Caret {
+            block: caret.block.0,
+            offset: caret.offset,
+        })
+    }
+
+    /// Puts the caret where a native file says it was, if that place is still in the document.
+    /// Returns whether it did.
+    fn restore_caret(doc: &mut DocView, view: Option<&ViewState>) -> bool {
+        let Some(caret) = view.and_then(|view| view.caret) else {
+            return false;
+        };
+        let block = BlockId(caret.block);
+        let valid = doc
+            .document()
+            .paragraph(block)
+            .is_some_and(|paragraph| paragraph.text().is_char_boundary(caret.offset));
+        if valid {
+            doc.move_caret(|ed| {
+                ed.set_caret(
+                    libertum_editor::DocPosition {
+                        block,
+                        offset: caret.offset,
+                    },
+                    false,
+                );
+            });
+        }
+        valid
+    }
+
+    /// Scrolls to the caret restored on opening, once the layout has reached it: pagination runs
+    /// in the background, so a caret far into a long document has no place on screen at first.
+    /// `complete` means pagination is over, so a caret still without one never will have.
+    fn reveal_restored_caret(&mut self, complete: bool) {
+        if !self.reveal_caret_pending || self.viewport.is_none() {
+            return;
+        }
+        let Some(caret) = self.doc.as_ref().and_then(DocView::caret_rect) else {
+            if complete {
+                self.reveal_caret_pending = false;
+            }
+            return;
+        };
+        self.reveal_caret_pending = false;
+        // A caret restored from the last session sits about a third of the way down the window
+        // rather than at its bottom edge, so there is text above to read back into.
+        let m = self.metrics();
+        let vp = self.viewport_physical();
+        let top = m.page_top(caret.page) + caret.y * m.scale;
+        self.scroll.1 = (top - vp.height * 0.33).max(0.0);
+        self.clamp_scroll();
+        self.ensure_caret_visible();
+    }
+
+    /// Called before the document goes away (closing, the home screen, opening or creating
+    /// another). Switching to or from pageless, or zooming, is not an edit and never asks to
+    /// save, so without this a `.lbtd` would only remember how it was read if something else had
+    /// also been saved. When nothing else is unsaved, the file's view is rewritten from the file
+    /// itself, so its content, version history and save time are untouched. It is skipped if the
+    /// file changed on disk since it was opened, or if there are unsaved edits (a save writes
+    /// the view too, and Don't Save means Don't Save).
+    fn persist_view(&mut self) {
+        if self.doc.is_none() || self.dirty {
+            return;
+        }
+        let Some(path) = self.file.clone() else {
+            return;
+        };
+        if Format::for_path(&path) != Format::Native {
+            return;
+        }
+        let view = self.current_view();
+        if self.saved_view.as_ref() == Some(&view) {
+            return;
+        }
+        if self
+            .disk_stamp
+            .is_some_and(|stamp| stamp.is_stale(&path).unwrap_or(true))
+        {
+            return;
+        }
+        let result = Native::open(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|mut native| {
+                native.set_view(view.clone());
+                libertum_library::save_atomic(&path, |temporary| {
+                    native.save(temporary).map_err(|error| error.to_string())
+                })
+                .map_err(|error| match error {
+                    libertum_library::SaveError::Write(message) => message,
+                    libertum_library::SaveError::Permissions(error) => error.to_string(),
+                    libertum_library::SaveError::Replace(error) => error.to_string(),
+                })
+            });
+        match result {
+            Ok(()) => {
+                self.disk_stamp = libertum_library::DiskStamp::of(&path).ok().flatten();
+                self.saved_view = Some(view);
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "could not keep the document's view");
+            }
+        }
+    }
+
     /// Quits, first starting the staged update (if any) so it takes over as Libertum goes.
     fn exit_app(&mut self) -> Task<Message> {
+        // The sound stops and the device closes before the window does.
+        self.music.player.shutdown();
+        self.persist_view();
         if let Some(staged) = self.staged_update.take() {
             staged.apply();
         }
@@ -4556,6 +5359,14 @@ impl App {
             // The AO3 chapter window has its own Close button; it is not a choice.
             (Modal::Ao3Chapter { .. }, _) => Task::none(),
             (Modal::DateTime { .. }, _) => Task::none(),
+            (
+                Modal::ChecklistScope(_)
+                | Modal::ChecklistEdit(_)
+                | Modal::CharacterEdit(_)
+                | Modal::MusicEdit(_)
+                | Modal::CharacterImport(_),
+                _,
+            ) => Task::none(),
             (Modal::LinkedMedia { .. }, _) => Task::none(),
             // The update prompt has its own buttons; an Escape or backdrop click dismisses it.
             (Modal::UpdateAvailable { .. }, _) => Task::none(),
@@ -4652,6 +5463,17 @@ impl App {
         }
         if self.doc.is_some() && self.settings.spellcheck {
             subs.push(Subscription::run(spell_ticks).map(|_| Message::SpellTick));
+        }
+        if self.music.snap.playing
+            || self
+                .music
+                .watch_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            subs.push(Subscription::run(music_ticks).map(|_| Message::MusicTick));
+        }
+        if self.checklist.waiting {
+            subs.push(Subscription::run(checklist_ticks).map(|_| Message::ChecklistTick));
         }
         if let Some(seconds) = self.autosave_interval() {
             subs.push(
@@ -4752,6 +5574,7 @@ impl App {
                 | Message::Frame(_)
                 | Message::BlinkTick(_)
                 | Message::SpellTick
+                | Message::ChecklistTick
                 | Message::SpellChecked { .. }
                 | Message::ScaleFactor(_)
                 | Message::SystemTheme(_)
@@ -4775,6 +5598,8 @@ impl App {
                 | Message::ImageAlt(..)
                 | Message::RubyEdit(_)
                 | Message::ImageRemove(..)
+                | Message::ChecklistRemove(_)
+                | Message::ChecklistEditOpen(_)
                 | Message::Cut
                 | Message::Copy
                 | Message::Paste
@@ -4847,6 +5672,7 @@ impl App {
                 }
                 if self.state.inspector == Inspector::Notes && self.state.sidebar_visible {
                     self.notes = self.notes();
+                    self.refresh_checklist(true);
                 }
                 if self.state.inspector == Inspector::Bookmarks && self.state.sidebar_visible {
                     self.bookmarks = self.bookmarks();
@@ -5497,6 +6323,20 @@ impl App {
                 self.fps.tick(now);
             }
             Message::AutosaveTick => {
+                // A snapshot copies and serialises the whole document, which is the wrong
+                // moment mid-sentence (and a disk write the writer did not need yet). Put it
+                // off one tick when they have just typed or clicked; the next tick saves.
+                // Leaving the window calls this too, after the focus flag drops, and must not wait.
+                if self.dirty
+                    && !self.autosave_deferred
+                    && self.window_focused
+                    && Instant::now().saturating_duration_since(self.caret_activity)
+                        < AUTOSAVE_QUIET
+                {
+                    self.autosave_deferred = true;
+                    return Task::none();
+                }
+                self.autosave_deferred = false;
                 if self.dirty
                     && let Some(doc) = self.doc.as_ref()
                 {
@@ -5761,6 +6601,7 @@ impl App {
                     return Task::none();
                 };
                 let html = libertum_export::ao3_fragment(doc.document(), &chapter);
+                let words = libertum_export::ao3_word_count(doc.document(), &chapter);
                 self.sync_work_tags();
                 let Some(doc) = self.doc.as_ref() else {
                     return Task::none();
@@ -5778,6 +6619,7 @@ impl App {
                     tags_copied: false,
                     has_title: chapter.level.is_some(),
                     title_copied: false,
+                    words,
                 });
                 self.state.open_menu = None;
                 self.state.ao3_open = false;
@@ -5812,6 +6654,10 @@ impl App {
                     *on = !*on;
                     *tags_copied = false;
                 }
+            }
+            Message::SetAo3First(on) => {
+                self.settings.ao3_first = on;
+                self.save_settings();
             }
             Message::SetAutoTags(on) => {
                 self.settings.auto_suggest_tags = on;
@@ -6373,6 +7219,307 @@ impl App {
                 let result = doc.edit(|ed| ed.set_note_at(block, index, text));
                 return self.finish_edit(result);
             }
+            Message::NotesTab(tab) => {
+                self.checklist.tab = tab;
+                if tab == NotesTab::Checklist {
+                    self.refresh_checklist(true);
+                }
+            }
+            Message::ChecklistDraft(text) => self.checklist.draft = text,
+            Message::ChecklistAdd => {
+                let text = self.checklist.draft.trim().to_owned();
+                if !text.is_empty()
+                    && let Some((chapters, current)) = self.checklist_chapters()
+                {
+                    self.modal = Some(Modal::ChecklistScope(checklist_popups::ScopeDraft::new(
+                        text, chapters, current,
+                    )));
+                }
+            }
+            Message::ChecklistScopeKind(kind) => {
+                if let Some(Modal::ChecklistScope(draft)) = &mut self.modal {
+                    draft.kind = kind;
+                }
+            }
+            Message::ChecklistScopeToggle(index) => {
+                if let Some(Modal::ChecklistScope(draft)) = &mut self.modal
+                    && let Some(flag) = draft.ticked.get_mut(index)
+                {
+                    *flag = !*flag;
+                }
+            }
+            Message::ChecklistScopeOnward(onward) => {
+                if let Some(Modal::ChecklistScope(draft)) = &mut self.modal {
+                    draft.onward = onward;
+                }
+            }
+            Message::ChecklistScopeCancel => {
+                // The typed text stays in the box.
+                if matches!(self.modal, Some(Modal::ChecklistScope(_))) {
+                    self.modal = None;
+                }
+            }
+            Message::ChecklistScopeConfirm => {
+                if let Some(Modal::ChecklistScope(draft)) = &self.modal
+                    && let Some(scope) = draft.scope()
+                {
+                    let text = draft.text.clone();
+                    self.modal = None;
+                    if self.checklist.list.add_scoped(&text, scope).is_some() {
+                        self.checklist.draft.clear();
+                        self.checklist_changed();
+                    }
+                }
+            }
+            Message::ChecklistEditOpen(id) => {
+                if let Some(item) = self.checklist.list.get(id) {
+                    self.modal = Some(Modal::ChecklistEdit(checklist_popups::EditDraft {
+                        id,
+                        text: item.text.clone(),
+                        aliases: item.aliases.clone(),
+                    }));
+                }
+            }
+            Message::ChecklistEditText(text) => {
+                if let Some(Modal::ChecklistEdit(draft)) = &mut self.modal {
+                    draft.text = text;
+                }
+            }
+            Message::ChecklistEditAliases(aliases) => {
+                if let Some(Modal::ChecklistEdit(draft)) = &mut self.modal {
+                    draft.aliases = aliases;
+                }
+            }
+            Message::ChecklistEditCancel => {
+                if matches!(self.modal, Some(Modal::ChecklistEdit(_))) {
+                    self.modal = None;
+                }
+            }
+            Message::ChecklistEditSave => {
+                if let Some(Modal::ChecklistEdit(draft)) = &self.modal
+                    && draft.valid()
+                {
+                    let (id, text, aliases) = (
+                        draft.id,
+                        draft.text.trim().to_owned(),
+                        draft.aliases.clone(),
+                    );
+                    self.modal = None;
+                    self.checklist.list.set_text(id, text);
+                    self.checklist.list.set_aliases(id, aliases);
+                    self.checklist_changed();
+                }
+            }
+            Message::ChecklistRemove(id) => {
+                self.checklist.list.remove(id);
+                let points = &self.checklist.list;
+                self.characters
+                    .list
+                    .forget_points_except(|point| points.get(point).is_some());
+                self.characters_changed();
+            }
+            Message::ChecklistDone(id, done) => {
+                if let Some(chapter) = self.checklist.chapter.clone() {
+                    self.checklist.list.set_done(id, &chapter, done);
+                    self.checklist_changed();
+                }
+            }
+            Message::ChecklistOrder(order) => {
+                self.checklist.order = order;
+                self.rank_checklist();
+            }
+            Message::ChecklistContext(id) => {
+                let (x, y) = cursor_position();
+                // Keep the menu on screen: the Notes pane is on the right edge.
+                let x = x.min(self.window_width - toolbar::CONTEXT_COMPACT_WIDTH - 8.0);
+                let y = y.min(self.window_height - 48.0);
+                self.state.open_menu = None;
+                self.context_menu = Some(ContextMenuState {
+                    x,
+                    y,
+                    target: toolbar::ContextMenuTarget::ChecklistPoint { id },
+                });
+            }
+            Message::Import(message) => return self.on_import(message),
+            Message::CharactersSearch(text) => self.characters.search = text,
+            Message::CharacterToggle(id) => {
+                if !self.characters.expanded.remove(&id) {
+                    self.characters.expanded.insert(id);
+                }
+            }
+            Message::CharacterAdd => {
+                self.modal = Some(Modal::CharacterEdit(character_popups::CharacterDraft::new(
+                    self.plot_point_choices(),
+                )));
+            }
+            Message::CharacterEditOpen(id) => {
+                if let Some(character) = self.characters.list.get(id) {
+                    let mut draft =
+                        character_popups::CharacterDraft::new(self.plot_point_choices());
+                    draft.id = Some(id);
+                    draft.name = character.name.clone();
+                    draft.age = character.age.clone();
+                    draft.details = character.details.clone();
+                    draft.linked = character.plot_points.clone();
+                    self.modal = Some(Modal::CharacterEdit(draft));
+                }
+            }
+            Message::CharacterName(text) => {
+                if let Some(Modal::CharacterEdit(draft)) = &mut self.modal {
+                    draft.name = text;
+                }
+            }
+            Message::CharacterAge(text) => {
+                if let Some(Modal::CharacterEdit(draft)) = &mut self.modal {
+                    draft.age = text;
+                }
+            }
+            Message::CharacterDetails(text) => {
+                if let Some(Modal::CharacterEdit(draft)) = &mut self.modal {
+                    draft.details = text;
+                }
+            }
+            Message::CharacterPoint(point) => {
+                if let Some(Modal::CharacterEdit(draft)) = &mut self.modal {
+                    draft.toggle(point);
+                }
+            }
+            Message::CharacterCancel => {
+                if matches!(self.modal, Some(Modal::CharacterEdit(_))) {
+                    self.modal = None;
+                }
+            }
+            Message::CharacterSave => {
+                if let Some(Modal::CharacterEdit(draft)) = &self.modal {
+                    let saved = match draft.id {
+                        Some(id) => self.characters.list.update(
+                            id,
+                            &draft.name,
+                            &draft.age,
+                            &draft.details,
+                            draft.linked.clone(),
+                        ),
+                        None => self
+                            .characters
+                            .list
+                            .add(
+                                &draft.name,
+                                &draft.age,
+                                &draft.details,
+                                draft.linked.clone(),
+                            )
+                            .map(|_| ()),
+                    };
+                    // A refusal leaves the pop-up open (it already explains a repeated name).
+                    if saved.is_ok() {
+                        self.modal = None;
+                        self.characters_changed();
+                    }
+                }
+            }
+            Message::CharacterRemove(id) => {
+                self.characters.list.remove(id);
+                self.characters.expanded.remove(&id);
+                self.characters_changed();
+            }
+            Message::MusicAdd => {
+                if self.doc.is_some() {
+                    self.modal = Some(Modal::MusicEdit(music_popups::MusicDraft::new()));
+                }
+            }
+            Message::MusicTitle(text) => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal {
+                    draft.title = text;
+                }
+            }
+            Message::MusicUrl(text) => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal {
+                    draft.url = text;
+                    if matches!(draft.state, music_popups::CopyState::Failed(_)) {
+                        draft.state = music_popups::CopyState::Idle;
+                    }
+                }
+            }
+            Message::MusicCredit(text) => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal {
+                    draft.credit = text;
+                }
+            }
+            Message::MusicPermission => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal {
+                    draft.permission = !draft.permission;
+                }
+            }
+            Message::MusicKeep => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal
+                    && draft.can_fetch()
+                {
+                    draft.state = music_popups::CopyState::Fetching;
+                    draft.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let cancel = draft.cancel.clone();
+                    let url = draft.url.trim().to_owned();
+                    let asked = url.clone();
+                    return Task::perform(
+                        async move { crate::wiki_fetch::fetch_audio(&url, cancel) },
+                        move |result| Message::MusicFetched(asked.clone(), result),
+                    );
+                }
+            }
+            Message::MusicFetched(url, result) => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal
+                    && draft.state == music_popups::CopyState::Fetching
+                    && draft.url.trim() == url
+                {
+                    match result {
+                        Ok(copy) => {
+                            draft.copy = Some(copy);
+                            draft.copy_url = url;
+                            draft.state = music_popups::CopyState::Idle;
+                        }
+                        Err(error) => {
+                            draft.state = music_popups::CopyState::Failed(
+                                music_popups::fetch_failure(&error),
+                            );
+                        }
+                    }
+                }
+            }
+            Message::MusicStop => {
+                if let Some(Modal::MusicEdit(draft)) = &self.modal {
+                    draft
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Message::MusicDropCopy => {
+                if let Some(Modal::MusicEdit(draft)) = &mut self.modal {
+                    draft.copy = None;
+                    draft.copy_url.clear();
+                }
+            }
+            Message::MusicCancel => {
+                if let Some(Modal::MusicEdit(draft)) = &self.modal {
+                    draft
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.modal = None;
+                }
+            }
+            Message::MusicSave => return self.insert_player(),
+            Message::PlayerClick {
+                url,
+                title,
+                x,
+                y,
+                width,
+                height,
+            } => return self.on_player_click(url, title, x, y, width, height),
+            Message::MusicLoaded(url, result) => return self.on_music_loaded(url, result),
+            Message::MusicTick => self.music.snap = self.music.player.snapshot(),
+            Message::ChecklistTick => {
+                // The quiet period is over: score now, past the shortcuts that wait for it.
+                self.refresh_checklist(true);
+            }
             Message::GoToNote(block, index) => {
                 if let Some(doc) = self.doc.as_mut() {
                     let offset = doc
@@ -6506,6 +7653,8 @@ impl App {
     fn toggle_sidebar(&mut self) {
         self.state.open_menu = None;
         self.state.toggle_sidebar();
+        // A sidebar that was hidden did not follow the document: catch up on showing it.
+        self.refresh_checklist(true);
         self.persist_sidebar();
     }
 
@@ -7582,6 +8731,7 @@ impl App {
                 selection: doc.selection_rects_on(self.pages_near_view()),
                 find: self.find_match_rects(),
                 spell: self.spell_rects(),
+                players: self.player_overlays(),
                 compare_added: compare_added.clone(),
                 compare_removed: compare_removed.clone(),
                 preedit: self.preedit_overlay(),
@@ -7636,11 +8786,33 @@ impl App {
             .bookmark_draft
             .as_ref()
             .map(|(block, index, name)| (*block, *index, name.as_str()));
+        let checklist = ChecklistView {
+            checklist: &self.checklist.list,
+            rows: &self.checklist.rows,
+            chapter: self
+                .checklist
+                .chapter
+                .as_ref()
+                .map(|chapter| chapter.title.as_str()),
+            order: self.checklist.order,
+            draft: &self.checklist.draft,
+        };
+        let characters = CharactersView {
+            cast: &self.characters.list,
+            points: &self.checklist.list,
+            search: &self.characters.search,
+            expanded: &self.characters.expanded,
+        };
         if let Some(sidebar) = inspector::view(
             &self.state,
             headings,
             &self.collapsed_headings,
-            notes,
+            NotesPane {
+                tab: self.checklist.tab,
+                entries: notes,
+                checklist,
+                characters,
+            },
             bookmarks,
             draft,
             t,
@@ -8426,6 +9598,11 @@ impl App {
                 .spacing(4)
                 .into(),
             ),
+            if self.import_choice_visible() {
+                labelled(t, s::SETTINGS_IMPORT, self.import_choice(t))
+            } else {
+                space().height(Length::Fixed(0.0)).into()
+            },
             labelled(
                 t,
                 s::SETTINGS_TAGS,
@@ -8700,6 +9877,14 @@ impl App {
             let mut book =
                 libertum_export::NameBook::from_text(&libertum_export::document_text(document));
             book.remember(self.tag_cache.names(TagCategory::Character));
+            // The writer's own cast: a lone "Mara" in the story resolves to the saved "Mara Voss".
+            book.remember(
+                self.characters
+                    .list
+                    .items()
+                    .iter()
+                    .map(libertum_model::Character::short_name),
+            );
             let auto = libertum_export::auto_suggestions_with(&text, &book);
             // A pairing used before, written the writer's way, when both people are here.
             let present: Vec<&str> = auto
@@ -8772,6 +9957,26 @@ impl App {
             );
             out = libertum_export::merge_suggestions(out, starter);
         }
+        // The writer's saved cast and fandoms come first, named the way AO3 wants them, and
+        // stand in for the same people worked out from the text.
+        let cast = &self.characters.list;
+        let mut front = libertum_export::saved_fandom_suggestions(cast);
+        front.extend(libertum_export::saved_suggestions(&text, cast));
+        // What AO3's recent works in this fandom carry (read by Import), exactly as AO3 writes it.
+        front.extend(libertum_export::fandom_tag_suggestions(&text, cast));
+        if !front.is_empty() {
+            out.retain(|suggestion| match suggestion.tag.category {
+                TagCategory::Character => {
+                    !libertum_export::is_saved_character(&suggestion.tag.name, cast)
+                }
+                TagCategory::Fandom => !cast
+                    .fandoms()
+                    .iter()
+                    .any(|fandom| fandom.eq_ignore_ascii_case(&suggestion.tag.name)),
+                _ => true,
+            });
+            out = libertum_export::merge_suggestions(front, out);
+        }
         // Tags already on the work, or removed as unrelated, are not offered again.
         self.work_tags.filter(out)
     }
@@ -8796,6 +10001,33 @@ impl App {
         if let Err(error) = write() {
             tracing::warn!(%error, "could not keep the tag library");
         }
+    }
+
+    /// Whether Settings shows the character-lookup choice: only once the writer has agreed to
+    /// online lookups, so nothing about it appears before then.
+    fn import_choice_visible(&self) -> bool {
+        self.settings.wiki_consent == Some(true)
+    }
+
+    /// The control that chooses AO3 first or wikis only (shown only when
+    /// [`Self::import_choice_visible`]).
+    fn import_choice<'a>(&self, t: Tokens) -> Element<'a, Message> {
+        let choice = segmented::select(
+            t,
+            Look::Raised,
+            &[
+                (true, Content::Label(s::SETTINGS_IMPORT_AO3)),
+                (false, Content::Label(s::SETTINGS_IMPORT_WIKIS)),
+            ],
+            Some(self.settings.ao3_first),
+            Message::SetAo3First,
+        );
+        column![
+            choice,
+            crate::widgets::controls::caption(t, s::SETTINGS_IMPORT_HINT)
+        ]
+        .spacing(6)
+        .into()
     }
 
     /// Re-ranks an open AO3 chapter after the vocabulary changed, keeping the writer's
@@ -8840,6 +10072,7 @@ impl App {
     fn ao3_chapter_layer<'a>(
         &'a self,
         title: &'a str,
+        words: usize,
         html: &'a str,
         copied: bool,
         suggestions: &'a [TagSuggestion],
@@ -9005,7 +10238,7 @@ impl App {
                     title_button,
                 ]
                 .align_y(Center),
-                controls::caption(t, s::AO3_HINT),
+                controls::caption(t, format!("{} · {}", s::chapter_words(words), s::AO3_HINT)),
                 body,
                 controls::divider(t),
                 text(s::AO3_TAGS)
@@ -9473,11 +10706,13 @@ impl App {
             tags_copied,
             has_title,
             title_copied,
+            words,
             ..
         } = modal
         {
             return self.ao3_chapter_layer(
                 title,
+                *words,
                 html,
                 *copied,
                 suggestions,
@@ -9489,6 +10724,21 @@ impl App {
         }
         if let Modal::DateTime { updated, format } = modal {
             return self.date_time_layer(*updated, *format, t);
+        }
+        if let Modal::ChecklistScope(draft) = modal {
+            return self.checklist_scope_layer(draft, t);
+        }
+        if let Modal::ChecklistEdit(draft) = modal {
+            return self.checklist_edit_layer(draft, t);
+        }
+        if let Modal::CharacterEdit(draft) = modal {
+            return self.character_edit_layer(draft, t);
+        }
+        if let Modal::MusicEdit(draft) = modal {
+            return self.music_edit_layer(draft, t);
+        }
+        if let Modal::CharacterImport(state) = modal {
+            return self.character_import_layer(state, t);
         }
         if let Modal::LinkedMedia { .. } = modal {
             return self.linked_media_layer(modal, t);
@@ -9519,6 +10769,11 @@ impl App {
             Modal::Stitch => (s::STITCH_TITLE.to_owned(), String::new()),
             Modal::Library { .. } | Modal::History { .. } => (String::new(), String::new()),
             Modal::DateTime { .. } => (s::DATE_TIME_TITLE.to_owned(), String::new()),
+            Modal::ChecklistScope(_)
+            | Modal::ChecklistEdit(_)
+            | Modal::CharacterEdit(_)
+            | Modal::MusicEdit(_)
+            | Modal::CharacterImport(_) => (String::new(), String::new()),
             Modal::LinkedMedia { .. } => (String::new(), String::new()),
             Modal::Ao3Chapter { .. } => (String::new(), String::new()),
             Modal::UpdateAvailable { .. } => (String::new(), String::new()),
@@ -9593,6 +10848,11 @@ impl App {
             | Modal::Library { .. }
             | Modal::History { .. }
             | Modal::DateTime { .. }
+            | Modal::ChecklistScope(_)
+            | Modal::ChecklistEdit(_)
+            | Modal::CharacterEdit(_)
+            | Modal::MusicEdit(_)
+            | Modal::CharacterImport(_)
             | Modal::LinkedMedia { .. }
             | Modal::Ao3Chapter { .. }
             | Modal::UpdateAvailable { .. } => Vec::new(),
@@ -10093,8 +11353,31 @@ fn write_export(
     Ok(path)
 }
 
+/// Where the pointer last was, in window logical pixels, packed as two `f32`s. It is written on
+/// every move without sending a message (a message would redraw the window), and read when a
+/// widget that is not told where it was clicked, such as the checklist's rows, needs to open
+/// a menu there.
+static CURSOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn note_cursor(position: iced::Point) {
+    let packed = u64::from(position.x.to_bits()) << 32 | u64::from(position.y.to_bits());
+    CURSOR.store(packed, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cursor_position() -> (f32, f32) {
+    let packed = CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+    (
+        f32::from_bits((packed >> 32) as u32),
+        f32::from_bits(packed as u32),
+    )
+}
+
 fn key_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
+        Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            note_cursor(position);
+            None
+        }
         Event::Keyboard(key) => {
             crate::palm::note_key(&key);
             let shortcut = shortcuts::from_event(&key);
@@ -11846,6 +13129,1236 @@ mod tests {
         });
         assert!(!app.dirty);
         assert_eq!(app.file.as_deref(), Some(path.as_path()));
+    }
+
+    /// Two chapters: "One" talks about a ledger, "Two" about a dragon.
+    fn two_chapter_document() -> libertum_model::Document {
+        use libertum_model::{BlockId, Document, ParaProps, Paragraph, StyleId};
+        let heading = |id, text: &str| {
+            Paragraph::new(BlockId(id), text).with_props(ParaProps {
+                style: StyleId::HEADING_1,
+                outline_level: Some(1),
+                ..ParaProps::default()
+            })
+        };
+        Document::from_paragraphs(vec![
+            heading(1, "One"),
+            Paragraph::new(BlockId(2), "Mara hid the ledger under the floorboards."),
+            heading(3, "Two"),
+            Paragraph::new(BlockId(4), "The dragon circled the harbour twice."),
+        ])
+    }
+
+    fn checklist_app() -> App {
+        let mut app = app();
+        let (doc, _rx) = DocView::open(two_chapter_document());
+        app.doc = Some(doc);
+        app.state.inspector = Inspector::Notes;
+        let _ = app.update(Message::NotesTab(NotesTab::Checklist));
+        app
+    }
+
+    fn add_point(app: &mut App, text: &str) -> u64 {
+        let _ = app.update(Message::ChecklistDraft(text.into()));
+        let _ = app.update(Message::ChecklistAdd);
+        assert!(
+            matches!(app.modal, Some(Modal::ChecklistScope(_))),
+            "Add asks which chapters first"
+        );
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        app.checklist.list.items().last().expect("an item").id
+    }
+
+    fn ranked_ids(app: &App) -> Vec<u64> {
+        app.checklist.rows.iter().map(|row| row.id).collect()
+    }
+
+    #[test]
+    fn the_checklist_ranks_against_the_chapter_the_caret_is_in() {
+        let mut app = checklist_app();
+        app.dirty = false;
+        let ledger = add_point(&mut app, "Mara hides the ledger");
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+        assert!(app.dirty, "a checklist edit is a change to save");
+        assert_eq!(app.checklist.draft, "", "the draft clears once added");
+
+        // The caret starts in chapter One: the ledger is covered, the dragon is not.
+        assert_eq!(
+            app.checklist.chapter.as_ref().map(|c| c.title.as_str()),
+            Some("One")
+        );
+        assert_eq!(ranked_ids(&app), [dragon, ledger], "least covered first");
+        let _ = app.update(Message::ChecklistOrder(
+            libertum_model::ChecklistOrder::MostRelevant,
+        ));
+        assert_eq!(ranked_ids(&app), [ledger, dragon]);
+        let _ = app.update(Message::ChecklistOrder(
+            libertum_model::ChecklistOrder::LeastCovered,
+        ));
+
+        // Moving into chapter Two flips it, at once.
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .move_caret(|ed| ed.move_doc_end(false));
+        app.refresh_view();
+        assert_eq!(
+            app.checklist.chapter.as_ref().map(|c| c.title.as_str()),
+            Some("Two")
+        );
+        assert_eq!(ranked_ids(&app), [ledger, dragon]);
+    }
+
+    fn open_scope_popup(app: &mut App, text: &str) {
+        let _ = app.update(Message::ChecklistDraft(text.into()));
+        let _ = app.update(Message::ChecklistAdd);
+        assert!(matches!(app.modal, Some(Modal::ChecklistScope(_))));
+    }
+
+    fn move_to_second_chapter(app: &mut App) {
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .move_caret(|ed| ed.move_doc_end(false));
+        app.refresh_view();
+    }
+
+    #[test]
+    fn add_opens_a_popup_and_cancelling_keeps_the_typed_point() {
+        let mut app = checklist_app();
+        open_scope_popup(&mut app, "A dragon attacks");
+        assert!(
+            app.checklist.list.is_empty(),
+            "nothing is added until it is confirmed"
+        );
+        let _ = app.update(Message::ChecklistScopeCancel);
+        assert!(app.modal.is_none());
+        assert_eq!(app.checklist.draft, "A dragon attacks");
+        assert!(app.checklist.list.is_empty());
+
+        // A blank box opens nothing.
+        let _ = app.update(Message::ChecklistDraft("   ".into()));
+        let _ = app.update(Message::ChecklistAdd);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn this_chapter_makes_a_point_that_appears_nowhere_else() {
+        let mut app = checklist_app();
+        open_scope_popup(&mut app, "Mara hides the ledger");
+        let _ = app.update(Message::ChecklistScopeKind(
+            checklist_popups::ScopeKind::ThisChapter,
+        ));
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        assert!(app.modal.is_none());
+        assert_eq!(app.checklist.draft, "", "the box clears once added");
+        assert_eq!(app.checklist.rows.len(), 1, "it shows in chapter One");
+
+        move_to_second_chapter(&mut app);
+        assert!(
+            app.checklist.rows.is_empty(),
+            "and is gone from chapter Two"
+        );
+    }
+
+    #[test]
+    fn story_points_show_in_every_chapter() {
+        let mut app = checklist_app();
+        open_scope_popup(&mut app, "Mara hides the ledger");
+        // Story is what the pop-up starts on.
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        assert_eq!(app.checklist.rows.len(), 1);
+        move_to_second_chapter(&mut app);
+        assert_eq!(app.checklist.rows.len(), 1);
+    }
+
+    #[test]
+    fn chapters_lets_the_writer_pick_and_carry_a_point_onward() {
+        let mut app = checklist_app();
+        open_scope_popup(&mut app, "Mara hides the ledger");
+        let _ = app.update(Message::ChecklistScopeKind(
+            checklist_popups::ScopeKind::Chapters,
+        ));
+        // The chapter being written starts ticked; untick it and nothing can be added.
+        let _ = app.update(Message::ChecklistScopeToggle(0));
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        assert!(
+            matches!(app.modal, Some(Modal::ChecklistScope(_))),
+            "no chapter ticked, so the pop-up stays"
+        );
+        assert!(app.checklist.list.is_empty());
+
+        // Chapter Two alone.
+        let _ = app.update(Message::ChecklistScopeToggle(1));
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        assert!(app.modal.is_none());
+        assert!(app.checklist.rows.is_empty(), "not for chapter One");
+        move_to_second_chapter(&mut app);
+        assert_eq!(app.checklist.rows.len(), 1, "but for chapter Two");
+
+        // Chapter One and everything after it.
+        open_scope_popup(&mut app, "A dragon attacks");
+        let _ = app.update(Message::ChecklistScopeKind(
+            checklist_popups::ScopeKind::Chapters,
+        ));
+        let _ = app.update(Message::ChecklistScopeToggle(1));
+        let _ = app.update(Message::ChecklistScopeToggle(0));
+        let _ = app.update(Message::ChecklistScopeOnward(true));
+        let _ = app.update(Message::ChecklistScopeConfirm);
+        let onward = app.checklist.list.items().last().expect("item").clone();
+        assert!(onward.applies_to(&libertum_model::ChapterRef::new(0, "One")));
+        assert!(onward.applies_to(&libertum_model::ChapterRef::new(1, "Two")));
+        assert!(onward.applies_to(&libertum_model::ChapterRef::new(7, "Eight")));
+    }
+
+    #[test]
+    fn a_ticked_point_moves_to_the_bottom_and_comes_back_when_unticked() {
+        let mut app = checklist_app();
+        let ledger = add_point(&mut app, "Mara hides the ledger");
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+        let harbour = add_point(&mut app, "The harbour master hides something");
+        assert_eq!(ranked_ids(&app)[0], dragon, "least covered leads");
+        let order = ranked_ids(&app);
+
+        // Ticking the first one sends it to the bottom; the others keep their order.
+        let _ = app.update(Message::ChecklistDone(order[0], true));
+        let mut expected = vec![order[1], order[2], order[0]];
+        assert_eq!(ranked_ids(&app), expected);
+        // Ticking the next goes below the open ones but above the one ticked earlier? No: ticked
+        // points keep their ranking among themselves, below every open one.
+        let _ = app.update(Message::ChecklistDone(order[1], true));
+        expected = vec![order[2], order[0], order[1]];
+        assert_eq!(ranked_ids(&app), expected);
+        assert!(app.checklist.rows[..1].iter().all(|r| !r.done));
+        assert!(app.checklist.rows[1..].iter().all(|r| r.done));
+
+        // Unticking brings it back up.
+        let _ = app.update(Message::ChecklistDone(order[0], false));
+        assert!(!app.checklist.rows[0].done && !app.checklist.rows[1].done);
+        assert!(app.checklist.rows[2].done);
+        let _ = (ledger, harbour);
+    }
+
+    #[test]
+    fn scrolling_and_clicking_inside_the_chapter_cost_the_checklist_nothing() {
+        let mut app = checklist_app();
+        add_point(&mut app, "A dragon attacks the harbour");
+        // A marker: a real rescore would stamp the time.
+        app.checklist.last_profile = None;
+        for _ in 0..3 {
+            app.doc
+                .as_mut()
+                .expect("doc")
+                .move_caret(|ed| ed.move_doc_start(false));
+            app.refresh_view();
+        }
+        assert!(
+            app.checklist.last_profile.is_none(),
+            "nothing changed, so nothing was looked at"
+        );
+        // Another chapter is a real change.
+        move_to_second_chapter(&mut app);
+        assert!(app.checklist.last_profile.is_some());
+    }
+
+    #[test]
+    fn a_hidden_sidebar_does_no_checklist_work_and_catches_up_when_shown() {
+        let mut app = checklist_app();
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+        move_to_second_chapter(&mut app);
+        app.state.sidebar_visible = false;
+        app.checklist.last_profile = None;
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .edit(|ed| ed.insert_text(" dragon dragon"))
+            .expect("typed");
+        app.refresh_view();
+        assert!(app.checklist.last_profile.is_none(), "hidden: no scoring");
+        assert!(!app.checklist.waiting, "and no timer");
+
+        app.state.sidebar_visible = true;
+        app.toggle_sidebar();
+        app.toggle_sidebar();
+        assert!(app.state.sidebar_visible);
+        assert!(
+            app.checklist
+                .rows
+                .iter()
+                .find(|r| r.id == dragon)
+                .expect("row")
+                .score
+                .mentions
+                >= 2,
+            "showing the sidebar again scores the chapter as it is now"
+        );
+    }
+
+    #[test]
+    fn editing_a_point_happens_in_a_popup_and_only_saves_on_save() {
+        let mut app = checklist_app();
+        let id = add_point(&mut app, "Mara hides the ledger");
+        // The right-click menu closes when Edit is chosen, and the pop-up opens on the point.
+        note_cursor(iced::Point::new(900.0, 200.0));
+        let _ = app.update(Message::ChecklistContext(id));
+        assert!(app.context_menu.is_some());
+        let _ = app.update(Message::ChecklistEditOpen(id));
+        assert!(app.context_menu.is_none());
+        let Some(Modal::ChecklistEdit(draft)) = &app.modal else {
+            panic!("the edit pop-up opens");
+        };
+        assert_eq!(
+            (draft.id, draft.text.as_str()),
+            (id, "Mara hides the ledger")
+        );
+
+        // Typing changes the draft, not the point.
+        let _ = app.update(Message::ChecklistEditText("A dragon attacks".into()));
+        let _ = app.update(Message::ChecklistEditAliases("wyrm, flame".into()));
+        assert_eq!(
+            app.checklist.list.get(id).expect("item").text,
+            "Mara hides the ledger"
+        );
+        let _ = app.update(Message::ChecklistEditCancel);
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.checklist.list.get(id).expect("item").text,
+            "Mara hides the ledger"
+        );
+
+        // Blank text cannot be saved.
+        let _ = app.update(Message::ChecklistEditOpen(id));
+        let _ = app.update(Message::ChecklistEditText("   ".into()));
+        let _ = app.update(Message::ChecklistEditSave);
+        assert!(
+            matches!(app.modal, Some(Modal::ChecklistEdit(_))),
+            "stays open"
+        );
+        assert_eq!(
+            app.checklist.list.get(id).expect("item").text,
+            "Mara hides the ledger"
+        );
+
+        // Save applies both fields, marks the document changed and re-ranks.
+        app.dirty = false;
+        let _ = app.update(Message::ChecklistEditText(
+            "  A dragon attacks the harbour ".into(),
+        ));
+        let _ = app.update(Message::ChecklistEditAliases("wyrm, flame".into()));
+        let _ = app.update(Message::ChecklistEditSave);
+        assert!(app.modal.is_none());
+        let item = app.checklist.list.get(id).expect("item");
+        assert_eq!(item.text, "A dragon attacks the harbour");
+        assert_eq!(item.aliases, "wyrm, flame");
+        assert!(app.dirty);
+        // Chapter One has no dragon, so the rewritten point is now uncovered.
+        assert_eq!(
+            app.checklist.rows[0].score.coverage.map(|c| c < 0.01),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_point_offers_delete_where_the_pointer_is() {
+        let mut app = checklist_app();
+        let keep = add_point(&mut app, "Mara hides the ledger");
+        let drop = add_point(&mut app, "A dragon attacks the harbour");
+
+        note_cursor(iced::Point::new(1100.0, 300.0));
+        let _ = app.update(Message::ChecklistContext(drop));
+        let menu = app.context_menu.as_ref().expect("a menu opens");
+        assert_eq!(
+            menu.target,
+            toolbar::ContextMenuTarget::ChecklistPoint { id: drop }
+        );
+        assert_eq!(menu.y, 300.0);
+        assert!(
+            menu.x + toolbar::CONTEXT_COMPACT_WIDTH <= app.window_width,
+            "a click at the right edge keeps the menu inside the window"
+        );
+
+        // Choosing Delete removes that point only, and the menu goes.
+        let _ = app.update(Message::ChecklistRemove(drop));
+        assert!(app.context_menu.is_none());
+        assert!(app.checklist.list.get(drop).is_none());
+        assert!(app.checklist.list.get(keep).is_some());
+        assert_eq!(ranked_ids(&app), [keep]);
+        assert!(app.dirty, "deleting is a change to save");
+    }
+
+    #[test]
+    fn a_tick_belongs_to_one_chapter() {
+        let mut app = checklist_app();
+        let _ledger = add_point(&mut app, "Mara hides the ledger");
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+
+        let _ = app.update(Message::ChecklistDone(dragon, true));
+        assert!(
+            app.checklist
+                .rows
+                .iter()
+                .find(|r| r.id == dragon)
+                .expect("row")
+                .done
+        );
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .move_caret(|ed| ed.move_doc_end(false));
+        app.refresh_view();
+        assert!(
+            !app.checklist
+                .rows
+                .iter()
+                .find(|r| r.id == dragon)
+                .expect("row")
+                .done,
+            "ticked in One, still open in Two"
+        );
+    }
+
+    #[test]
+    fn typing_rescores_the_chapter_once_it_goes_quiet() {
+        let mut app = checklist_app();
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+        let before = app.checklist.rows[0].score.mentions;
+        assert_eq!(before, 0);
+        // Type at the end of the text, not in a heading: renaming a chapter rescores at once.
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .move_caret(|ed| ed.move_doc_end(false));
+        app.refresh_view();
+        let before = app.checklist.rows[0].score.mentions;
+        // Another edit lands straight after a rescore: the last scores stay up and a rescore waits.
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .edit(|ed| ed.insert_text(" A dragon!"))
+            .expect("typed");
+        app.refresh_view();
+        assert!(
+            app.checklist.waiting,
+            "rescore waits for the typing to pause"
+        );
+        assert_eq!(app.checklist.rows[0].score.mentions, before);
+        app.checklist.last_profile = Some(Instant::now() - CHECKLIST_QUIET * 2);
+        let _ = app.update(Message::ChecklistTick);
+        assert!(!app.checklist.waiting);
+        assert!(
+            app.checklist
+                .rows
+                .iter()
+                .find(|r| r.id == dragon)
+                .expect("row")
+                .score
+                .mentions
+                > 0
+        );
+    }
+
+    #[test]
+    fn the_checklist_is_kept_inside_a_native_file_and_beside_the_others() {
+        let dir = synced_folder("checklist");
+        let mut list = libertum_model::Checklist::default();
+        list.add("Mara hides the ledger").expect("item");
+
+        // Native: inside the file itself.
+        let native = dir.join("story.lbtd");
+        let mut context = FileContext::new(Format::Native, two_chapter_document());
+        context.set_checklist(list.clone());
+        context.save(&native).expect("save");
+        let (reopened, _, _) = FileContext::open(&native).expect("open");
+        assert_eq!(reopened.checklist(&native), list);
+        assert!(
+            libertum_library::load_sidecar(&native, CHECKLIST_SIDECAR).is_none(),
+            "nothing beside a native file"
+        );
+
+        // Anything else: a sidecar in the history folder, removed again when the list empties.
+        let docx = dir.join("story.docx");
+        FileContext::new(Format::Docx, two_chapter_document())
+            .save(&docx)
+            .expect("save");
+        assert!(read_checklist_sidecar(&docx).is_empty());
+        write_checklist_sidecar(&docx, &list);
+        let (reopened, _, _) = FileContext::open(&docx).expect("open");
+        assert_eq!(reopened.checklist(&docx), list);
+        write_checklist_sidecar(&docx, &libertum_model::Checklist::default());
+        assert!(libertum_library::load_sidecar(&docx, CHECKLIST_SIDECAR).is_none());
+        // A damaged sidecar costs the list, never the document.
+        libertum_library::save_sidecar(&docx, CHECKLIST_SIDECAR, Some(b"{broken")).expect("write");
+        assert!(read_checklist_sidecar(&docx).is_empty());
+    }
+
+    #[test]
+    fn opening_a_document_brings_its_checklist_and_closing_it_clears_it() {
+        let dir = synced_folder("checklist-open");
+        let path = dir.join("story.lbtd");
+        let mut list = libertum_model::Checklist::default();
+        list.add("Mara hides the ledger").expect("item");
+        let mut context = FileContext::new(Format::Native, two_chapter_document());
+        context.set_checklist(list.clone());
+        context.save(&path).expect("save");
+
+        let mut app = app();
+        let _ = app.open_path(path);
+        assert_eq!(app.checklist.list, list);
+        assert_eq!(app.checklist.rows.len(), 1);
+        app.go_home();
+        assert!(app.checklist.list.is_empty());
+    }
+
+    fn add_character(app: &mut App, name: &str, linked: &[u64]) {
+        let _ = app.update(Message::CharacterAdd);
+        assert!(matches!(app.modal, Some(Modal::CharacterEdit(_))));
+        let _ = app.update(Message::CharacterName(name.into()));
+        let _ = app.update(Message::CharacterAge("29".into()));
+        let _ = app.update(Message::CharacterDetails("A smuggler".into()));
+        for point in linked {
+            let _ = app.update(Message::CharacterPoint(*point));
+        }
+        let _ = app.update(Message::CharacterSave);
+    }
+
+    #[test]
+    fn a_character_is_added_edited_linked_and_removed_through_the_pop_up() {
+        let mut app = checklist_app();
+        let dragon = add_point(&mut app, "A dragon attacks the harbour");
+        app.dirty = false;
+        let mentions = |app: &App| {
+            app.checklist
+                .rows
+                .iter()
+                .find(|row| row.id == dragon)
+                .expect("the point")
+                .score
+                .mentions
+        };
+        assert_eq!(mentions(&app), 0, "chapter One never mentions the dragon");
+
+        add_character(&mut app, "Mara Voss (Tides)", &[dragon]);
+        assert!(app.modal.is_none(), "a saved character closes the pop-up");
+        assert!(app.dirty, "a character is a change to save");
+        let mara = app.characters.list.items()[0].clone();
+        assert_eq!(
+            (mara.age.as_str(), mara.details.as_str()),
+            ("29", "A smuggler")
+        );
+        assert_eq!(mara.plot_points, vec![dragon]);
+        assert!(
+            mentions(&app) > 0,
+            "her name is now a keyword of the point, and chapter One names her"
+        );
+        assert_eq!(
+            app.checklist.list.get(dragon).expect("point").aliases,
+            "",
+            "the writer's own point is not rewritten"
+        );
+
+        // The same name again is refused and the pop-up stays open with what was typed.
+        add_character(&mut app, "mara  voss (tides)", &[]);
+        assert!(matches!(app.modal, Some(Modal::CharacterEdit(_))));
+        assert_eq!(app.characters.list.len(), 1);
+        let _ = app.update(Message::CharacterCancel);
+        assert!(app.modal.is_none());
+
+        // Editing keeps the id and can unlink the point.
+        let _ = app.update(Message::CharacterEditOpen(mara.id));
+        let _ = app.update(Message::CharacterPoint(dragon));
+        let _ = app.update(Message::CharacterAge("30".into()));
+        let _ = app.update(Message::CharacterSave);
+        let edited = app.characters.list.get(mara.id).expect("still there");
+        assert_eq!(edited.age, "30");
+        assert!(edited.plot_points.is_empty());
+        assert_eq!(mentions(&app), 0, "unlinking takes the keyword away");
+
+        // The plot points start closed and open on request.
+        assert!(!app.characters.expanded.contains(&mara.id));
+        let _ = app.update(Message::CharacterToggle(mara.id));
+        assert!(app.characters.expanded.contains(&mara.id));
+        let _ = app.update(Message::CharacterToggle(mara.id));
+        assert!(!app.characters.expanded.contains(&mara.id));
+
+        // Deleting a point forgets the links to it; deleting a character removes them.
+        let _ = app.update(Message::CharacterEditOpen(mara.id));
+        let _ = app.update(Message::CharacterPoint(dragon));
+        let _ = app.update(Message::CharacterSave);
+        let _ = app.update(Message::ChecklistRemove(dragon));
+        assert!(app.characters.list.items()[0].plot_points.is_empty());
+        let _ = app.update(Message::CharacterRemove(mara.id));
+        assert!(app.characters.list.items().is_empty());
+    }
+
+    #[test]
+    fn the_characters_search_finds_a_name_and_the_tab_sits_between_story_and_footnotes() {
+        let mut app = checklist_app();
+        add_character(&mut app, "Mara Voss", &[]);
+        add_character(&mut app, "Jo Ellery", &[]);
+        let _ = app.update(Message::CharactersSearch("ELLERY".into()));
+        let found = app.characters.list.search(&app.characters.search);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Jo Ellery");
+        let _ = app.update(Message::NotesTab(NotesTab::Characters));
+        assert_eq!(app.checklist.tab, NotesTab::Characters);
+        // The order of the selector is the order of the tabs.
+        let order = [
+            NotesTab::Checklist,
+            NotesTab::Characters,
+            NotesTab::Footnotes,
+        ];
+        assert!(order.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(
+            inspector::notes::TAB_ORDER,
+            [
+                NotesTab::Checklist,
+                NotesTab::Characters,
+                NotesTab::Footnotes,
+                NotesTab::Endnotes
+            ]
+        );
+    }
+
+    #[test]
+    fn characters_are_kept_inside_a_native_file_and_beside_the_others() {
+        let dir = synced_folder("characters");
+        let mut cast = libertum_model::Characters::default();
+        cast.set_fandoms(["Tides".to_owned()]);
+        cast.add("Mara Voss (Tides)", "29", "Smuggler", vec![])
+            .expect("character");
+
+        let native = dir.join("story.lbtd");
+        let mut context = FileContext::new(Format::Native, two_chapter_document());
+        context.set_characters(cast.clone());
+        context.save(&native).expect("save");
+        let (reopened, _, _) = FileContext::open(&native).expect("open");
+        assert_eq!(reopened.characters(&native), cast);
+        assert!(libertum_library::load_sidecar(&native, CHARACTERS_SIDECAR).is_none());
+
+        let docx = dir.join("story.docx");
+        FileContext::new(Format::Docx, two_chapter_document())
+            .save(&docx)
+            .expect("save");
+        assert!(read_characters_sidecar(&docx).is_empty());
+        write_characters_sidecar(&docx, &cast);
+        let (reopened, _, _) = FileContext::open(&docx).expect("open");
+        assert_eq!(reopened.characters(&docx), cast);
+        write_characters_sidecar(&docx, &libertum_model::Characters::default());
+        assert!(libertum_library::load_sidecar(&docx, CHARACTERS_SIDECAR).is_none());
+        libertum_library::save_sidecar(&docx, CHARACTERS_SIDECAR, Some(b"{broken")).expect("write");
+        assert!(read_characters_sidecar(&docx).is_empty());
+    }
+
+    fn mp3_bytes() -> Vec<u8> {
+        let mut bytes = b"ID3\x04\0\0\0\0\0\0".to_vec();
+        bytes.extend_from_slice(&[9; 300]);
+        bytes
+    }
+
+    /// A mono 16-bit WAV that really decodes, `seconds` long.
+    fn wav_bytes(seconds: u32) -> Vec<u8> {
+        let (rate, frames) = (8000u32, 8000 * seconds);
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&[1, 0, 1, 0]);
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&[2, 0, 16, 0]);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(frames * 2).to_le_bytes());
+        out.extend(std::iter::repeat_n(0u8, (frames * 2) as usize));
+        out
+    }
+
+    /// Opens Insert > Music and fills it in.
+    fn music_popup(app: &mut App, title: &str, url: &str) {
+        let _ = app.update(Message::MusicAdd);
+        let _ = app.update(Message::MusicTitle(title.into()));
+        let _ = app.update(Message::MusicUrl(url.into()));
+    }
+
+    fn players_in(app: &App) -> Vec<libertum_model::InlineImage> {
+        app.doc
+            .as_ref()
+            .expect("a document")
+            .document()
+            .paragraphs()
+            .flat_map(|p| p.images().to_vec())
+            .filter(|image| {
+                image
+                    .link()
+                    .is_some_and(|link| link.kind == libertum_model::MediaKind::Audio)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn insert_music_needs_a_title_and_an_https_link_and_puts_a_player_on_its_own_line() {
+        let mut app = checklist_app();
+        let _ = app.update(Message::MusicAdd);
+        let _ = app.update(Message::MusicSave);
+        assert!(
+            matches!(app.modal, Some(Modal::MusicEdit(_))),
+            "nothing typed yet"
+        );
+        let _ = app.update(Message::MusicTitle("Theme".into()));
+        let _ = app.update(Message::MusicUrl("http://a.example/t.mp3".into()));
+        let _ = app.update(Message::MusicSave);
+        assert!(
+            matches!(app.modal, Some(Modal::MusicEdit(_))),
+            "http is refused"
+        );
+        assert!(players_in(&app).is_empty());
+
+        let paragraphs_before = app.doc.as_ref().unwrap().document().paragraph_count();
+        let _ = app.update(Message::MusicUrl("https://a.example/t.mp3".into()));
+        let _ = app.update(Message::MusicSave);
+        assert!(app.modal.is_none());
+        assert!(app.dirty);
+        let players = players_in(&app);
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].alt, "Theme");
+        assert!(
+            (players[0].width_pt / players[0].height_pt - crate::docview::PLAYER_ASPECT).abs()
+                < 0.01
+        );
+        assert!(players[0].width_pt > 100.0, "it spans the line");
+        // Its own paragraph, with no text, and the track is remembered by its link.
+        let doc = app.doc.as_ref().unwrap().document();
+        assert!(doc.paragraph_count() > paragraphs_before);
+        assert!(
+            doc.paragraphs()
+                .any(|p| p.text().is_empty() && p.images().len() == 1)
+        );
+        assert_eq!(
+            app.music
+                .list
+                .by_url("https://a.example/t.mp3")
+                .map(|t| t.title.as_str()),
+            Some("Theme")
+        );
+        assert_eq!(app.player_urls().len(), 1);
+    }
+
+    #[test]
+    fn a_copy_needs_permission_and_a_link_and_is_stored_with_the_track() {
+        let mut app = checklist_app();
+        music_popup(&mut app, "Theme", "https://a.example/t.mp3");
+        let can_fetch = |app: &App| match &app.modal {
+            Some(Modal::MusicEdit(draft)) => draft.can_fetch(),
+            _ => false,
+        };
+        assert!(!can_fetch(&app), "permission not ticked");
+        let _ = app.update(Message::MusicPermission);
+        assert!(can_fetch(&app));
+        let _ = app.update(Message::MusicUrl("http://a.example/t.mp3".into()));
+        assert!(!can_fetch(&app), "not https");
+        let _ = app.update(Message::MusicUrl("https://a.example/t.mp3".into()));
+
+        if let Some(Modal::MusicEdit(draft)) = &mut app.modal {
+            draft.state = music_popups::CopyState::Fetching;
+        }
+        let copy = libertum_model::AudioCopy::new(mp3_bytes()).expect("audio");
+        let _ = app.update(Message::MusicFetched(
+            "https://a.example/t.mp3".into(),
+            Ok(copy),
+        ));
+        let _ = app.update(Message::MusicSave);
+        assert!(app.modal.is_none());
+        let track = app
+            .music
+            .list
+            .by_url("https://a.example/t.mp3")
+            .expect("track");
+        assert!(track.copy.is_some());
+    }
+
+    #[test]
+    fn a_copy_of_another_link_or_a_failed_fetch_keeps_nothing() {
+        let mut app = checklist_app();
+        music_popup(&mut app, "Theme", "https://a.example/t.mp3");
+        if let Some(Modal::MusicEdit(draft)) = &mut app.modal {
+            draft.state = music_popups::CopyState::Fetching;
+        }
+        let copy = libertum_model::AudioCopy::new(mp3_bytes()).expect("audio");
+        let _ = app.update(Message::MusicFetched(
+            "https://elsewhere.example/x.mp3".into(),
+            Ok(copy),
+        ));
+        let Some(Modal::MusicEdit(draft)) = &app.modal else {
+            panic!("pop-up closed")
+        };
+        assert!(draft.copy.is_none());
+
+        let _ = app.update(Message::MusicFetched(
+            "https://a.example/t.mp3".into(),
+            Err(crate::wiki_fetch::AudioFetchError::NotAudio),
+        ));
+        let Some(Modal::MusicEdit(draft)) = &app.modal else {
+            panic!("pop-up closed")
+        };
+        assert!(draft.copy.is_none());
+        assert!(
+            matches!(&draft.state, music_popups::CopyState::Failed(why) if why.contains("not an audio file"))
+        );
+
+        // Changing the link after a copy was made drops that copy.
+        let copy = libertum_model::AudioCopy::new(mp3_bytes()).expect("audio");
+        if let Some(Modal::MusicEdit(draft)) = &mut app.modal {
+            draft.copy = Some(copy);
+            draft.copy_url = "https://a.example/t.mp3".into();
+        }
+        let _ = app.update(Message::MusicUrl("https://a.example/other.mp3".into()));
+        let Some(Modal::MusicEdit(draft)) = &app.modal else {
+            panic!("pop-up closed")
+        };
+        assert!(draft.current_copy().is_none());
+    }
+
+    #[test]
+    fn music_is_kept_inside_a_native_file_with_its_copy_and_beside_the_others_as_links() {
+        let dir = synced_folder("music");
+        let mut audio = libertum_model::Soundtrack::default();
+        let id = audio
+            .upsert("Theme", "https://a.example/t.mp3", "Ana")
+            .expect("track");
+        audio.set_copy(
+            id,
+            Some(libertum_model::AudioCopy::new(mp3_bytes()).expect("audio")),
+        );
+
+        let native = dir.join("story.lbtd");
+        let mut context = FileContext::new(Format::Native, two_chapter_document());
+        context.set_audio(audio.clone());
+        context.save(&native).expect("save");
+        let (reopened, _, _) = FileContext::open(&native).expect("open");
+        assert_eq!(reopened.audio(&native), audio);
+        assert!(libertum_library::load_sidecar(&native, AUDIO_SIDECAR).is_none());
+
+        // Beside another format only the link is kept, never the audio.
+        let docx = dir.join("story.docx");
+        FileContext::new(Format::Docx, two_chapter_document())
+            .save(&docx)
+            .expect("save");
+        assert!(read_audio_sidecar(&docx).is_empty());
+        write_audio_sidecar(&docx, &audio);
+        let (reopened, _, _) = FileContext::open(&docx).expect("open");
+        let links = reopened.audio(&docx);
+        assert_eq!(links.items()[0].url, "https://a.example/t.mp3");
+        assert!(links.items()[0].copy.is_none());
+        write_audio_sidecar(&docx, &libertum_model::Soundtrack::default());
+        assert!(libertum_library::load_sidecar(&docx, AUDIO_SIDECAR).is_none());
+        libertum_library::save_sidecar(&docx, AUDIO_SIDECAR, Some(b"{broken")).expect("write");
+        assert!(read_audio_sidecar(&docx).is_empty());
+    }
+
+    #[test]
+    fn a_track_whose_player_was_deleted_is_not_saved_with_its_audio() {
+        let mut app = checklist_app();
+        music_popup(&mut app, "Kept", "https://a.example/kept.mp3");
+        let _ = app.update(Message::MusicSave);
+        app.music
+            .list
+            .upsert("Gone", "https://a.example/gone.mp3", "")
+            .unwrap();
+        let mut saved = app.music.list.clone();
+        saved.retain_urls(&app.player_urls());
+        assert_eq!(saved.len(), 1);
+        assert!(saved.by_url("https://a.example/kept.mp3").is_some());
+    }
+
+    /// A sound device that counts how many are open, and takes its time like a real one.
+    struct CountingSink(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl libertum_audio::Sink for CountingSink {
+        fn write(&mut self, samples: &[f32]) -> Result<(), String> {
+            std::thread::sleep(Duration::from_millis(
+                (samples.len() as u64 / 8).clamp(1, 20),
+            ));
+            Ok(())
+        }
+        fn latency_frames(&mut self) -> u64 {
+            0
+        }
+        fn flush(&mut self) {}
+    }
+
+    impl Drop for CountingSink {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn app_with_a_playing_clip() -> (App, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let open = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = open.clone();
+        let mut app = checklist_app();
+        app.music.player = libertum_audio::Player::with_opener(std::sync::Arc::new(move |_, _| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(CountingSink(seen.clone())))
+        }));
+        let id = app
+            .music
+            .list
+            .upsert("Theme", "https://a.example/t.wav", "")
+            .unwrap();
+        app.music.list.set_copy(
+            id,
+            Some(libertum_model::AudioCopy::new(wav_bytes(30)).expect("audio")),
+        );
+        let _ = app.update(Message::PlayerClick {
+            url: "https://a.example/t.wav".into(),
+            title: "Theme".into(),
+            x: 10.0,
+            y: 20.0,
+            width: 400.0,
+            height: 40.0,
+        });
+        let start = Instant::now();
+        while !app.music.player.snapshot().playing {
+            assert!(start.elapsed() < Duration::from_secs(5), "it never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (app, open)
+    }
+
+    #[test]
+    fn the_button_plays_pauses_and_resumes_and_a_pause_lets_the_device_go() {
+        let (mut app, open) = app_with_a_playing_clip();
+        assert_eq!(open.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let click = |app: &mut App| {
+            let _ = app.update(Message::PlayerClick {
+                url: "https://a.example/t.wav".into(),
+                title: "Theme".into(),
+                x: 10.0,
+                y: 20.0,
+                width: 400.0,
+                height: 40.0,
+            });
+        };
+        click(&mut app);
+        let start = Instant::now();
+        while app.music.player.snapshot().playing {
+            assert!(start.elapsed() < Duration::from_secs(5), "it never paused");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let start = Instant::now();
+        while open.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the device stayed open"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        click(&mut app);
+        let start = Instant::now();
+        while !app.music.player.snapshot().playing {
+            assert!(start.elapsed() < Duration::from_secs(5), "it never resumed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.music.player.shutdown();
+        assert_eq!(open.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn closing_or_replacing_the_document_stops_the_music_and_closes_the_device() {
+        let (mut app, open) = app_with_a_playing_clip();
+        assert_eq!(open.load(std::sync::atomic::Ordering::SeqCst), 1);
+        app.set_audio(libertum_model::Soundtrack::default());
+        assert_eq!(app.music.snap, libertum_audio::Snapshot::default());
+        let start = Instant::now();
+        while open.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the device stayed open"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.music.player.snapshot().clip.is_none());
+        assert!(app.music.list.is_empty());
+    }
+
+    #[test]
+    fn quitting_stops_the_music_before_the_window_goes() {
+        let (mut app, open) = app_with_a_playing_clip();
+        let _ = app.exit_app();
+        assert_eq!(open.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_click_on_the_bar_seeks_a_clip_that_is_playing() {
+        let (mut app, _open) = app_with_a_playing_clip();
+        let _ = app.update(Message::PlayerClick {
+            url: "https://a.example/t.wav".into(),
+            title: "Theme".into(),
+            x: 52.0 + 167.0,
+            y: 30.0,
+            width: 400.0,
+            height: 40.0,
+        });
+        let start = Instant::now();
+        while app.music.player.snapshot().position < Duration::from_secs(10) {
+            assert!(start.elapsed() < Duration::from_secs(5), "it never moved");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        app.music.player.shutdown();
+    }
+
+    #[test]
+    fn opening_a_document_brings_its_characters_and_closing_it_clears_them() {
+        let dir = synced_folder("characters-open");
+        let path = dir.join("story.lbtd");
+        let mut cast = libertum_model::Characters::default();
+        cast.add("Mara Voss", "", "", vec![]).expect("character");
+        let mut context = FileContext::new(Format::Native, two_chapter_document());
+        context.set_characters(cast.clone());
+        context.save(&path).expect("save");
+
+        let mut app = app();
+        let _ = app.open_path(path);
+        assert_eq!(app.characters.list, cast);
+        app.go_home();
+        assert!(app.characters.list.is_empty());
+    }
+
+    fn import_stage(app: &App) -> character_import::Stage {
+        match &app.modal {
+            Some(Modal::CharacterImport(state)) => state.stage,
+            other => panic!("the import pop-up is not open: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_asks_for_the_fandom_then_for_consent_and_fetches_nothing_without_it() {
+        use character_import::Stage;
+        let mut app = checklist_app();
+        app.settings.wiki_consent = None;
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        assert_eq!(import_stage(&app), Stage::Fandoms, "no fandom saved yet");
+        let _ = app.update(Message::Import(ImportMsg::FandomInput(
+            "Harry Potter".into(),
+        )));
+        let _ = app.update(Message::Import(ImportMsg::FandomsDone));
+        assert_eq!(
+            app.characters.list.fandoms(),
+            ["Harry Potter"],
+            "the fandom is kept with the story"
+        );
+        assert!(app.dirty);
+        assert_eq!(import_stage(&app), Stage::Consent, "the first time, ask");
+
+        // Fetch before agreeing goes back to the question and starts nothing.
+        let _ = app.update(Message::Import(ImportMsg::Fetch));
+        assert_eq!(import_stage(&app), Stage::Consent);
+
+        // No thanks: remembered, and the typed route is offered.
+        let _ = app.update(Message::Import(ImportMsg::Consent(false)));
+        assert_eq!(app.settings.wiki_consent, Some(false));
+        assert_eq!(import_stage(&app), Stage::Offline);
+        let _ = app.update(Message::Import(ImportMsg::Fetch));
+        assert_eq!(
+            import_stage(&app),
+            Stage::Consent,
+            "a fetch after No thanks asks again instead of going out"
+        );
+        let _ = app.update(Message::Import(ImportMsg::Consent(false)));
+
+        // Reopening does not ask again, and goes straight to typing.
+        let _ = app.update(Message::Import(ImportMsg::Close));
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        assert_eq!(import_stage(&app), Stage::Offline);
+
+        // Typed names are picked from a list, and only the picked ones are saved.
+        let _ = app.update(Message::Import(ImportMsg::Paste(
+            "Hermione Granger; Ron Weasley; Draco Malfoy".into(),
+        )));
+        let _ = app.update(Message::Import(ImportMsg::UseNames));
+        assert_eq!(import_stage(&app), Stage::Pick);
+        let _ = app.update(Message::Import(ImportMsg::Pick(0)));
+        let _ = app.update(Message::Import(ImportMsg::Pick(2)));
+        let _ = app.update(Message::Import(ImportMsg::Add));
+        assert!(app.modal.is_none());
+        let names: Vec<&str> = app
+            .characters
+            .list
+            .items()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["Draco Malfoy", "Hermione Granger"]);
+    }
+
+    #[test]
+    fn agreeing_allows_a_fetch_to_start_and_stop_cancels_it_and_a_late_answer_is_ignored() {
+        use character_import::Stage;
+        let mut app = checklist_app();
+        app.characters.list.set_fandoms(["Harry Potter".to_owned()]);
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        assert_eq!(import_stage(&app), Stage::Consent);
+        let _ = app.update(Message::Import(ImportMsg::Consent(true)));
+        assert_eq!(app.settings.wiki_consent, Some(true));
+        assert_eq!(import_stage(&app), Stage::Sources);
+
+        let _ = app.update(Message::Import(ImportMsg::Fetch));
+        assert_eq!(import_stage(&app), Stage::Fetching);
+        let Some(Modal::CharacterImport(state)) = &app.modal else {
+            panic!("open")
+        };
+        let cancel = state.cancel.clone();
+        let _ = app.update(Message::Import(ImportMsg::Stop));
+        assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the lookup is told to stop"
+        );
+        assert_eq!(import_stage(&app), Stage::Sources);
+
+        // An answer that arrives after Stop changes nothing.
+        let late = crate::wiki_fetch::Found {
+            candidates: vec![libertum_wiki::Candidate {
+                name: "Late Larry".into(),
+                fandom: "Harry Potter".into(),
+                site: "Fandom".into(),
+                title: "Late Larry".into(),
+                uses: 0,
+            }],
+            profiles: Vec::new(),
+            report: Vec::new(),
+        };
+        let _ = app.update(Message::Import(ImportMsg::Fetched(late)));
+        assert_eq!(import_stage(&app), Stage::Sources);
+    }
+
+    #[test]
+    fn an_ao3_answer_sets_its_name_for_the_fandom_and_keeps_its_tags_for_the_suggestions() {
+        use character_import::Stage;
+        use libertum_wiki::{Candidate, Profile, Tagged};
+        let mut app = checklist_app();
+        app.characters.list.set_fandoms(["hades".to_owned()]);
+        app.settings.wiki_consent = Some(true);
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        let _ = app.update(Message::Import(ImportMsg::Fetch));
+        assert_eq!(import_stage(&app), Stage::Fetching);
+        let tagged = |name: &str, uses| Tagged {
+            name: name.to_owned(),
+            uses,
+        };
+        let answer = crate::wiki_fetch::Found {
+            candidates: vec![Candidate {
+                name: "Zagreus (Hades)".into(),
+                fandom: "hades".into(),
+                site: "AO3".into(),
+                title: "Zagreus (Hades)".into(),
+                uses: 40,
+            }],
+            profiles: vec![(
+                "hades".into(),
+                Profile {
+                    works: 50,
+                    fandom: "Hades (Video Game)".into(),
+                    characters: vec![tagged("Zagreus (Hades)", 40)],
+                    relationships: vec![tagged("Zagreus/Megaera", 30)],
+                    freeforms: vec![tagged("Fluff", 20)],
+                },
+            )],
+            report: Vec::new(),
+        };
+        let _ = app.update(Message::Import(ImportMsg::Fetched(answer)));
+        assert_eq!(import_stage(&app), Stage::Pick);
+        let Some(Modal::CharacterImport(state)) = &app.modal else {
+            panic!("open")
+        };
+        assert_eq!(
+            state.fandoms,
+            ["Hades (Video Game)"],
+            "AO3's spelling replaces the typed one"
+        );
+        assert_eq!(
+            state.visible(&app.characters.list).0.len(),
+            1,
+            "and its names are still shown"
+        );
+        let _ = app.update(Message::Import(ImportMsg::Pick(0)));
+        let _ = app.update(Message::Import(ImportMsg::Add));
+        let cast = &app.characters.list;
+        assert_eq!(cast.fandoms(), ["Hades (Video Game)"]);
+        assert_eq!(cast.items()[0].name, "Zagreus (Hades)");
+        let tags: Vec<&str> = cast.fandom_tags().iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            tags,
+            ["Zagreus/Megaera", "Fluff"],
+            "kept even though only one character was picked"
+        );
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn the_character_lookup_choice_only_shows_after_the_writer_has_agreed() {
+        let mut app = checklist_app();
+        assert_eq!(app.settings.wiki_consent, None);
+        assert!(!app.import_choice_visible(), "not asked yet");
+        app.settings.wiki_consent = Some(false);
+        assert!(!app.import_choice_visible(), "said no thanks");
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        let _ = app.update(Message::Import(ImportMsg::Close));
+        app.characters.list.set_fandoms(["Hades".to_owned()]);
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        let _ = app.update(Message::Import(ImportMsg::Consent(true)));
+        assert!(app.import_choice_visible(), "agreed through Import");
+
+        assert!(app.settings.ao3_first, "AO3 first by default");
+        assert_eq!(app.wiki_sites_on()[0].name, "AO3");
+        let _ = app.update(Message::SetAo3First(false));
+        assert!(app.wiki_sites_on().iter().all(|site| site.name != "AO3"));
+        // The Import list's AO3 box is the same choice.
+        let _ = app.update(Message::Import(ImportMsg::SiteToggle("ao3".into())));
+        assert!(app.settings.ao3_first);
+    }
+
+    #[test]
+    fn sites_can_be_added_switched_off_and_removed_and_fandom_stays_first() {
+        let mut app = checklist_app();
+        app.characters.list.set_fandoms(["Harry Potter".to_owned()]);
+        app.settings.wiki_consent = Some(true);
+        let _ = app.update(Message::Import(ImportMsg::Open));
+        assert_eq!(app.wiki_sites()[0].name, "AO3", "the preferred source");
+        assert_eq!(app.wiki_sites()[1].name, "Fandom");
+
+        let _ = app.update(Message::Import(ImportMsg::SiteInput(
+            "http://wiki.example.org".into(),
+        )));
+        let _ = app.update(Message::Import(ImportMsg::SiteAdd));
+        assert!(app.settings.wiki_sites.is_empty(), "only https addresses");
+        let _ = app.update(Message::Import(ImportMsg::SiteInput(
+            "https://wiki.example.org".into(),
+        )));
+        let _ = app.update(Message::Import(ImportMsg::SiteAdd));
+        assert_eq!(app.settings.wiki_sites.len(), 1);
+        let names: Vec<String> = app.wiki_sites().into_iter().map(|s| s.name).collect();
+        assert_eq!(
+            &names[..3],
+            ["AO3", "Fandom", "wiki.example.org"],
+            "yours come right after Fandom"
+        );
+        let _ = app.update(Message::Import(ImportMsg::SiteInput(
+            "https://wiki.example.org/w/".into(),
+        )));
+        let _ = app.update(Message::Import(ImportMsg::SiteAdd));
+        assert_eq!(
+            app.settings.wiki_sites.len(),
+            1,
+            "the same site is not added twice"
+        );
+
+        let _ = app.update(Message::Import(ImportMsg::SiteToggle("fandom".into())));
+        assert!(app.wiki_sites_on().iter().all(|s| s.id != "fandom"));
+        let _ = app.update(Message::Import(ImportMsg::SiteToggle("fandom".into())));
+        assert_eq!(app.wiki_sites_on()[1].id, "fandom");
+        let _ = app.update(Message::Import(ImportMsg::SiteRemove(
+            "custom:wiki.example.org".into(),
+        )));
+        assert!(app.settings.wiki_sites.is_empty());
     }
 
     #[test]
@@ -13732,6 +16245,45 @@ mod tests {
     }
 
     #[test]
+    fn autosave_waits_one_tick_while_the_writer_is_typing_then_saves() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.window_focused = true;
+        app.dirty = true;
+        app.caret_activity = Instant::now();
+        let _ = app.update(Message::AutosaveTick);
+        assert!(app.autosave_deferred, "typing just now: put off");
+        assert_eq!(app.autosave_pending, None, "nothing was written");
+        // Still typing at the next tick: it saves anyway, so nonstop typing is not unprotected.
+        app.caret_activity = Instant::now();
+        let _ = app.update(Message::AutosaveTick);
+        assert!(!app.autosave_deferred);
+        assert!(app.autosave_pending.is_some(), "the second tick saves");
+    }
+
+    #[test]
+    fn autosave_saves_at_once_when_the_writer_has_paused_or_left_the_window() {
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.window_focused = true;
+        app.dirty = true;
+        app.caret_activity = Instant::now() - AUTOSAVE_QUIET - Duration::from_secs(1);
+        let _ = app.update(Message::AutosaveTick);
+        assert!(app.autosave_pending.is_some(), "paused: saved at once");
+
+        let mut app = home();
+        let _ = app.update(Message::CreateDocument(TemplateId::Blank));
+        app.window_focused = true;
+        app.dirty = true;
+        app.caret_activity = Instant::now();
+        let _ = app.update(Message::WindowFocus(false));
+        assert!(
+            app.autosave_pending.is_some(),
+            "leaving the window snapshots at once even mid-typing"
+        );
+    }
+
+    #[test]
     fn a_recovery_snapshot_is_offered_and_restored() {
         let dir =
             std::env::temp_dir().join(format!("libertum-recovery-app-{}", std::process::id()));
@@ -14040,6 +16592,7 @@ mod tests {
         writer.set_view(ViewState {
             pageless: true,
             zoom_percent: 125,
+            caret: None,
         });
         writer.save(&path).expect("save");
         assert_eq!(Format::for_path(&path), Format::Native);
@@ -14059,7 +16612,8 @@ mod tests {
             context.view(),
             Some(ViewState {
                 pageless: true,
-                zoom_percent: 125
+                zoom_percent: 125,
+                caret: None,
             })
         );
 
@@ -14078,6 +16632,225 @@ mod tests {
         assert_eq!(app.state.zoom, Zoom::Percent(125));
         assert_eq!(app.file.as_deref(), Some(path.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved `.lbtd` in a fresh folder, read paged at 100%, with a checklist.
+    fn native_file_for_view_tests(name: &str) -> PathBuf {
+        let dir = synced_folder(name);
+        let path = dir.join("novel.lbtd");
+        let document = two_chapter_document();
+        let mut list = libertum_model::Checklist::default();
+        list.add("Mara hides the ledger").expect("item");
+        let mut writer = FileContext::new(Format::Native, document);
+        writer.set_checklist(list);
+        writer.set_view(ViewState {
+            pageless: false,
+            zoom_percent: 100,
+            caret: None,
+        });
+        writer.save(&path).expect("save");
+        path
+    }
+
+    fn view_of(path: &std::path::Path) -> ViewState {
+        FileContext::open(path)
+            .expect("open")
+            .0
+            .view()
+            .expect("a native view")
+    }
+
+    #[test]
+    fn leaving_a_native_document_keeps_the_view_it_was_last_read_in() {
+        let path = native_file_for_view_tests("view-kept");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        assert!(!app.state.pageless);
+        let content_before = FileContext::open(&path).expect("open").1;
+        let history_before = libertum_library::versions(&path).len();
+
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        let _ = app.update(Message::ZoomSet(150));
+        assert!(!app.dirty, "a view change is not an edit");
+        app.go_home();
+
+        let view = view_of(&path);
+        assert!(view.pageless, "remembered as pageless");
+        assert_eq!(view.zoom_percent, 150);
+        let (context, content_after, _) = FileContext::open(&path).expect("open");
+        assert_eq!(content_after, content_before, "the text is untouched");
+        assert_eq!(
+            context.checklist(&path).items().len(),
+            1,
+            "so is the checklist"
+        );
+        assert_eq!(
+            libertum_library::versions(&path).len(),
+            history_before,
+            "a view change adds no version to the history"
+        );
+
+        // Opening it again gives the same view back.
+        let _ = app.update(Message::OpenRecent(path));
+        assert!(app.state.pageless);
+        assert_eq!(app.state.zoom, Zoom::Percent(150));
+    }
+
+    /// A native file whose caret was last in the second chapter's text.
+    fn native_file_with_caret(name: &str, caret: libertum_native::Caret) -> PathBuf {
+        let dir = synced_folder(name);
+        let path = dir.join("novel.lbtd");
+        let mut writer = FileContext::new(Format::Native, two_chapter_document());
+        writer.set_view(ViewState {
+            pageless: false,
+            zoom_percent: 100,
+            caret: Some(caret),
+        });
+        writer.save(&path).expect("save");
+        path
+    }
+
+    fn caret_of(app: &App) -> (u64, usize) {
+        let caret = app.doc().editor().caret();
+        (caret.block.0, caret.offset)
+    }
+
+    #[test]
+    fn a_native_document_opens_where_the_writer_left_off() {
+        let path = native_file_with_caret(
+            "caret-open",
+            libertum_native::Caret {
+                block: 4,
+                offset: 11,
+            },
+        );
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path));
+        assert_eq!(caret_of(&app), (4, 11));
+        assert!(
+            app.reveal_caret_pending,
+            "and the view scrolls to it once the layout has reached it"
+        );
+    }
+
+    #[test]
+    fn a_saved_caret_that_no_longer_exists_opens_at_the_top_without_trouble() {
+        for (name, caret) in [
+            (
+                "caret-gone",
+                libertum_native::Caret {
+                    block: 999,
+                    offset: 0,
+                },
+            ),
+            (
+                "caret-far",
+                libertum_native::Caret {
+                    block: 4,
+                    offset: 9999,
+                },
+            ),
+        ] {
+            let path = native_file_with_caret(name, caret);
+            let mut app = home();
+            let _ = app.update(Message::OpenRecent(path));
+            assert_eq!(caret_of(&app), (1, 0), "{name}: the start of the document");
+            assert!(!app.reveal_caret_pending);
+        }
+        // Other formats never had one: they open at the top as before.
+        let dir = synced_folder("caret-docx");
+        let docx = dir.join("novel.docx");
+        FileContext::new(Format::Docx, two_chapter_document())
+            .save(&docx)
+            .expect("save");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(docx));
+        assert_eq!(caret_of(&app), (1, 0));
+    }
+
+    #[test]
+    fn leaving_a_native_document_keeps_where_the_caret_was() {
+        let path = native_file_for_view_tests("caret-kept");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        assert_eq!(caret_of(&app), (1, 0));
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .move_caret(|ed| ed.move_doc_end(false));
+        let (block, offset) = caret_of(&app);
+        assert_ne!((block, offset), (1, 0));
+        assert!(!app.dirty, "moving the caret is not an edit");
+        app.go_home();
+        assert_eq!(
+            view_of(&path).caret,
+            Some(libertum_native::Caret { block, offset })
+        );
+
+        // The next open carries on from there.
+        let _ = app.update(Message::OpenRecent(path));
+        assert_eq!(caret_of(&app), (block, offset));
+    }
+
+    #[test]
+    fn a_native_file_is_left_alone_when_the_view_did_not_change() {
+        let path = native_file_for_view_tests("view-same");
+        let before = std::fs::read(&path).expect("read");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        // Away and back to where it started.
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        app.go_home();
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+    }
+
+    #[test]
+    fn a_view_change_is_not_written_over_unsaved_edits_or_a_file_changed_elsewhere() {
+        // Unsaved edits: Don't Save means the file stays as it is.
+        let path = native_file_for_view_tests("view-dirty");
+        let before = std::fs::read(&path).expect("read");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        app.dirty = true;
+        app.go_home();
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+
+        // Another device saved a different version meanwhile.
+        let path = native_file_for_view_tests("view-elsewhere");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        let theirs = Native::new(Document::from_paragraphs(vec![
+            libertum_model::Paragraph::new(
+                libertum_model::BlockId(1),
+                "Written on another machine",
+            ),
+        ]))
+        .to_bytes()
+        .expect("bytes");
+        std::fs::write(&path, &theirs).expect("write");
+        app.go_home();
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            theirs,
+            "their version is not overwritten"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_keeps_the_view_too() {
+        let path = native_file_for_view_tests("view-close");
+        let mut app = home();
+        let _ = app.update(Message::OpenRecent(path.clone()));
+        let _ = app.update(Message::View(ViewAction::Pageless));
+        app.persist_view();
+        assert!(view_of(&path).pageless);
+        // Asking again changes nothing.
+        let once = std::fs::read(&path).expect("read");
+        app.persist_view();
+        assert_eq!(std::fs::read(&path).expect("read"), once);
     }
 
     #[test]
@@ -16392,12 +19165,14 @@ mod date_time_tests {
                 title: shown,
                 html,
                 copied,
+                words,
                 ..
             }) => {
                 assert_eq!(shown, &title);
                 assert!(!html.is_empty());
                 assert!(html.contains('<'), "the fragment is HTML");
                 assert!(!copied);
+                assert_eq!(*words, 0, "the template chapter has no text yet");
             }
             _ => panic!("the AO3 chapter window is open"),
         }
@@ -16834,6 +19609,42 @@ mod date_time_tests {
             &app.modal,
             Some(Modal::Ao3Chapter { selected, .. }) if selected.iter().all(|on| !on)
         ));
+    }
+
+    #[test]
+    fn saved_characters_and_fandoms_lead_the_suggestions_in_ao3_form() {
+        let mut app = story_app();
+        app.characters
+            .list
+            .add("Mara Voss (Tides)", "", "", Vec::new())
+            .expect("character");
+        app.characters.list.set_fandoms(["Tides".to_owned()]);
+        app.settings.tags = vec![Tag::new("Tides", TagCategory::Fandom)];
+        open_first_chapter(&mut app);
+        let Some(Modal::Ao3Chapter { suggestions, .. }) = &app.modal else {
+            panic!("the chapter window is open");
+        };
+        let names: Vec<(&str, TagCategory)> = suggestions
+            .iter()
+            .map(|s| (s.tag.name.as_str(), s.tag.category))
+            .collect();
+        assert_eq!(
+            &names[..2],
+            &[
+                ("Tides", TagCategory::Fandom),
+                ("Mara Voss (Tides)", TagCategory::Character)
+            ],
+            "{names:?}"
+        );
+        // The saved character replaces the bare names worked out from the text, and the
+        // fandom is not offered twice.
+        let characters = suggested(&app, TagCategory::Character);
+        assert!(!characters.contains(&"Mara".to_owned()), "{characters:?}");
+        assert!(!characters.contains(&"Voss".to_owned()), "{characters:?}");
+        assert_eq!(
+            suggested(&app, TagCategory::Fandom),
+            vec!["Tides".to_owned()]
+        );
     }
 
     #[test]

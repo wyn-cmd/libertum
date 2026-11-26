@@ -46,6 +46,19 @@ pub enum Align {
     Justify,
 }
 
+impl Align {
+    /// The value of the HTML `align` attribute for this alignment, or `None` for the
+    /// default (start), which needs no attribute.
+    pub fn html_value(self) -> Option<&'static str> {
+        match self {
+            Align::Start => None,
+            Align::Centre => Some("center"),
+            Align::End => Some("right"),
+            Align::Justify => Some("justify"),
+        }
+    }
+}
+
 /// Paragraph-level properties (direct formatting; the style sheet arrives with Phase 2).
 ///
 /// The page-flow properties are modelled the way both formats store them, so import and

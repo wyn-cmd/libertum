@@ -307,6 +307,11 @@ fn ao3_fragment_points_linked_pictures_and_videos_at_their_addresses() {
         image(5, link("https://a.example/clip.MP4", MediaKind::Video), ""),
         image(
             5,
+            link("https://a.example/t.mp3?a=1&b=2", MediaKind::Audio),
+            "Theme",
+        ),
+        image(
+            5,
             link("https://www.youtube.com/watch?v=abc", MediaKind::Video),
             "Trailer",
         ),
@@ -336,5 +341,72 @@ fn ao3_fragment_points_linked_pictures_and_videos_at_their_addresses() {
         html.contains("<a href=\"https://www.youtube.com/watch?v=abc\">Trailer</a>"),
         "{html}"
     );
+    assert!(
+        html.contains("<audio controls src=\"https://a.example/t.mp3?a=1&amp;b=2\"></audio>"),
+        "{html}"
+    );
     assert_eq!(html.matches("<img").count(), 1, "{html}");
+}
+
+#[test]
+fn ao3_fragment_writes_alignment_as_the_align_attribute() {
+    use libertum_model::{Align, ParaFormat};
+    let mut document = Document::new();
+    let aligned = |document: &mut Document, text: &str, align: Option<Align>, level| {
+        let mut paragraph = Paragraph::new(document.alloc_id(), text);
+        paragraph.props = ParaProps {
+            outline_level: level,
+            format: ParaFormat {
+                align,
+                ..ParaFormat::default()
+            },
+            ..ParaProps::default()
+        };
+        document.append_blocks(vec![Block::Paragraph(paragraph)]);
+    };
+    aligned(&mut document, "Title", None, Some(1));
+    aligned(&mut document, "~~~", Some(Align::Centre), None);
+    aligned(&mut document, "Justified", Some(Align::Justify), None);
+    aligned(&mut document, "Right", Some(Align::End), None);
+    aligned(&mut document, "Left", None, None);
+    aligned(&mut document, "Heading", Some(Align::Centre), Some(2));
+    let levels = ChapterLevels {
+        h1: true,
+        h2: false,
+        h3: false,
+        h4: false,
+    };
+    let chapter = &chapters(&document, levels)[0];
+    let html = ao3_fragment(&document, chapter);
+    assert!(html.contains("<p align=\"center\">~~~</p>"), "{html}");
+    assert!(
+        html.contains("<p align=\"justify\">Justified</p>"),
+        "{html}"
+    );
+    assert!(html.contains("<p align=\"right\">Right</p>"), "{html}");
+    assert!(html.contains("<p>Left</p>"), "{html}");
+    assert!(html.contains("<h2 align=\"center\">Heading</h2>"), "{html}");
+    assert!(!html.contains("style="), "{html}");
+}
+
+#[test]
+fn ao3_word_count_counts_the_chapter_text_without_its_heading() {
+    use crate::ao3_word_count;
+    let document = book();
+    let h1 = ChapterLevels {
+        h1: true,
+        h2: false,
+        h3: false,
+        h4: false,
+    };
+    let all = chapters(&document, h1);
+    // "Chapter Two" is the title; "Second chapter." is the text.
+    assert_eq!(ao3_word_count(&document, &all[1]), 2);
+    // Chapter One holds its own sub-heading and text, but not its own title.
+    let one = ao3_word_count(&document, &all[0]);
+    assert!((6..30).contains(&one), "{one}");
+    let mut plain = Document::new();
+    push_paragraph(&mut plain, "Only prose.", StyleId::BODY, None);
+    let whole = &chapters(&plain, ChapterLevels::default())[0];
+    assert_eq!(ao3_word_count(&plain, whole), 2, "no heading to leave out");
 }

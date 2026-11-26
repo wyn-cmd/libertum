@@ -199,6 +199,9 @@ pub struct InlineImage {
 pub enum MediaKind {
     Image,
     Video,
+    /// A music player: shown in the document as a player bar, written to HTML as an
+    /// `<audio>` element.
+    Audio,
 }
 
 /// An online picture or video an inline image stands for: the address AO3's HTML will point
@@ -212,6 +215,8 @@ pub struct MediaLink {
 
 /// A video link is stored in the image's `name` as this prefix and the address.
 const VIDEO_PREFIX: &str = "video:";
+/// An audio link is stored the same way, after `audio:`.
+const AUDIO_PREFIX: &str = "audio:";
 
 impl MediaLink {
     /// The text kept in [`InlineImage::name`]: the address itself for a picture, or the
@@ -220,14 +225,18 @@ impl MediaLink {
         match self.kind {
             MediaKind::Image => self.url.clone(),
             MediaKind::Video => format!("{VIDEO_PREFIX}{}", self.url),
+            MediaKind::Audio => format!("{AUDIO_PREFIX}{}", self.url),
         }
     }
 
     /// Reads a link back out of an image name (`None` for an ordinary file name).
     pub fn from_name(name: &str) -> Option<Self> {
-        let (kind, url) = match name.strip_prefix(VIDEO_PREFIX) {
-            Some(rest) => (MediaKind::Video, rest),
-            None => (MediaKind::Image, name),
+        let (kind, url) = if let Some(rest) = name.strip_prefix(VIDEO_PREFIX) {
+            (MediaKind::Video, rest)
+        } else if let Some(rest) = name.strip_prefix(AUDIO_PREFIX) {
+            (MediaKind::Audio, rest)
+        } else {
+            (MediaKind::Image, name)
         };
         let lower = url.to_ascii_lowercase();
         (lower.starts_with("https://") || lower.starts_with("http://")).then(|| Self {

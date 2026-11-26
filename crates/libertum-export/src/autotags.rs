@@ -521,6 +521,208 @@ pub fn auto_suggestions_with(text: &str, book: &NameBook) -> Vec<TagSuggestion> 
     out
 }
 
+/// How much a saved character's suggestion is scored above anything worked out from the text, so
+/// the writer's own cast always comes first. Only the order of scores matters.
+const SAVED_PRIORITY: f32 = 1_000.0;
+
+/// The story's chosen fandoms as Fandom suggestions. The fandom cannot be told from the text,
+/// but the writer has said what it is.
+pub fn saved_fandom_suggestions(cast: &libertum_model::Characters) -> Vec<TagSuggestion> {
+    cast.fandoms()
+        .iter()
+        .map(|fandom| {
+            suggestion(
+                fandom.clone(),
+                TagCategory::Fandom,
+                SAVED_PRIORITY * 2.0,
+                vec![TagMatch {
+                    term: "story fandom".to_owned(),
+                    count: 1,
+                }],
+            )
+        })
+        .collect()
+}
+
+/// The saved characters that `text` mentions, most mentioned first, named the way AO3 wants
+/// them (`Mara Voss (Tides)`, as saved). A character is mentioned by their whole short name, or
+/// by one word of it that no other saved character shares ("Mara" for "Mara Voss"). A name has
+/// to be written with a capital to count, so a character called Hope is not found in "hope".
+pub fn saved_suggestions(text: &str, cast: &libertum_model::Characters) -> Vec<TagSuggestion> {
+    let tokens: Vec<(String, bool)> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            (
+                word.to_lowercase(),
+                word.chars().next().is_some_and(char::is_uppercase),
+            )
+        })
+        .collect();
+    let words_of = |character: &libertum_model::Character| -> Vec<String> {
+        character
+            .short_name()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let all: Vec<(&libertum_model::Character, Vec<String>)> = cast
+        .items()
+        .iter()
+        .map(|character| (character, words_of(character)))
+        .collect();
+
+    let mut found: Vec<(usize, usize, TagSuggestion)> = Vec::new();
+    for (position, (character, words)) in all.iter().enumerate() {
+        if words.is_empty() {
+            continue;
+        }
+        // Words only this character has, long enough not to be an initial.
+        let own: Vec<&String> = words
+            .iter()
+            .filter(|word| {
+                word.chars().count() >= 2
+                    && !is_stopword(word)
+                    && !all
+                        .iter()
+                        .enumerate()
+                        .any(|(other, (_, theirs))| other != position && theirs.contains(word))
+            })
+            .collect();
+        let mut mentions = 0_usize;
+        let mut i = 0;
+        while i < tokens.len() {
+            let phrase = tokens.len() - i >= words.len()
+                && words
+                    .iter()
+                    .enumerate()
+                    .all(|(k, word)| tokens[i + k].0 == *word && tokens[i + k].1);
+            if phrase {
+                mentions += 1;
+                i += words.len();
+            } else {
+                if tokens[i].1 && own.iter().any(|word| **word == tokens[i].0) {
+                    mentions += 1;
+                }
+                i += 1;
+            }
+        }
+        if mentions > 0 {
+            found.push((
+                mentions,
+                position,
+                suggestion(
+                    character.name.clone(),
+                    TagCategory::Character,
+                    SAVED_PRIORITY + mentions as f32,
+                    vec![TagMatch {
+                        term: "mentions (saved character)".to_owned(),
+                        count: mentions,
+                    }],
+                ),
+            ));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    found
+        .into_iter()
+        .map(|(_, _, suggestion)| suggestion)
+        .collect()
+}
+
+/// Relationship and additional tags AO3's recent works in the story's fandom carry, offered
+/// exactly as AO3 writes them: a relationship when everyone in it is in the chapter, an
+/// additional tag when its words are (as library tags are matched). Relationships come first.
+pub fn fandom_tag_suggestions(text: &str, cast: &libertum_model::Characters) -> Vec<TagSuggestion> {
+    use libertum_model::FandomTagKind;
+    let tokens: Vec<(String, bool)> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            (
+                word.to_lowercase(),
+                word.chars().next().is_some_and(char::is_uppercase),
+            )
+        })
+        .collect();
+    // A person is present when the whole name is written, or any one capitalised word of it.
+    let present = |person: &str| -> usize {
+        let words: Vec<String> = person
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+        let named: Vec<&String> = words
+            .iter()
+            .filter(|w| w.chars().count() >= 3 && !is_stopword(w))
+            .collect();
+        tokens
+            .iter()
+            .filter(|(token, capital)| *capital && named.iter().any(|w| **w == *token))
+            .count()
+    };
+    let mut out: Vec<TagSuggestion> = Vec::new();
+    for tag in cast.fandom_tags() {
+        if tag.kind != FandomTagKind::Relationship {
+            continue;
+        }
+        let people: Vec<&str> = tag
+            .name
+            .split(['/', '&'])
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        let counts: Vec<usize> = people.iter().map(|p| present(short_of(p))).collect();
+        if people.len() >= 2 && counts.iter().all(|c| *c > 0) {
+            out.push(suggestion(
+                tag.name.clone(),
+                TagCategory::Relationship,
+                SAVED_PRIORITY / 2.0 + tag.uses as f32,
+                vec![TagMatch {
+                    term: "AO3 relationship in recent works".to_owned(),
+                    count: tag.uses,
+                }],
+            ));
+        }
+    }
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.tag.name.cmp(&b.tag.name))
+    });
+    let vocabulary: Vec<Tag> = cast
+        .fandom_tags()
+        .iter()
+        .filter(|tag| tag.kind == FandomTagKind::Freeform)
+        .map(|tag| Tag::new(tag.name.clone(), TagCategory::Freeform))
+        .collect();
+    out.extend(crate::tags::suggest_tags_with(text, &vocabulary, 8, 2, 1));
+    out
+}
+
+/// A name without a trailing `(Fandom)`.
+fn short_of(name: &str) -> &str {
+    libertum_model::short_name(name)
+}
+
+/// Whether a character tag worked out from the text ("Mara", "Voss", "Mara Voss") is one of the
+/// saved characters under a shorter name, so the saved tag stands in for it.
+pub fn is_saved_character(name: &str, cast: &libertum_model::Characters) -> bool {
+    let words: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+    !words.is_empty()
+        && cast.items().iter().any(|character| {
+            let theirs: Vec<String> = character
+                .short_name()
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect();
+            words.iter().all(|word| theirs.contains(word))
+        })
+}
+
 /// `vocabulary` suggestions followed by the `auto` ones the vocabulary does not already cover
 /// (compared by name, ignoring case), so a tag the writer keeps is never offered twice.
 pub fn merge_suggestions(
@@ -1055,6 +1257,103 @@ fn phrases(paragraphs: &[&str], names: &HashSet<String>) -> Vec<(String, usize)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cast(names: &[&str]) -> libertum_model::Characters {
+        let mut cast = libertum_model::Characters::default();
+        for name in names {
+            cast.add(name, "", "", Vec::new()).expect("character");
+        }
+        cast
+    }
+
+    #[test]
+    fn saved_characters_are_found_by_full_name_or_by_a_word_only_they_have() {
+        let cast = cast(&[
+            "Mara Voss (Tides)",
+            "Jo Ellery (Tides)",
+            "Mara Chen (Tides)",
+        ]);
+        let text = "Voss waited. Jo Ellery laughed. Later Jo said nothing, and Mara left. \
+                    Mara Voss locked the door.";
+        let found: Vec<(String, usize)> = saved_suggestions(text, &cast)
+            .into_iter()
+            .map(|s| (s.tag.name, s.matched[0].count))
+            .collect();
+        // Jo: "Jo Ellery" and "Jo" (2). Mara Voss: "Voss" and "Mara Voss" (2); the bare "Mara"
+        // belongs to two saved characters, so it counts for neither. Mara Chen: nothing.
+        assert_eq!(
+            found,
+            vec![
+                ("Mara Voss (Tides)".to_owned(), 2),
+                ("Jo Ellery (Tides)".to_owned(), 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_saved_name_needs_its_capital_and_a_plain_word_name_is_not_found_in_prose() {
+        let cast = cast(&["Hope (Tides)"]);
+        assert!(saved_suggestions("She had hope, a little hope.", &cast).is_empty());
+        assert_eq!(saved_suggestions("Hope smiled.", &cast).len(), 1);
+    }
+
+    #[test]
+    fn ao3_relationships_need_everyone_in_the_chapter_and_freeforms_need_their_words() {
+        use libertum_model::{FandomTag, FandomTagKind};
+        let mut cast = libertum_model::Characters::default();
+        cast.set_fandoms(["Hades (Video Game)".to_owned()]);
+        let tag = |name: &str, kind, uses| FandomTag {
+            name: name.to_owned(),
+            kind,
+            uses,
+            fandom: "Hades (Video Game)".to_owned(),
+        };
+        cast.set_fandom_tags(
+            "Hades (Video Game)",
+            vec![
+                tag("Zagreus/Megaera", FandomTagKind::Relationship, 30),
+                tag("Zagreus/Thanatos", FandomTagKind::Relationship, 40),
+                tag("Slow Burn", FandomTagKind::Freeform, 9),
+                tag("Fluff", FandomTagKind::Freeform, 20),
+            ],
+        );
+        let text = "Zagreus met Megaera at the gate. It was a slow burn, a very slow burn indeed.";
+        let found: Vec<(String, TagCategory)> = fandom_tag_suggestions(text, &cast)
+            .into_iter()
+            .map(|s| (s.tag.name, s.tag.category))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("Zagreus/Megaera".to_owned(), TagCategory::Relationship),
+                ("Slow Burn".to_owned(), TagCategory::Freeform),
+            ],
+            "Thanatos is not in the chapter, Fluff has no words in it"
+        );
+        assert!(fandom_tag_suggestions("nothing here", &cast).is_empty());
+        assert!(fandom_tag_suggestions(text, &libertum_model::Characters::default()).is_empty());
+    }
+
+    #[test]
+    fn saved_tags_outrank_everything_and_stand_in_for_shorter_forms() {
+        let cast = cast(&["Mara Voss (Tides)"]);
+        let saved = saved_suggestions("Mara ran.", &cast);
+        assert!(saved[0].score > 100.0);
+        assert!(is_saved_character("Mara", &cast));
+        assert!(is_saved_character("Voss", &cast));
+        assert!(is_saved_character("Mara Voss", &cast));
+        assert!(!is_saved_character("Mara Chen", &cast));
+        assert!(!is_saved_character("", &cast));
+        let mut with_fandom = cast.clone();
+        with_fandom.set_fandoms(["Tides".to_owned()]);
+        let fandoms = saved_fandom_suggestions(&with_fandom);
+        assert_eq!(fandoms[0].tag.name, "Tides");
+        assert_eq!(fandoms[0].tag.category, TagCategory::Fandom);
+        assert!(
+            fandoms[0].score > saved[0].score,
+            "the fandom leads the list"
+        );
+    }
 
     fn names(suggestions: &[TagSuggestion], category: TagCategory) -> Vec<String> {
         suggestions

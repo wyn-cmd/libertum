@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use libertum_model::{
-    BlockId, ChangeSet, CrossRef, CrossRefKind, DateTimeField, DateTimeFormat, DateTimeSource,
-    EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media, MediaLink, Operation, Paragraph,
-    Ruby, Run, Table, TableCell, TableStyle,
+    Block, BlockId, ChangeSet, CrossRef, CrossRefKind, DateTimeField, DateTimeFormat,
+    DateTimeSource, EditKind, InlineImage, MAX_IMAGE_PT, MIN_IMAGE_PT, Media, MediaLink, Operation,
+    Paragraph, Ruby, Run, Table, TableCell, TableStyle,
 };
 
 use super::{DocPosition, EditBuilder, Editor, EditorError, Selection};
@@ -99,6 +99,128 @@ impl Editor {
         alt: &str,
     ) -> Result<ChangeSet, EditorError> {
         self.insert_image_with(media, max_width_pt, &link.name(), alt)
+    }
+
+    /// Inserts a music player on its own line at the caret: the paragraph is split there when
+    /// the caret is inside text, the player goes between the halves, and the caret lands on the
+    /// line after it. `media` is the player's picture, `width_pt` the text width it spans,
+    /// `height_pt` its height, `link` the audio address and `title` what it is called.
+    pub fn insert_player(
+        &mut self,
+        media: Arc<Media>,
+        width_pt: f32,
+        height_pt: f32,
+        link: &MediaLink,
+        title: &str,
+    ) -> Result<ChangeSet, EditorError> {
+        self.guard_caret()?;
+        let caret = self.clamp(self.selection.head);
+        let Some(paragraph) = self.doc.paragraph(caret.block) else {
+            return Ok(ChangeSet::default());
+        };
+        if paragraph.props.toc_target.is_some() {
+            return Err(EditorError::ReadOnly);
+        }
+        let mut image = InlineImage::fitted(0, media, width_pt);
+        image.width_pt = width_pt;
+        image.height_pt = height_pt;
+        image.name = link.name();
+        image.alt = title.to_owned();
+        image.clamp_size();
+
+        let text_len = paragraph.text().len();
+        let in_table = self.doc.index_of(caret.block).is_none();
+        let mut b = EditBuilder::default();
+        // Where the player's own paragraph goes.
+        let index = if in_table {
+            // Inside a table cell there is no body position: it goes in the cell's paragraph.
+            let mut images = paragraph.images().to_vec();
+            images.push(image);
+            b.apply(
+                &mut self.doc,
+                Operation::SetImages {
+                    block: caret.block,
+                    images,
+                },
+            )?;
+            self.commit(&mut b, EditKind::Other, Instant::now())?;
+            return Ok(b.dirty);
+        } else if text_len == 0 && paragraph.images().is_empty() {
+            // An empty line becomes the player's line.
+            let images = vec![image];
+            b.apply(
+                &mut self.doc,
+                Operation::SetImages {
+                    block: caret.block,
+                    images,
+                },
+            )?;
+            let index = self.doc.index_of(caret.block).unwrap_or(0);
+            let next = self.following_paragraph(&mut b, index)?;
+            self.commit(&mut b, EditKind::Other, Instant::now())?;
+            self.selection = Selection::caret(DocPosition {
+                block: next,
+                offset: 0,
+            });
+            self.preferred_x = None;
+            return Ok(b.dirty);
+        } else if caret.offset == 0 {
+            self.doc.index_of(caret.block).unwrap_or(0)
+        } else if caret.offset >= text_len {
+            self.doc.index_of(caret.block).unwrap_or(0) + 1
+        } else {
+            let tail = self.doc.alloc_id();
+            b.apply(
+                &mut self.doc,
+                Operation::SplitBlock {
+                    block: caret.block,
+                    offset: caret.offset,
+                    new_id: tail,
+                    props: None,
+                },
+            )?;
+            self.doc.index_of(tail).unwrap_or(0)
+        };
+        let id = self.doc.alloc_id();
+        let mut line = Paragraph::new(id, "");
+        line.set_images(vec![image]);
+        b.apply(
+            &mut self.doc,
+            Operation::InsertBlock {
+                index,
+                block: Block::Paragraph(line),
+            },
+        )?;
+        // The caret goes to the text after the player; when there is none, a new empty line.
+        let landing = self.following_paragraph(&mut b, index)?;
+        self.commit(&mut b, EditKind::Other, Instant::now())?;
+        self.selection = Selection::caret(DocPosition {
+            block: landing,
+            offset: 0,
+        });
+        self.preferred_x = None;
+        Ok(b.dirty)
+    }
+
+    /// The paragraph after body position `index`, adding an empty one when the next block is
+    /// not a paragraph (or there is none), so the writer can keep typing after a player.
+    fn following_paragraph(
+        &mut self,
+        b: &mut EditBuilder,
+        index: usize,
+    ) -> Result<BlockId, EditorError> {
+        if let Some(Block::Paragraph(next)) = self.doc.body().at(index + 1) {
+            return Ok(next.id);
+        }
+        let id = self.doc.alloc_id();
+        b.apply(
+            &mut self.doc,
+            Operation::InsertBlock {
+                index: index + 1,
+                block: Block::Paragraph(Paragraph::new(id, "")),
+            },
+        )?;
+        Ok(id)
     }
 
     /// Swaps the picture of image `index` in `block` for `media` (a preview that has now been

@@ -19,6 +19,9 @@ const MAX_PREVIEW_BYTES: usize = 15_000_000;
 /// Placeholder size in pixels (16:9).
 const PLACEHOLDER_W: u32 = 320;
 const PLACEHOLDER_H: u32 = 180;
+/// The picture standing for a music player: eleven to one, like the line it fills.
+const PLAYER_PICTURE_W: u32 = 880;
+const PLAYER_PICTURE_H: u32 = 80;
 
 /// File extensions that mean the address is a video even on a site that is not known.
 const VIDEO_EXTENSIONS: [&str; 6] = [".mp4", ".webm", ".ogv", ".ogg", ".m4v", ".mov"];
@@ -105,6 +108,8 @@ pub fn preview_address(link: &MediaLink) -> Option<String> {
     match link.kind {
         MediaKind::Image => Some(link.url.clone()),
         MediaKind::Video => video_thumbnail(&link.url),
+        // A player has no picture to download.
+        MediaKind::Audio => None,
     }
 }
 
@@ -151,7 +156,12 @@ pub fn fetch_image(url: &str) -> Result<Arc<libertum_model::Media>, String> {
 /// A grey 16:9 picture with a play triangle (video) or a sun and hills (picture), shown until
 /// a preview is downloaded.
 pub fn placeholder(kind: MediaKind) -> Arc<libertum_model::Media> {
-    let (w, h) = (PLACEHOLDER_W as i32, PLACEHOLDER_H as i32);
+    let (pw, ph) = match kind {
+        // A music player is a long, low bar, about eleven times as wide as it is high.
+        MediaKind::Audio => (PLAYER_PICTURE_W, PLAYER_PICTURE_H),
+        _ => (PLACEHOLDER_W, PLACEHOLDER_H),
+    };
+    let (w, h) = (pw as i32, ph as i32);
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     let inside_triangle = |p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
         let side = |p: (f32, f32), q: (f32, f32), r: (f32, f32)| {
@@ -171,6 +181,24 @@ pub fn placeholder(kind: MediaKind) -> Arc<libertum_model::Media> {
             };
             let ink = [96, 102, 114];
             match kind {
+                MediaKind::Audio => {
+                    // A bar with a round play button and a progress line, for the places a
+                    // live player cannot be drawn (a PDF, a page not yet rendered).
+                    let (cx, cy) = (40.0, h as f32 / 2.0);
+                    let disc = ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt();
+                    let line = p.1 > h as f32 - 22.0
+                        && p.1 < h as f32 - 16.0
+                        && p.0 > 104.0
+                        && p.0 < w as f32 - 28.0;
+                    if disc < 28.0 {
+                        colour = [214, 80, 44];
+                        if inside_triangle(p, (30.0, cy - 14.0), (30.0, cy + 14.0), (54.0, cy)) {
+                            colour = [255, 255, 255];
+                        }
+                    } else if line {
+                        colour = [200, 204, 212];
+                    }
+                }
                 MediaKind::Video => {
                     let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
                     let ring = ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt();
@@ -198,7 +226,7 @@ pub fn placeholder(kind: MediaKind) -> Arc<libertum_model::Media> {
             rgba[at..at + 4].copy_from_slice(&[colour[0], colour[1], colour[2], 255]);
         }
     }
-    png_from_rgba(PLACEHOLDER_W, PLACEHOLDER_H, rgba).expect("a fixed-size placeholder encodes")
+    png_from_rgba(pw, ph, rgba).expect("a fixed-size placeholder encodes")
 }
 
 #[cfg(test)]
@@ -252,6 +280,9 @@ mod tests {
             let media = placeholder(kind);
             assert_eq!((media.width_px(), media.height_px()), (320, 180));
         }
+        let player = placeholder(MediaKind::Audio);
+        assert_eq!((player.width_px(), player.height_px()), (880, 80));
+        assert_ne!(player.hash(), placeholder(MediaKind::Video).hash());
         assert_ne!(
             placeholder(MediaKind::Image).hash(),
             placeholder(MediaKind::Video).hash()

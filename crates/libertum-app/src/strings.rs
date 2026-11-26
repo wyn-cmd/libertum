@@ -80,9 +80,124 @@ pub const TB_DOCUMENT: &str = "Document";
 pub const TB_HEADERS: &str = "Headers";
 pub const TB_NOTES: &str = "Notes";
 pub const PANE_NOTES: &str = "Notes";
-pub const NOTES_EMPTY: &str =
-    "No footnotes or endnotes yet. Use Insert > Footnote or Insert > Endnote.";
 pub const NOTES_HINT: &str = "Edit a note here; click its number to jump to the reference.";
+pub const NOTES_TAB_FOOTNOTES: &str = "Footnotes";
+pub const NOTES_TAB_ENDNOTES: &str = "Endnotes";
+pub const NOTES_TAB_CHECKLIST: &str = "Story";
+pub const NOTES_TAB_CHARACTERS: &str = "Characters";
+pub const CHARACTERS_EMPTY: &str = "No characters yet. Add one, or import names for your fandom.";
+pub const CHARACTERS_NONE_FOUND: &str = "No character matches that search.";
+pub const CHARACTERS_SEARCH: &str = "Search characters";
+pub const CHARACTERS_ADD: &str = "Add";
+pub const CHARACTERS_SHOWING: &str = "Showing";
+pub const CHARACTERS_OF: &str = "of";
+pub const CHARACTERS_SEARCH_FOR_MORE: &str = "Search to narrow the list.";
+pub const CHARACTER_PLOT_POINTS: &str = "Plot points";
+pub const CHARACTER_SHOW_POINTS: &str = "Show plot points";
+pub const CHARACTER_HIDE_POINTS: &str = "Hide plot points";
+pub const CHARACTER_NO_POINTS: &str = "Not linked to any plot point.";
+pub const CHARACTER_EDIT: &str = "Edit";
+pub const CHARACTER_REMOVE: &str = "Delete";
+pub const CHARACTER_ADD_TITLE: &str = "Add character";
+pub const CHARACTER_EDIT_TITLE: &str = "Edit character";
+pub const CHARACTER_NAME_PLACEHOLDER: &str = "Name, as AO3 writes it (Mara Voss (Tides))";
+pub const CHARACTER_AGE_PLACEHOLDER: &str = "Age (17, about thirty, ageless)";
+pub const CHARACTER_DETAILS_PLACEHOLDER: &str = "Details";
+pub const CHARACTER_DUPLICATE: &str = "A character with this name is already saved.";
+pub const CHARACTER_LINK_HINT: &str =
+    "Link plot points to use this character's name as an extra keyword for them.";
+pub const CHARACTER_NO_PLOT_POINTS: &str = "No plot points yet. Add them on the Story tab.";
+pub const CHARACTER_SAVE: &str = "Save";
+pub const CHARACTERS_IMPORT: &str = "Import";
+pub const IMPORT_TITLE: &str = "Import characters";
+pub const IMPORT_FANDOM_HEADING: &str = "Which fandom is this story in?";
+pub const IMPORT_FANDOM_HINT: &str = "Type the fandom as AO3 names it and press Add. Imports are limited to the fandoms you choose here.";
+pub const IMPORT_FANDOM_PLACEHOLDER: &str = "Fandom (Harry Potter)";
+pub const IMPORT_NEXT: &str = "Next";
+pub const IMPORT_CONSENT_TITLE: &str = "Look characters up online?";
+pub const IMPORT_CONSENT_BODY: &str = "Libertum can look up characters for the fandom you chose, first on AO3 and, if AO3 will not answer, on wiki websites (Fandom, Miraheze and similar). From AO3 it reads the fandom's three most recent pages of works, newest first, and keeps the characters, relationships and tags of up to 50 works that are not crossovers; the tag suggestions then use them. This sends the fandom's name to those websites from your computer, and only when you press Fetch, never automatically. It reads each site's robots.txt first and fetches nothing the site disallows, makes one request at a time with a pause between them (five seconds for AO3), and stops asking a site that holds it back. AO3 and wikis can have their own terms about automated access, AO3 may refuse a program it takes for a robot, and you do this at your own risk. You can always type or paste names instead.";
+pub const IMPORT_CONSENT_YES: &str = "I understand, continue";
+pub const IMPORT_CONSENT_NO: &str = "No thanks";
+pub const IMPORT_SITES_HEADING: &str = "Where to look, in this order";
+pub const IMPORT_WIKI_NAME: &str = "Wiki name (the part before .fandom.com)";
+pub const IMPORT_CATEGORIES: &str = "Category names, separated by commas";
+pub const IMPORT_SITE_PLACEHOLDER: &str = "Add a MediaWiki site (https://wiki.example.org)";
+pub const IMPORT_SITE_ADD: &str = "Add site";
+pub const IMPORT_SITE_REMOVE: &str = "Remove";
+pub const IMPORT_FETCH: &str = "Fetch";
+pub const IMPORT_FETCHING: &str =
+    "Looking for characters. Libertum pauses between requests, so this can take a minute.";
+pub const IMPORT_STOP: &str = "Stop";
+pub const IMPORT_TYPE_INSTEAD: &str = "Type or paste names instead";
+pub const IMPORT_ALLOW_ONLINE: &str = "Look online instead";
+pub const IMPORT_OFFLINE_HEADING: &str = "Type or paste names";
+pub const IMPORT_OFFLINE_HINT: &str =
+    "Separate names with semicolons or commas, or open a text file with one name per line.";
+pub const IMPORT_OFFLINE_PLACEHOLDER: &str = "Hermione Granger; Ron Weasley; Draco Malfoy";
+pub const IMPORT_USE_NAMES: &str = "Use these names";
+pub const IMPORT_FROM_FILE: &str = "Open a file";
+pub const IMPORT_FILE_FILTER: &str = "Text files";
+pub const IMPORT_FILE_TITLE: &str = "Choose a list of character names";
+pub const IMPORT_SEARCH: &str = "Search by name";
+pub const IMPORT_FOUND: &str = "found";
+pub const IMPORT_FROM: &str = "from";
+pub const IMPORT_SELECT_SHOWN: &str = "Select shown";
+pub const IMPORT_CLEAR: &str = "Clear";
+pub const IMPORT_ADD_SELECTED: &str = "Add selected";
+pub const IMPORT_NONE_LEFT: &str =
+    "Nothing to show. Everyone found is already saved, or no name matches the search.";
+pub const IMPORT_BACK: &str = "Back";
+pub const IMPORT_NOTHING_FOUND: &str = "No characters were found.";
+pub const IMPORT_STOPPED_SLOW: &str =
+    "A site asked Libertum to slow down, so it stopped. Try again later.";
+pub const IMPORT_STOPPED_LIMIT: &str = "Libertum stopped at its limit of requests for one lookup.";
+pub const IMPORT_STOPPED_CANCEL: &str = "Stopped.";
+pub const IMPORT_SKIP_ROBOTS: &str = "its robots.txt does not allow it";
+pub const IMPORT_SKIP_ROBOTS_UNREADABLE: &str = "its robots.txt could not be read";
+pub const IMPORT_SKIP_NOT_FOUND: &str = "no wiki by that name";
+pub const IMPORT_SKIP_NOT_WIKI: &str = "it did not answer like a MediaWiki";
+pub const IMPORT_SKIP_REFUSED: &str = "the site refused";
+pub const IMPORT_SKIP_EMPTY: &str = "no characters in those categories";
+pub const IMPORT_SKIP_NO_NAME: &str = "needs a wiki name";
+pub const IMPORT_SKIP_NETWORK: &str = "could not connect";
+pub const IMPORT_SKIP_BLOCKED: &str =
+    "it is holding automated requests back (rate limit or a waiting room)";
+pub const IMPORT_SKIP_UNEXPECTED: &str = "its page was not in the form Libertum reads";
+pub const IMPORT_AO3_NAME: &str = "Using AO3's name for this fandom:";
+pub const IMPORT_AO3_NOTE: &str = "From AO3's most recent works, without crossovers. The number is how many of those works feature the character.";
+pub const IMPORT_TAGS_SAVED: &str =
+    "Relationship and additional tags from those works are kept for the tag suggestions.";
+pub const IMPORT_SITE_NOT_HTTPS: &str = "The address must start with https://";
+pub const IMPORT_SITE_BAD: &str = "That does not look like a website address.";
+pub const IMPORT_SITE_PRIVATE: &str = "That address points at this computer or a private network.";
+pub const IMPORT_SITE_HAVE: &str = "That site is already in the list.";
+pub const FOOTNOTES_EMPTY: &str = "No footnotes yet. Use Insert > Footnote.";
+pub const ENDNOTES_EMPTY: &str = "No endnotes yet. Use Insert > Endnote.";
+pub const CHECKLIST_EMPTY: &str = "No points yet. Add the beats this story has to hit, for example \"Show Mara's fear of water\".";
+pub const CHECKLIST_ADD_PLACEHOLDER: &str = "Add a point to cover";
+pub const CHECKLIST_ADD: &str = "Add";
+pub const CHECKLIST_ADD_POINT: &str = "Add point";
+pub const SCOPE_TITLE: &str = "Where does this point apply?";
+pub const SCOPE_THIS_CHAPTER: &str = "This Chapter";
+pub const SCOPE_STORY: &str = "Story";
+pub const SCOPE_CHAPTERS: &str = "Chapters";
+pub const SCOPE_THIS_CHAPTER_HINT: &str = "Only in";
+pub const SCOPE_STORY_HINT: &str = "Every chapter of the story.";
+pub const SCOPE_CHAPTERS_HINT: &str = "Only in the chapters you tick.";
+pub const SCOPE_ONWARD: &str = "Also every chapter after the last one ticked";
+pub const CHECKLIST_SCOPE_ONLY_HERE: &str = "Only this chapter";
+pub const CHECKLIST_SCOPE_SOME: &str = "Some chapters";
+pub const CHECKLIST_SCOPE_ONWARD: &str = "Some chapters and onward";
+pub const CHECKLIST_ORDER_LEAST: &str = "Least covered";
+pub const CHECKLIST_ORDER_MOST: &str = "Most relevant";
+pub const CHECKLIST_EDIT: &str = "Edit";
+pub const CHECKLIST_EDIT_TITLE: &str = "Edit point";
+pub const CHECKLIST_SAVE: &str = "Save";
+pub const CHECKLIST_REMOVE: &str = "Delete";
+pub const CHECKLIST_ALIASES_PLACEHOLDER: &str = "Other words for it (thief, theft, took)";
+pub const CHECKLIST_NO_KEYWORDS: &str = "No keywords to look for";
+pub const CHECKLIST_COVERAGE: &str = "covered";
+pub const CHECKLIST_MENTIONS: &str = "mentions";
 pub const PANE_BOOKMARKS: &str = "Bookmarks";
 pub const BOOKMARKS_EMPTY: &str = "No bookmarks yet. Add one at the caret.";
 pub const BOOKMARKS_HINT: &str =
@@ -186,6 +301,7 @@ pub const LINKED_NO_PREVIEW: &str =
     "This video's address gives no picture to download, so it keeps its placeholder.";
 pub const LINKED_VIDEO_NOTE: &str = "Video link";
 pub const LINKED_IMAGE_NOTE: &str = "Image link";
+pub const LINKED_AUDIO_NOTE: &str = "Music link";
 
 // Date & Time chooser
 pub const DATE_TIME_TITLE: &str = "Date & Time";
@@ -416,6 +532,12 @@ pub fn word_count_pill(page: usize, pages: usize, words: usize, selected: Option
     }
 }
 
+/// "1,234 words" (or "1 word") for the AO3 chapter window.
+pub fn chapter_words(words: usize) -> String {
+    let noun = if words == 1 { "word" } else { "words" };
+    format!("{} {noun}", group_thousands(words))
+}
+
 /// 104233 becomes "104,233".
 fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -507,6 +629,10 @@ pub const SETTINGS_CHAPTER_H3: &str = "Heading 3";
 pub const SETTINGS_CHAPTER_H4: &str = "Heading 4";
 pub const SETTINGS_ANTIALIASING: &str = "Smooth text and shapes on the page";
 pub const SETTINGS_ANTIALIASING_HINT: &str = "Switch off for hard pixel edges on page text, lines and highlights. PDF export is not affected.";
+pub const SETTINGS_IMPORT: &str = "Character lookup";
+pub const SETTINGS_IMPORT_AO3: &str = "AO3 first";
+pub const SETTINGS_IMPORT_WIKIS: &str = "Wikis only";
+pub const SETTINGS_IMPORT_HINT: &str = "Where Import looks for characters. AO3 first tries AO3 and uses the wikis if it will not answer; wikis only never contacts AO3.";
 pub const SETTINGS_PERFORMANCE: &str = "Show performance overlay";
 pub const SETTINGS_PERFORMANCE_HINT: &str = "Frames per second and frame time in the top-right corner of the document view. It keeps the window redrawing while it is on.";
 pub const SETTINGS_BENCHMARK: &str = "Benchmark";
@@ -935,6 +1061,33 @@ pub fn tags_hidden_for_work(count: usize) -> String {
         n => format!("{n} tags are hidden for this work (copied already, or removed)."),
     }
 }
+
+// Insert > Music: a player in the document, with an optional copy of the audio kept inside it.
+pub const INSERT_MUSIC: &str = "Music\u{2026}";
+pub const MUSIC_ADD_TITLE: &str = "Insert music";
+pub const MUSIC_PLAYER_HINT: &str = "A player with a progress bar goes on its own line at the caret. Press its button to play; it stops when the document closes.";
+pub const MUSIC_TITLE_PLACEHOLDER: &str = "Title";
+pub const MUSIC_URL_PLACEHOLDER: &str = "Link to the audio file (https://\u{2026})";
+pub const MUSIC_CREDIT_PLACEHOLDER: &str = "Made by (credit)";
+pub const MUSIC_NOT_HTTPS: &str = "The link has to start with https://";
+pub const MUSIC_COPY_HEADING: &str = "Keep a copy in the document";
+pub const MUSIC_COPY_HINT: &str = "The link stays the source, and is what AO3's player uses. A copy is stored inside the .lbtd so the audio is still there offline. It is fetched once, only when you press the button, and it makes the file larger (up to 30 MB).";
+pub const MUSIC_PERMISSION: &str = "I have permission to keep a copy of this audio. It travels with the document whenever it is shared.";
+pub const MUSIC_KEEP: &str = "Fetch and keep a copy";
+pub const MUSIC_FETCHING: &str = "Fetching\u{2026}";
+pub const MUSIC_STOP: &str = "Stop";
+pub const MUSIC_DROP_COPY: &str = "Remove the copy";
+pub const MUSIC_COPY_READY: &str = "A copy is ready to save with the document";
+pub const MUSIC_SAVE: &str = "Insert";
+pub const MUSIC_FETCH_NOT_HTTPS: &str = "Only https links can be fetched.";
+pub const MUSIC_FETCH_ROBOTS: &str =
+    "That site's robots.txt does not allow it, or could not be read, so nothing was fetched:";
+pub const MUSIC_FETCH_REFUSED: &str = "The site refused the request, code";
+pub const MUSIC_FETCH_TOO_LARGE: &str = "That file is larger than the 30 MB a document keeps.";
+pub const MUSIC_FETCH_NOT_AUDIO: &str = "That link is not an audio file (MP3, OGG, WAV, FLAC or M4A). A page that plays audio is not the file itself.";
+pub const MUSIC_FETCH_STOPPED: &str = "Stopped.";
+pub const MUSIC_FETCH_NETWORK: &str = "Could not fetch it:";
+pub const MUSIC_PLAY_FAILED: &str = "The music could not be played.";
 
 #[cfg(test)]
 mod tests {

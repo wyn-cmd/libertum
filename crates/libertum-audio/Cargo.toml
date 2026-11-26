@@ -1,0 +1,15 @@
+[package]
+name = "libertum-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+# Decoding only (MPL-2.0; see docs/third-party-licences.md). No output backend is used: the
+# usual ones (cpal, miniaudio) need system headers or libclang to build.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "ogg", "vorbis", "flac", "wav", "pcm", "isomp4", "aac"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

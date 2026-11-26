@@ -1,6 +1,8 @@
 //! The right-hand inspector: Format (Style, Layout, More) or Document (Document, Section).
 
 pub mod bookmarks;
+pub mod characters;
+pub mod checklist;
 pub mod document;
 pub mod format;
 pub mod headers;
@@ -8,7 +10,7 @@ pub mod notes;
 
 use bookmarks::BookmarkEntry;
 use headers::HeadingEntry;
-use notes::NoteEntry;
+use notes::NotesPane;
 
 use iced::widget::{column, container, row, scrollable, space};
 use iced::{Border, Element, Length};
@@ -26,7 +28,7 @@ pub fn view<'a>(
     state: &'a AppState,
     headings: &'a [HeadingEntry],
     collapsed_headings: &'a std::collections::HashSet<libertum_model::BlockId>,
-    notes: &'a [NoteEntry],
+    notes: NotesPane<'a>,
     bookmarks: &'a [BookmarkEntry],
     draft: Option<(libertum_model::BlockId, usize, &'a str)>,
     t: Tokens,
@@ -40,9 +42,9 @@ pub fn view<'a>(
         Inspector::Document => (document::header(state, t), document::body(state, t)),
         Inspector::Headers => (
             headers::header(t),
-            headers::body(headings, collapsed_headings, t),
+            headers::body(headings, collapsed_headings, state.sidebar_width, t),
         ),
-        Inspector::Notes => (notes::header(t), notes::body(notes, t)),
+        Inspector::Notes => (notes::header(notes.tab, t), notes::body(notes, t)),
         Inspector::Bookmarks => (bookmarks::header(t), bookmarks::body(bookmarks, draft, t)),
     };
     let scroll = scrollable(body)
